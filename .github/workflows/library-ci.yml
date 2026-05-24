@@ -1,0 +1,38 @@
+# Placeholder CI for the loft-libs-graphics chunk.  Pending the
+# canonical green-by-default `library-ci.yml` template
+# (loft-libs-core task #61).  Will be replaced verbatim once that
+# template ships.
+
+name: library-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - shapes
+          - gridmesh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install loft (build from source)
+        run: |
+          git clone --depth=1 https://github.com/jjstwerff/loft.git /tmp/loft
+          (cd /tmp/loft && cargo build --release)
+          echo "/tmp/loft/target/release" >> $GITHUB_PATH
+
+      - name: Interpreter — loft test
+        working-directory: ${{ matrix.package }}
+        run: loft test
+
+      - name: Native — loft --native test
+        working-directory: ${{ matrix.package }}
+        run: loft --native test
