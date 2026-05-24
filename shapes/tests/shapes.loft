@@ -1,41 +1,9 @@
 // Copyright (c) 2026 Jurjen Stellingwerff
 // SPDX-License-Identifier: LGPL-3.0-or-later
-// Tests for the shapes library — also validates PKG.3 transitive deps.
+// Tests for the shapes library — pure-geometry collision detection.
+// Drawing tests (bordered_rect / diamond / etc.) live in the
+// graphics library now.
 use shapes;
-use graphics;
-
-fn test_bordered_rect() {
-  cv = graphics::canvas(20, 20, 0);
-  fill = graphics::rgb(0, 0, 255);
-  border = graphics::rgb(255, 0, 0);
-  shapes::bordered_rect(cv, 2, 2, 10, 8, fill, border);
-  // Interior should be fill color
-  assert(cv.get_pixel(5, 5) == fill, "interior is fill");
-  // Border should be border color (overwrites fill)
-  assert(cv.get_pixel(2, 2) == border, "corner is border");
-  assert(cv.get_pixel(11, 2) == border, "right edge is border");
-}
-
-fn test_bordered_circle() {
-  cv2 = graphics::canvas(30, 30, 0);
-  fc = graphics::rgb(0, 255, 0);
-  bc = graphics::rgb(255, 255, 0);
-  shapes::bordered_circle(cv2, 15, 15, 5, fc, bc);
-  // Center should be fill
-  assert(cv2.get_pixel(15, 15) == fc, "circle center is fill");
-}
-
-fn test_diamond() {
-  cv3 = graphics::canvas(20, 20, 0);
-  dc = graphics::rgb(255, 128, 0);
-  shapes::diamond(cv3, 10, 10, 4, dc);
-  // Top point
-  assert(cv3.get_pixel(10, 6) == dc, "diamond top");
-  // Right point
-  assert(cv3.get_pixel(14, 10) == dc, "diamond right");
-  // Center should be empty (outline only)
-  assert(cv3.get_pixel(10, 10) == 0, "diamond center empty");
-}
 
 // ── G4: Collision detection tests ───────────────────────────────────
 
@@ -82,4 +50,17 @@ fn test_rect_overlap_depth() {
   od_c = shapes::Rect { rx: 20.0, ry: 20.0, rw: 5.0, rh: 5.0 };
   od2 = shapes::rect_overlap_depth(od_a, od_c);
   assert(od2.ox == 0.0 && od2.oy == 0.0, "no overlap returns zero");
+}
+
+fn test_aabb_overlap() {
+  assert(shapes::aabb_overlap(0.0, 0.0, 10.0, 10.0, 5.0, 5.0, 10.0, 10.0),
+         "overlapping aabbs");
+  assert(!shapes::aabb_overlap(0.0, 0.0, 10.0, 10.0, 20.0, 20.0, 5.0, 5.0),
+         "non-overlapping aabbs");
+}
+
+fn test_clamp() {
+  assert(shapes::clamp(5.0, 0.0, 10.0) == 5.0, "in-range clamp");
+  assert(shapes::clamp(-1.0, 0.0, 10.0) == 0.0, "below-range clamp");
+  assert(shapes::clamp(15.0, 0.0, 10.0) == 10.0, "above-range clamp");
 }
