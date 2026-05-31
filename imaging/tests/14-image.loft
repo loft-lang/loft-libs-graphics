@@ -1,0 +1,87 @@
+// Copyright (c) 2024-2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// @NAME: Image
+// @TITLE: Reading and examining PNG files
+// Loft can load PNG files and access every pixel. Loading takes one function
+// call; after that you can read dimensions, iterate pixels, and examine
+// individual channels.
+// ## Loading an Image
+//
+// Call `file(path).png()` to load a PNG into memory.
+// The entire file is decoded at this point — width, height, and a flat
+// vector of Pixel records are all available immediately.
+// ## Dimensions and Name
+//
+// `img.width` and `img.height` give the pixel dimensions.
+// `img.name` is the file name without the directory path.
+// ## The Pixel Struct
+//
+// Each element of `img.data` is a `Pixel` with three fields:
+//   r: integer limit(0, 255) not null — red channel
+//   g: integer limit(0, 255) not null — green channel
+//   b: integer limit(0, 255) not null — blue channel
+// Values range from 0 (no intensity) to 255 (full intensity).
+// ## Pixel Access
+//
+// `img.data` is a `vector<Pixel>`. Access by coordinate:
+//   img.data[y * img.width + x]
+// Iterate with a for loop to scan every pixel.
+// ## Error Handling
+//
+// `png()` returns null when the file does not exist or cannot be decoded.
+// Always check `!img` or `img == null` before accessing fields.
+use imaging;
+
+fn main() {
+  // ## Loading an Image
+  img = file("tests/map.png").png();
+  assert(img.width == 256, "width={img.width}");
+  assert(img.height == 256, "height={img.height}");
+  assert(img.name == "map.png", "name={img.name}");
+
+  // ## Pixel Count
+  // Total pixels = width * height.
+  assert(img.data.len() == img.width * img.height, "pixel count");
+
+  // ## Reading Individual Pixels
+  // The top-left pixel is at index 0.
+  px = img.data[0];
+  assert(px.r >= 0 and px.r <= 255, "r in range");
+  assert(px.g >= 0 and px.g <= 255, "g in range");
+  assert(px.b >= 0 and px.b <= 255, "b in range");
+
+  // Read a pixel at (x=128, y=128) — the center.
+  center = img.data[128 * img.width + 128] ?? Pixel{r: 0, g: 0, b: 0};
+  assert(center.r >= 0, "center pixel r valid");
+
+  // ## Scanning Pixels
+  // Count pixels brighter than a threshold.  A simple brightness
+  // approximation: (r + g + b) / 3 > threshold.
+  bright_count = 0;
+  for img_px in img.data {
+    brightness = (img_px.r + img_px.g + img_px.b) / 3;
+    if brightness > 200 {
+      bright_count += 1;
+    }
+  }
+  assert(bright_count >= 0, "bright pixel count: {bright_count}");
+
+  // ## Finding Dominant Channel
+  // Walk every pixel and find which channel has the highest total value.
+  total_r = 0;
+  total_g = 0;
+  total_b = 0;
+  for ch_px in img.data {
+    total_r += ch_px.r as integer;
+    total_g += ch_px.g as integer;
+    total_b += ch_px.b as integer;
+  }
+  dominant = if total_r >= total_g and total_r >= total_b { "red" }
+    else if total_g >= total_b { "green" }
+    else { "blue" };
+  assert(dominant.len() > 0, "dominant channel: {dominant}");
+
+  // ## Error Handling
+  bad = file("no_such_image.png").png();
+  assert(bad == null, "png of missing file is null");
+}
