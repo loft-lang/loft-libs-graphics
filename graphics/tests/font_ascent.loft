@@ -5,7 +5,9 @@
 use graphics;
 
 fn test_font_ascent_is_positive_and_scales() {
-  f = graphics::gl_load_font("examples/DejaVuSans-Bold.ttf");
+  // #255: path is program-relative (resolved against this test file's dir);
+  // the bundled font lives at the package root's examples/ → "../examples/".
+  f = graphics::gl_load_font("../examples/DejaVuSans-Bold.ttf");
   // Skip gracefully if the bundled font can't be found in this run dir
   // (keeps the package suite green where the cwd differs).
   if f >= 0 {

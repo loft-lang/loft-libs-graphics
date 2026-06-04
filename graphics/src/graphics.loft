@@ -1036,9 +1036,27 @@ pub fn gl_event_touch_id() -> integer;
 
 // --- Text rendering (GL3) ---
 
-// Load a font from a file path. Returns a font handle (>= 0) or null on error.
-pub fn gl_load_font(path: text) -> integer;
+// Native font loader — reads `path` straight from the filesystem (relative to
+// the process cwd).  Use the `gl_load_font` wrapper below, which resolves the
+// path program-relative first.
+fn gl_load_font_raw(path: text) -> integer;
 #native "loft_gl_load_font"
+
+// Load a font from a file path. Returns a font handle (>= 0) or null on error.
+//
+// #255: a RELATIVE path resolves against the program's OWN directory
+// (`source_dir()` — the source dir under `--interpret`, the executable's dir
+// under `--native`), so a bundled font travels with the program and loads
+// regardless of the launch directory (the symptom #255 hit: a font addressed
+// relative to the source missed under `--native`, which runs from a temp dir,
+// and text rendered invisible).  An ABSOLUTE path is used verbatim.  This
+// matches loft's program-relative file-I/O default (`file()` / `read_file`).
+pub fn gl_load_font(path: text) -> integer {
+  if path.starts_with("/") { return gl_load_font_raw(path); }
+  dir = source_dir();
+  if dir == "" { return gl_load_font_raw(path); }
+  return gl_load_font_raw("{dir}/{path}");
+}
 
 // Measure text width in pixels at the given font size.
 pub fn gl_measure_text(font: integer, content: text, size: float) -> float;
