@@ -895,11 +895,15 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "loft-ffi"
-version = "0.1.0"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61e45e81ba68f02881cfa9a5213e68ca114181f1d63eb180da57c2964d7264e6"
 
 [[package]]
 name = "loft-ffi-macros"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "deeac759c970178210c098c0a08b45e6b3494d6f88bec6e03cb0e77a9f3a0411"
 dependencies = [
  "proc-macro2",
  "quote",
