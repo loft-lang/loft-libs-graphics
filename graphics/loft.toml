@@ -1,6 +1,6 @@
 [package]
 name = "graphics"
-version = "0.1.1"
+version = "0.2.0"
 loft = ">=0.8"
 
 [library]
@@ -9,3 +9,5 @@ native = "loft_graphics_native"
 
 [native]
 crate = "loft-graphics-native"
+runtime-libs = "libGL.so.1, libasound.so.2"
+build-deps = "libgl-dev, libasound2-dev"

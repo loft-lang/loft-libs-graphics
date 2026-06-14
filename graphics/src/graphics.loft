@@ -631,9 +631,17 @@ pub fn gl_set_uniform_float(program: integer, name: text, val: float);
 pub fn gl_set_uniform_int(program: integer, name: text, val: integer);
 #native "loft_gl_set_uniform_int"
 
+// Set a vec2 uniform (e.g. screen size, texel size, a 2D offset).
+pub fn gl_set_uniform_vec2(program: integer, name: text, x: float, y: float);
+#native "loft_gl_set_uniform_vec2"
+
 // Set a vec3 uniform (e.g. light position, color).
 pub fn gl_set_uniform_vec3(program: integer, name: text, x: float, y: float, z: float);
 #native "loft_gl_set_uniform_vec3"
+
+// Set a vec4 uniform (e.g. an RGBA color, a rect x/y/w/h).
+pub fn gl_set_uniform_vec4(program: integer, name: text, x: float, y: float, z: float, w: float);
+#native "loft_gl_set_uniform_vec4"
 
 // --- GL state ---
 
@@ -641,8 +649,9 @@ pub fn gl_set_uniform_vec3(program: integer, name: text, x: float, y: float, z: 
 GL_DEPTH_TEST = 1;
 GL_BLEND = 2;
 GL_CULL_FACE = 3;
+GL_SCISSOR_TEST = 4;
 
-// Enable a GL capability (use GL_DEPTH_TEST, GL_BLEND, GL_CULL_FACE constants).
+// Enable a GL capability (GL_DEPTH_TEST, GL_BLEND, GL_CULL_FACE, GL_SCISSOR_TEST).
 pub fn gl_enable(cap: integer);
 #native "loft_gl_enable"
 
@@ -673,6 +682,12 @@ pub fn gl_depth_mask(write: boolean);
 // Set the viewport rectangle (used for FBO render passes).
 pub fn gl_viewport(x: integer, y: integer, w: integer, h: integer);
 #native "loft_gl_viewport"
+
+// Set the scissor box — clips rendering to this rect (origin bottom-left, like
+// the viewport). Takes effect only while gl_enable(GL_SCISSOR_TEST) is set; use
+// it for partial-damage redraw (re-render just a changed region).
+pub fn gl_scissor(x: integer, y: integer, w: integer, h: integer);
+#native "loft_gl_scissor"
 
 // --- Framebuffer objects ---
 
