@@ -548,6 +548,30 @@ pub fn gl_draw(vao: integer, vertex_count: integer);
 pub fn gl_upload_vertices(data: vector<single>, stride: integer) -> integer;
 #native "loft_gl_upload_vertices"
 
+// ── Instanced rendering ───────────────────────────────────────────────────
+// Draw one base mesh many times in a single call, each instance pulling
+// per-instance attributes from a SECOND buffer. The contract: vertex
+// attributes occupy locations 0-4 (per-vertex, divisor 0, via gl_upload_*);
+// instance attributes occupy locations >=5 (divisor 1). The CALLER owns the
+// instance layout (component count + stride + offset, in floats) and must
+// match the shader's `layout(location=N)` — explicit, so no heuristic.
+
+// Upload per-instance data to a DYNAMIC_DRAW buffer. Returns the VBO handle
+// (pass it to gl_instance_attrib). DYNAMIC because instances change per frame.
+pub fn gl_upload_instance_buffer(data: vector<single>) -> integer;
+#native "loft_gl_upload_instance_buffer"
+
+// Bind instance VBO `ivbo`'s field to attribute `location` on `vao`, advancing
+// once per INSTANCE (VertexAttribDivisor=1). components = floats in the field
+// (2=vec2, 4=vec4); stride_floats = floats per instance record; offset_floats =
+// this field's start within the record. Use locations >=5 to clear the vertex attrs.
+pub fn gl_instance_attrib(vao: integer, ivbo: integer, location: integer, components: integer, stride_floats: integer, offset_floats: integer);
+#native "loft_gl_instance_attrib"
+
+// Draw vertex_count vertices of `vao` as triangles, instance_count times.
+pub fn gl_draw_instanced(vao: integer, vertex_count: integer, instance_count: integer);
+#native "loft_gl_draw_instanced"
+
 // ── Per-group VBO set — a reusable multi-VBO renderer ─────────────────────
 //
 // A `GroupVboSet` keeps one independently-uploadable VBO per "group" (keyed by

@@ -506,6 +506,89 @@ pub extern "C" fn loft_gl_draw(vao: i64, n_vertices: i64) {
     }
 }
 
+// ── Instanced rendering ─────────────────────────────────────────────────────
+// One base mesh drawn N times; per-instance attrs come from a second VBO at
+// locations >=5 with VertexAttribDivisor=1. The caller owns the instance layout.
+
+/// Upload `count` f32s into a fresh DYNAMIC_DRAW VBO; return its handle.
+unsafe fn upload_instance_vbo(data_ptr: *const f32, count: u32) -> u32 {
+    let mut vbo = 0u32;
+    unsafe {
+        gl::GenBuffers(1, &mut vbo);
+        gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+        gl::BufferData(
+            gl::ARRAY_BUFFER,
+            (count * 4) as isize,
+            data_ptr.cast(),
+            gl::DYNAMIC_DRAW,
+        );
+        gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+    }
+    vbo
+}
+
+/// Interpreter path (store-aware): upload vector<single> as an instance VBO.
+#[loft_native]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn n_gl_upload_instance_buffer(
+    store: loft_ffi::LoftStore,
+    data: loft_ffi::LoftRef,
+) -> i64 {
+    gl_guard!(0);
+    let count = unsafe { store.vector_len(&data) };
+    let data_ptr = unsafe { store.vector_data_ptr(&data) } as *const f32;
+    unsafe { upload_instance_vbo(data_ptr, count) as i64 }
+}
+
+/// Native path (raw pointer): upload an instance VBO from a raw f32 pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loft_gl_upload_instance_buffer(data_ptr: *const f32, count: u32) -> i64 {
+    gl_guard!(0);
+    unsafe { upload_instance_vbo(data_ptr, count) as i64 }
+}
+
+/// Bind an instance VBO field to vertex attribute `location` with divisor 1.
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_instance_attrib(
+    vao: i64,
+    ivbo: i64,
+    location: i64,
+    components: i64,
+    stride_floats: i64,
+    offset_floats: i64,
+) {
+    gl_guard!();
+    unsafe {
+        gl::BindVertexArray(vao as u32);
+        gl::BindBuffer(gl::ARRAY_BUFFER, ivbo as u32);
+        gl::VertexAttribPointer(
+            location as u32,
+            components as i32,
+            gl::FLOAT,
+            gl::FALSE,
+            (stride_floats * 4) as i32,
+            (offset_floats * 4) as *const _,
+        );
+        gl::EnableVertexAttribArray(location as u32);
+        gl::VertexAttribDivisor(location as u32, 1);
+        gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+        gl::BindVertexArray(0);
+    }
+}
+
+/// Draw `vao` instanced: vertex_count verts as triangles, instance_count times.
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_draw_instanced(vao: i64, vertex_count: i64, instance_count: i64) {
+    gl_guard!();
+    unsafe {
+        gl::BindVertexArray(vao as u32);
+        gl::DrawArraysInstanced(gl::TRIANGLES, 0, vertex_count as i32, instance_count as i32);
+        gl::BindVertexArray(0);
+    }
+}
+
 // ── Store-aware GL functions (interpreter cdylib path — LoftStore/LoftRef) ───
 //
 // These are called at runtime by the interpreter via dynamic library loading.
@@ -1509,7 +1592,11 @@ loft_ffi::loft_register! {
     loft_gl_measure_text,
     // Interpreter-aware versions (store + ref args instead of raw pointers)
     loft_gl_upload_vertices => n_gl_upload_vertices,
+    loft_gl_upload_instance_buffer => n_gl_upload_instance_buffer,
     loft_gl_set_mat4 => n_gl_set_mat4,
+    // Instanced rendering
+    loft_gl_instance_attrib,
+    loft_gl_draw_instanced,
     // Uniform helpers
     loft_gl_set_uniform_float,
     loft_gl_set_uniform_int,
@@ -1590,6 +1677,9 @@ loft_ffi::loft_register_bridges! {
     // #[loft_native] bridge) — they fall back to the legacy arms.
     "loft_gl_measure_text" => loft_gl_measure_text__loft_bridge,
     "loft_gl_upload_vertices" => n_gl_upload_vertices__loft_bridge,
+    "loft_gl_upload_instance_buffer" => n_gl_upload_instance_buffer__loft_bridge,
+    "loft_gl_instance_attrib" => loft_gl_instance_attrib__loft_bridge,
+    "loft_gl_draw_instanced" => loft_gl_draw_instanced__loft_bridge,
     "loft_gl_set_mat4" => n_gl_set_mat4__loft_bridge,
     "loft_gl_set_uniform_float" => loft_gl_set_uniform_float__loft_bridge,
     "loft_gl_set_uniform_int" => loft_gl_set_uniform_int__loft_bridge,
