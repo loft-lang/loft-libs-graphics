@@ -37,12 +37,21 @@ jobs:
         # loft-libs-core  → arguments, random, crypto
         # loft-libs-net   → web, server, game_protocol
         # loft-libs-graphics → graphics, imaging, gridmesh, shapes
-        package: [shapes, gridmesh]
+        package: [shapes, gridmesh, graphics, imaging]
     steps:
       - uses: actions/checkout@v4
 
       - name: Install mold (loft's pinned linker)
         run: sudo apt-get update -y && sudo apt-get install -y mold
+
+      # graphics' native crate links GL (glutin/gl), windowing (winit), and
+      # ALSA (rodio) — its [native] build-deps. imaging is pure-Rust (png) and
+      # shapes/gridmesh are pure-loft, so only graphics needs system dev libs.
+      # Tests are headless (gl_guard no-ops without a context; headless_safety.rs
+      # asserts it), so no Xvfb is needed — only the build/link headers.
+      - name: Install graphics native build deps
+        if: matrix.package == 'graphics'
+        run: sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev libwayland-dev libasound2-dev
 
       - name: Clone loft source
         uses: actions/checkout@v4
