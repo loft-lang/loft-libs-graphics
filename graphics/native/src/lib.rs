@@ -661,6 +661,26 @@ pub extern "C" fn loft_gl_set_uniform_int(
 
 #[loft_native]
 #[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_set_uniform_vec2(
+    program: i64,
+    name_ptr: *const u8,
+    name_len: usize,
+    x: f64,
+    y: f64,
+) {
+    gl_guard!();
+    let name = unsafe { loft_ffi::text(name_ptr, name_len) };
+    let c_name = std::ffi::CString::new(name).unwrap_or_default();
+    unsafe {
+        let loc = gl::GetUniformLocation(program as u32, c_name.as_ptr());
+        if loc >= 0 {
+            gl::Uniform2f(loc, x as f32, y as f32);
+        }
+    }
+}
+
+#[loft_native]
+#[unsafe(no_mangle)]
 pub extern "C" fn loft_gl_set_uniform_vec3(
     program: i64,
     name_ptr: *const u8,
@@ -680,6 +700,28 @@ pub extern "C" fn loft_gl_set_uniform_vec3(
     }
 }
 
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_set_uniform_vec4(
+    program: i64,
+    name_ptr: *const u8,
+    name_len: usize,
+    x: f64,
+    y: f64,
+    z: f64,
+    w: f64,
+) {
+    gl_guard!();
+    let name = unsafe { loft_ffi::text(name_ptr, name_len) };
+    let c_name = std::ffi::CString::new(name).unwrap_or_default();
+    unsafe {
+        let loc = gl::GetUniformLocation(program as u32, c_name.as_ptr());
+        if loc >= 0 {
+            gl::Uniform4f(loc, x as f32, y as f32, z as f32, w as f32);
+        }
+    }
+}
+
 // ── GL state management ───────────────────────────────────────────────
 
 #[loft_native]
@@ -690,6 +732,7 @@ pub extern "C" fn loft_gl_enable(cap: i64) {
         1 => gl::DEPTH_TEST,
         2 => gl::BLEND,
         3 => gl::CULL_FACE,
+        4 => gl::SCISSOR_TEST,
         _ => return,
     };
     unsafe {
@@ -705,6 +748,7 @@ pub extern "C" fn loft_gl_disable(cap: i64) {
         1 => gl::DEPTH_TEST,
         2 => gl::BLEND,
         3 => gl::CULL_FACE,
+        4 => gl::SCISSOR_TEST,
         _ => return,
     };
     unsafe {
@@ -757,6 +801,17 @@ pub extern "C" fn loft_gl_viewport(x: i64, y: i64, w: i64, h: i64) {
     gl_guard!();
     unsafe {
         gl::Viewport(x as i32, y as i32, w as i32, h as i32);
+    }
+}
+
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_scissor(x: i64, y: i64, w: i64, h: i64) {
+    // Set the scissor box (clips rendering to this rect). Enable with
+    // gl_enable(GL_SCISSOR_TEST) for it to take effect; disable to restore.
+    gl_guard!();
+    unsafe {
+        gl::Scissor(x as i32, y as i32, w as i32, h as i32);
     }
 }
 
@@ -1458,7 +1513,9 @@ loft_ffi::loft_register! {
     // Uniform helpers
     loft_gl_set_uniform_float,
     loft_gl_set_uniform_int,
+    loft_gl_set_uniform_vec2,
     loft_gl_set_uniform_vec3,
+    loft_gl_set_uniform_vec4,
     // GL state
     loft_gl_enable,
     loft_gl_disable,
@@ -1466,6 +1523,7 @@ loft_ffi::loft_register! {
     loft_gl_cull_face,
     loft_gl_depth_mask,
     loft_gl_viewport,
+    loft_gl_scissor,
     // Framebuffer objects
     loft_gl_create_framebuffer,
     loft_gl_bind_framebuffer,
@@ -1535,13 +1593,16 @@ loft_ffi::loft_register_bridges! {
     "loft_gl_set_mat4" => n_gl_set_mat4__loft_bridge,
     "loft_gl_set_uniform_float" => loft_gl_set_uniform_float__loft_bridge,
     "loft_gl_set_uniform_int" => loft_gl_set_uniform_int__loft_bridge,
+    "loft_gl_set_uniform_vec2" => loft_gl_set_uniform_vec2__loft_bridge,
     "loft_gl_set_uniform_vec3" => loft_gl_set_uniform_vec3__loft_bridge,
+    "loft_gl_set_uniform_vec4" => loft_gl_set_uniform_vec4__loft_bridge,
     "loft_gl_enable" => loft_gl_enable__loft_bridge,
     "loft_gl_disable" => loft_gl_disable__loft_bridge,
     "loft_gl_blend_func" => loft_gl_blend_func__loft_bridge,
     "loft_gl_cull_face" => loft_gl_cull_face__loft_bridge,
     "loft_gl_depth_mask" => loft_gl_depth_mask__loft_bridge,
     "loft_gl_viewport" => loft_gl_viewport__loft_bridge,
+    "loft_gl_scissor" => loft_gl_scissor__loft_bridge,
     "loft_gl_create_framebuffer" => loft_gl_create_framebuffer__loft_bridge,
     "loft_gl_bind_framebuffer" => loft_gl_bind_framebuffer__loft_bridge,
     "loft_gl_framebuffer_texture" => loft_gl_framebuffer_texture__loft_bridge,
