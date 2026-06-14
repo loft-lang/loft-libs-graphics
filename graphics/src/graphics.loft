@@ -572,6 +572,19 @@ pub fn gl_instance_attrib(vao: integer, ivbo: integer, location: integer, compon
 pub fn gl_draw_instanced(vao: integer, vertex_count: integer, instance_count: integer);
 #native "loft_gl_draw_instanced"
 
+// ── Dynamic buffer update + index buffers ─────────────────────────────────
+
+// Orphan + re-upload an existing VBO (returned by gl_upload_vertices /
+// gl_upload_instance_buffer) with new data, DYNAMIC_DRAW — per-frame updates
+// without recreating the buffer.
+pub fn gl_update_buffer(vbo: integer, data: vector<single>);
+#native "loft_gl_update_buffer"
+
+// Upload triangle indices as an element (index) buffer bound to `vao`, so
+// gl_draw_elements(vao, index_count, mode) draws indexed. Returns the EBO handle.
+pub fn gl_upload_indices(vao: integer, data: vector<integer>) -> integer;
+#native "loft_gl_upload_indices"
+
 // ── Per-group VBO set — a reusable multi-VBO renderer ─────────────────────
 //
 // A `GroupVboSet` keeps one independently-uploadable VBO per "group" (keyed by
@@ -734,6 +747,20 @@ pub fn gl_create_depth_texture(width: integer, height: integer) -> integer;
 // Create an empty RGBA texture for render-to-texture.
 pub fn gl_create_color_texture(width: integer, height: integer) -> integer;
 #native "loft_gl_create_color_texture"
+
+// Set a texture's filtering: nearest = crisp pixel-art, else linear/smooth.
+pub fn gl_texture_filter(tex: integer, nearest: boolean);
+#native "loft_gl_texture_filter"
+
+// Generate mipmaps + trilinear minification for `tex` (after its pixels are
+// uploaded) — keeps minified sprites / atlas pages clean.
+pub fn gl_generate_mipmap(tex: integer);
+#native "loft_gl_generate_mipmap"
+
+// Upload a sub-region of RGBA pixels (Canvas data, 0xAARRGGBB) into an existing
+// texture at (x,y) sized w*h — incremental atlas packing without re-uploading.
+pub fn gl_texture_subimage(tex: integer, x: integer, y: integer, w: integer, h: integer, data: vector<integer>);
+#native "loft_gl_texture_subimage"
 
 // Draw a fullscreen quad (for post-processing). Uses built-in VAO with UV coords.
 // Vertex shader receives: layout(location=0) vec2 aPos, layout(location=1) vec2 aUV.
