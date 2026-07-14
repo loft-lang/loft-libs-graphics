@@ -2026,7 +2026,7 @@ pub unsafe extern "C" fn n_save_png(
 ) -> bool {
     let count = unsafe { store.vector_len(&data) };
     let data_ptr = unsafe { store.vector_data_ptr(&data) } as *const i64;
-    unsafe { loft_save_png(path_ptr, path_len, width, height, data_ptr, count) }
+    loft_save_png(path_ptr, path_len, width, height, data_ptr, count)
 }
 
 #[loft_native]
@@ -2041,7 +2041,7 @@ pub unsafe extern "C" fn n_rasterize_text_into(
 ) -> i64 {
     let count = unsafe { store.vector_len(&buf) };
     let buf_ptr = unsafe { store.vector_data_ptr(&buf) } as *const i64;
-    unsafe { loft_rasterize_text_into(font_idx, text_ptr, text_len, size, buf_ptr, count) }
+    loft_rasterize_text_into(font_idx, text_ptr, text_len, size, buf_ptr, count)
 }
 
 /// Return the line height in pixels for a font at the given size — fontdue's

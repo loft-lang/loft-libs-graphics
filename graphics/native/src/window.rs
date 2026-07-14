@@ -41,7 +41,19 @@ fn create_gl_state_with_attrs(
     initial_viewport: Option<(u32, u32)>,
     fullscreen: bool,
 ) -> Result<GlState, String> {
-    let event_loop = EventLoop::new().map_err(|e| format!("EventLoop: {e}"))?;
+    // `EventLoop::new()` panics off the main thread ("Initializing the event loop
+    // outside of the main thread…"), and loft `--native` runs the loft program on
+    // a worker thread. On Linux (X11/Wayland) opt into the any-thread event loop so
+    // `gl_create_window` works under --native, not only `--interpret`.
+    let event_loop = {
+        let mut builder = EventLoop::builder();
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
+        {
+            use winit::platform::x11::EventLoopBuilderExtX11;
+            builder.with_any_thread(true);
+        }
+        builder.build().map_err(|e| format!("EventLoop: {e}"))?
+    };
 
     // Open fullscreen on the default monitor first; a specific monitor is
     // selected after creation (winit 0.30 exposes monitor enumeration on the
