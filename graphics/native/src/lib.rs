@@ -2007,8 +2007,42 @@ pub unsafe extern "C" fn n_gl_upload_canvas(
     let data_ptr = unsafe { store.vector_data_ptr(&data) } as *const i64;
     loft_gl_upload_canvas(data_ptr, count, width, height)
 }
-loft_ffi::vec_wrapper!(n_save_png, loft_save_png(path_ptr: *const u8, path_len: usize, width: i64, height: i64, data: vec<i64>) -> bool);
-loft_ffi::vec_wrapper!(n_rasterize_text_into, loft_rasterize_text_into(font_idx: i64, text_ptr: *const u8, text_len: usize, size: f64, buf: vec<i64>) -> i64);
+// Interpreter bridge wrappers for the two vector-arg PNG/text natives. Like
+// `n_gl_upload_canvas` (and unlike the old `vec_wrapper!` form), these are
+// `#[loft_native]` so they get a `loft_register_bridges!` entry — without which
+// the interpreter's bridge dispatch panics ("no marshal bridge"). Extracting the
+// vector via LoftStore/LoftRef also reads the LIVE length + ptr, fixing the stale
+// snapshot that made the `vec_wrapper!` `save_png` return false under `--native`
+// (same #120 store-lifecycle reason `gl_upload_canvas` already uses this form).
+#[loft_native]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn n_save_png(
+    store: loft_ffi::LoftStore,
+    path_ptr: *const u8,
+    path_len: usize,
+    width: i64,
+    height: i64,
+    data: loft_ffi::LoftRef,
+) -> bool {
+    let count = unsafe { store.vector_len(&data) };
+    let data_ptr = unsafe { store.vector_data_ptr(&data) } as *const i64;
+    unsafe { loft_save_png(path_ptr, path_len, width, height, data_ptr, count) }
+}
+
+#[loft_native]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn n_rasterize_text_into(
+    store: loft_ffi::LoftStore,
+    font_idx: i64,
+    text_ptr: *const u8,
+    text_len: usize,
+    size: f64,
+    buf: loft_ffi::LoftRef,
+) -> i64 {
+    let count = unsafe { store.vector_len(&buf) };
+    let buf_ptr = unsafe { store.vector_data_ptr(&buf) } as *const i64;
+    unsafe { loft_rasterize_text_into(font_idx, text_ptr, text_len, size, buf_ptr, count) }
+}
 
 /// Return the line height in pixels for a font at the given size — fontdue's
 /// real `new_line_size` (@P340/#252), falling back to `size * 1.2` for a font
@@ -2205,8 +2239,8 @@ loft_ffi::loft_register_bridges! {
     "loft_gl_load_font" => loft_gl_load_font__loft_bridge,
     "loft_text_height" => loft_text_height__loft_bridge,
     "loft_gl_font_ascent" => loft_gl_font_ascent__loft_bridge,
-    // loft_rasterize_text_into / loft_save_png use vec_wrapper! (no
-    // #[loft_native] bridge) — they fall back to the legacy arms.
+    "loft_rasterize_text_into" => n_rasterize_text_into__loft_bridge,
+    "loft_save_png" => n_save_png__loft_bridge,
     "loft_gl_measure_text" => loft_gl_measure_text__loft_bridge,
     "loft_gl_upload_vertices" => n_gl_upload_vertices__loft_bridge,
     "loft_gl_upload_instance_buffer" => n_gl_upload_instance_buffer__loft_bridge,
