@@ -111,6 +111,97 @@ thread_local! {
     static PENDING_RESIZE: std::cell::Cell<Option<(u32, u32)>> = const { std::cell::Cell::new(None) };
 }
 
+// ── Ordered input-event queue (Gap 01) ─────────────────────────────────
+//
+// The polling API above (gl_key_pressed / gl_mouse_*) loses text, key-repeat,
+// per-event modifiers, and event ORDER.  This queue delivers every host input
+// as an ordered event a loft program drains with gl_next_event + gl_event_*.
+//
+// Invariant: each host input enqueued during one `gl_poll_events` pump becomes
+// exactly one loft event, drained in FIFO order, exactly once, with its fields
+// latched — and RESET on every next_event so no field leaks across events —
+// emptying to EV_NONE.  Every winit arm routes through the one `enqueue`; the
+// one latch site (`next_event`) is the only place `CUR` is written.
+//
+// Event type tags — mirror the EV_* constants in src/graphics.loft.
+const EV_NONE: i64 = 0;
+const EV_KEY_DOWN: i64 = 1;
+const EV_KEY_UP: i64 = 2;
+const EV_TEXT: i64 = 3;
+const EV_MOUSE_DOWN: i64 = 4;
+const EV_MOUSE_UP: i64 = 5;
+const EV_MOUSE_MOVE: i64 = 6;
+const EV_WHEEL: i64 = 7;
+const EV_TOUCH_BEGIN: i64 = 8;
+const EV_TOUCH_MOVE: i64 = 9;
+const EV_TOUCH_END: i64 = 10;
+const EV_RESIZE: i64 = 11;
+// Modifier bitmask — mirror the MOD_* constants in src/graphics.loft.
+const MOD_SHIFT: i64 = 1;
+const MOD_CTRL: i64 = 2;
+const MOD_ALT: i64 = 4;
+const MOD_SUPER: i64 = 8;
+
+/// One queued input event.  A single enum + a single `enqueue` keep each winit
+/// arm a pure translation, so no arm can silently diverge from the queue.
+#[derive(Clone)]
+enum InEvent {
+    KeyDown { key: i64, mods: i64, repeat: bool },
+    KeyUp { key: i64, mods: i64 },
+    Text(String),
+    MouseDown { button: i64, x: f64, y: f64 },
+    MouseUp { button: i64, x: f64, y: f64 },
+    MouseMove { x: f64, y: f64 },
+    Wheel { delta: i64, x: f64, y: f64 },
+    TouchBegin { id: i64, x: f64, y: f64 },
+    TouchMove { id: i64, x: f64, y: f64 },
+    TouchEnd { id: i64, x: f64, y: f64 },
+    Resize { w: i64, h: i64 },
+}
+
+/// The latched current event — one flat slot, reset on every `next_event` so a
+/// field from a previous event of another kind can never leak through.
+#[derive(Clone)]
+struct CurEvent {
+    tag: i64,
+    key: i64,
+    mods: i64,
+    repeat: bool,
+    text: String,
+    x: f64,
+    y: f64,
+    button: i64,
+    wheel: i64,
+    touch: i64,
+}
+impl CurEvent {
+    const EMPTY: CurEvent = CurEvent {
+        tag: EV_NONE,
+        key: 0,
+        mods: 0,
+        repeat: false,
+        text: String::new(),
+        x: 0.0,
+        y: 0.0,
+        button: 0,
+        wheel: 0,
+        touch: 0,
+    };
+}
+
+thread_local! {
+    static EVENTS: RefCell<std::collections::VecDeque<InEvent>> =
+        const { RefCell::new(std::collections::VecDeque::new()) };
+    /// Current modifier bitmask, updated on WindowEvent::ModifiersChanged.
+    static MODS: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+    static CUR: RefCell<CurEvent> = const { RefCell::new(CurEvent::EMPTY) };
+}
+
+/// The single enqueue chokepoint — every winit arm routes here.
+fn enqueue(ev: InEvent) {
+    EVENTS.with(|q| q.borrow_mut().push_back(ev));
+}
+
 // Map winit key codes to a simple 0-255 index.
 fn key_index(key: &winit::keyboard::Key) -> Option<u8> {
     use winit::keyboard::NamedKey;
@@ -150,6 +241,16 @@ fn key_index(key: &winit::keyboard::Key) -> Option<u8> {
             NamedKey::F10 => Some(144),
             NamedKey::F11 => Some(145),
             NamedKey::F12 => Some(146),
+            // Gap 01: named keys a terminal needs (values > F12, no shift of the
+            // existing indices).  Enter/Tab/Escape/Backspace stay on their ASCII
+            // control codes.
+            NamedKey::Backspace => Some(8),
+            NamedKey::Delete => Some(147),
+            NamedKey::Insert => Some(148),
+            NamedKey::Home => Some(149),
+            NamedKey::End => Some(150),
+            NamedKey::PageUp => Some(151),
+            NamedKey::PageDown => Some(152),
             _ => None,
         },
         _ => None,
@@ -165,14 +266,59 @@ impl ApplicationHandler for JsonApp {
     fn window_event(&mut self, _el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => self.should_close = true,
+            WindowEvent::ModifiersChanged(m) => {
+                let s = m.state();
+                let mut bits = 0i64;
+                if s.shift_key() {
+                    bits |= MOD_SHIFT;
+                }
+                if s.control_key() {
+                    bits |= MOD_CTRL;
+                }
+                if s.alt_key() {
+                    bits |= MOD_ALT;
+                }
+                if s.super_key() {
+                    bits |= MOD_SUPER;
+                }
+                MODS.with(|c| c.set(bits));
+            }
             WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(idx) = key_index(&event.logical_key) {
-                    KEYS.with(|k| k.borrow_mut()[idx as usize] = event.state.is_pressed());
+                let code = key_index(&event.logical_key).map(|i| i as i64).unwrap_or(-1);
+                if (0..=255).contains(&code) {
+                    KEYS.with(|k| k.borrow_mut()[code as usize] = event.state.is_pressed());
+                }
+                let mods = MODS.with(|c| c.get());
+                if event.state.is_pressed() {
+                    enqueue(InEvent::KeyDown {
+                        key: code,
+                        mods,
+                        repeat: event.repeat,
+                    });
+                    // A text-producing key also yields an ordered Text event: the
+                    // key-down carries the named key (for Ctrl-C etc.), the text
+                    // carries what was actually typed (shift / unicode).
+                    if let Some(t) = &event.text
+                        && !t.is_empty()
+                    {
+                        enqueue(InEvent::Text(t.to_string()));
+                    }
+                } else {
+                    enqueue(InEvent::KeyUp { key: code, mods });
+                }
+            }
+            WindowEvent::Ime(winit::event::Ime::Commit(s)) => {
+                if !s.is_empty() {
+                    enqueue(InEvent::Text(s));
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 MOUSE_X.with(|c| c.set(position.x));
                 MOUSE_Y.with(|c| c.set(position.y));
+                enqueue(InEvent::MouseMove {
+                    x: position.x,
+                    y: position.y,
+                });
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let bit = match button {
@@ -188,6 +334,21 @@ impl ApplicationHandler for JsonApp {
                         c.set(c.get() & !bit);
                     }
                 });
+                let x = MOUSE_X.with(|c| c.get());
+                let y = MOUSE_Y.with(|c| c.get());
+                if state.is_pressed() {
+                    enqueue(InEvent::MouseDown {
+                        button: bit as i64,
+                        x,
+                        y,
+                    });
+                } else {
+                    enqueue(InEvent::MouseUp {
+                        button: bit as i64,
+                        x,
+                        y,
+                    });
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 use winit::event::MouseScrollDelta;
@@ -200,6 +361,22 @@ impl ApplicationHandler for JsonApp {
                 };
                 if ticks != 0 {
                     WHEEL_ACCUM.with(|c| c.set(c.get() + ticks));
+                    let x = MOUSE_X.with(|c| c.get());
+                    let y = MOUSE_Y.with(|c| c.get());
+                    enqueue(InEvent::Wheel { delta: ticks, x, y });
+                }
+            }
+            WindowEvent::Touch(t) => {
+                use winit::event::TouchPhase;
+                let id = t.id as i64;
+                let x = t.location.x;
+                let y = t.location.y;
+                match t.phase {
+                    TouchPhase::Started => enqueue(InEvent::TouchBegin { id, x, y }),
+                    TouchPhase::Moved => enqueue(InEvent::TouchMove { id, x, y }),
+                    TouchPhase::Ended | TouchPhase::Cancelled => {
+                        enqueue(InEvent::TouchEnd { id, x, y })
+                    }
                 }
             }
             WindowEvent::Resized(size) => {
@@ -207,6 +384,10 @@ impl ApplicationHandler for JsonApp {
                 let h = size.height;
                 if w > 0 && h > 0 {
                     PENDING_RESIZE.with(|c| c.set(Some((w, h))));
+                    enqueue(InEvent::Resize {
+                        w: w as i64,
+                        h: h as i64,
+                    });
                 }
             }
             _ => {}
@@ -1282,6 +1463,150 @@ pub extern "C" fn loft_gl_mouse_wheel() -> i64 {
     })
 }
 
+// ── Ordered input-event queue (Gap 01) ────────────────────────────────
+
+/// Pop the next queued input event and latch it; returns its EV_* tag, or
+/// EV_NONE (0) when the queue is drained.  The single write site for `CUR`:
+/// every field is reset first, so a field from a previous event of another
+/// kind can never leak into the accessors below.
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_next_event() -> i64 {
+    let ev = EVENTS.with(|q| q.borrow_mut().pop_front());
+    let mut cur = CurEvent::EMPTY;
+    match ev {
+        None => cur.tag = EV_NONE,
+        Some(InEvent::KeyDown { key, mods, repeat }) => {
+            cur.tag = EV_KEY_DOWN;
+            cur.key = key;
+            cur.mods = mods;
+            cur.repeat = repeat;
+        }
+        Some(InEvent::KeyUp { key, mods }) => {
+            cur.tag = EV_KEY_UP;
+            cur.key = key;
+            cur.mods = mods;
+        }
+        Some(InEvent::Text(t)) => {
+            cur.tag = EV_TEXT;
+            cur.text = t;
+        }
+        Some(InEvent::MouseDown { button, x, y }) => {
+            cur.tag = EV_MOUSE_DOWN;
+            cur.button = button;
+            cur.x = x;
+            cur.y = y;
+        }
+        Some(InEvent::MouseUp { button, x, y }) => {
+            cur.tag = EV_MOUSE_UP;
+            cur.button = button;
+            cur.x = x;
+            cur.y = y;
+        }
+        Some(InEvent::MouseMove { x, y }) => {
+            cur.tag = EV_MOUSE_MOVE;
+            cur.x = x;
+            cur.y = y;
+        }
+        Some(InEvent::Wheel { delta, x, y }) => {
+            cur.tag = EV_WHEEL;
+            cur.wheel = delta;
+            cur.x = x;
+            cur.y = y;
+        }
+        Some(InEvent::TouchBegin { id, x, y }) => {
+            cur.tag = EV_TOUCH_BEGIN;
+            cur.touch = id;
+            cur.x = x;
+            cur.y = y;
+        }
+        Some(InEvent::TouchMove { id, x, y }) => {
+            cur.tag = EV_TOUCH_MOVE;
+            cur.touch = id;
+            cur.x = x;
+            cur.y = y;
+        }
+        Some(InEvent::TouchEnd { id, x, y }) => {
+            cur.tag = EV_TOUCH_END;
+            cur.touch = id;
+            cur.x = x;
+            cur.y = y;
+        }
+        // Resize reports the new size through x = width, y = height.
+        Some(InEvent::Resize { w, h }) => {
+            cur.tag = EV_RESIZE;
+            cur.x = w as f64;
+            cur.y = h as f64;
+        }
+    }
+    let tag = cur.tag;
+    CUR.with(|c| *c.borrow_mut() = cur);
+    tag
+}
+
+/// Named/keycode of the latched key event (see the KEY_* constants).
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_event_key() -> i64 {
+    CUR.with(|c| c.borrow().key)
+}
+
+/// Modifier bitmask of the latched event (MOD_SHIFT|CTRL|ALT|SUPER).
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_event_mods() -> i64 {
+    CUR.with(|c| c.borrow().mods)
+}
+
+/// True if the latched key-down is an auto-repeat.
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_event_repeat() -> bool {
+    CUR.with(|c| c.borrow().repeat)
+}
+
+/// UTF-8 text of the latched EV_TEXT event (empty otherwise).
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_event_text() -> loft_ffi::LoftStr {
+    CUR.with(|c| loft_ffi::ret_ref(&c.borrow().text))
+}
+
+/// X position (pixels) of the latched mouse/touch event; width for EV_RESIZE.
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_event_x() -> f64 {
+    CUR.with(|c| c.borrow().x)
+}
+
+/// Y position (pixels) of the latched mouse/touch event; height for EV_RESIZE.
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_event_y() -> f64 {
+    CUR.with(|c| c.borrow().y)
+}
+
+/// Button of the latched mouse event (1=left, 2=right, 4=middle).
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_event_button() -> i64 {
+    CUR.with(|c| c.borrow().button)
+}
+
+/// Wheel delta of the latched EV_WHEEL event (positive = up).
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_event_wheel() -> i64 {
+    CUR.with(|c| c.borrow().wheel)
+}
+
+/// Stable finger id of the latched EV_TOUCH_* event.
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_event_touch_id() -> i64 {
+    CUR.with(|c| c.borrow().touch)
+}
+
 // ── Indexed drawing (EBO) ─────────────────────────────────────────────
 
 /// Upload vertex data + index buffer. Returns VAO handle.
@@ -1820,6 +2145,16 @@ loft_ffi::loft_register! {
     loft_gl_mouse_x,
     loft_gl_mouse_y,
     loft_gl_mouse_button,
+    loft_gl_next_event,
+    loft_gl_event_key,
+    loft_gl_event_mods,
+    loft_gl_event_repeat,
+    loft_gl_event_text,
+    loft_gl_event_x,
+    loft_gl_event_y,
+    loft_gl_event_button,
+    loft_gl_event_wheel,
+    loft_gl_event_touch_id,
     // Indexed drawing & draw modes
     loft_gl_draw_elements,
     loft_gl_draw_mode,
@@ -1905,6 +2240,16 @@ loft_ffi::loft_register_bridges! {
     "loft_gl_mouse_x" => loft_gl_mouse_x__loft_bridge,
     "loft_gl_mouse_y" => loft_gl_mouse_y__loft_bridge,
     "loft_gl_mouse_button" => loft_gl_mouse_button__loft_bridge,
+    "loft_gl_next_event" => loft_gl_next_event__loft_bridge,
+    "loft_gl_event_key" => loft_gl_event_key__loft_bridge,
+    "loft_gl_event_mods" => loft_gl_event_mods__loft_bridge,
+    "loft_gl_event_repeat" => loft_gl_event_repeat__loft_bridge,
+    "loft_gl_event_text" => loft_gl_event_text__loft_bridge,
+    "loft_gl_event_x" => loft_gl_event_x__loft_bridge,
+    "loft_gl_event_y" => loft_gl_event_y__loft_bridge,
+    "loft_gl_event_button" => loft_gl_event_button__loft_bridge,
+    "loft_gl_event_wheel" => loft_gl_event_wheel__loft_bridge,
+    "loft_gl_event_touch_id" => loft_gl_event_touch_id__loft_bridge,
     "loft_gl_draw_elements" => loft_gl_draw_elements__loft_bridge,
     "loft_gl_draw_mode" => loft_gl_draw_mode__loft_bridge,
     "loft_gl_delete_shader" => loft_gl_delete_shader__loft_bridge,
@@ -2049,5 +2394,83 @@ pub extern "C" fn loft_gl_delete_texture(texture_id: i64) {
     let texture_id = texture_id as u32;
     unsafe {
         gl::DeleteTextures(1, &texture_id);
+    }
+}
+
+#[cfg(test)]
+mod input_event_tests {
+    use super::*;
+
+    fn text_of(s: loft_ffi::LoftStr) -> String {
+        if s.ptr.is_null() || s.len == 0 {
+            return String::new();
+        }
+        unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(s.ptr, s.len)).to_string()
+        }
+    }
+
+    /// Falsification probe for the Gap 01 invariant: a known event sequence,
+    /// drained through the REAL `next_event` + accessors, must come back in FIFO
+    /// order, exactly once, with fields latched and RESET per event (no
+    /// cross-field leak), then drain to EV_NONE.  Runs on a fresh thread, so the
+    /// thread-local queue starts empty.
+    #[test]
+    fn queue_is_fifo_latched_and_lossless() {
+        enqueue(InEvent::KeyDown {
+            key: 99,
+            mods: MOD_CTRL,
+            repeat: false,
+        }); // Ctrl-c
+        enqueue(InEvent::Text("é".to_string())); // multi-byte, non-ASCII
+        enqueue(InEvent::MouseDown {
+            button: 1,
+            x: 12.0,
+            y: 34.0,
+        });
+        enqueue(InEvent::Wheel {
+            delta: -3,
+            x: 0.0,
+            y: 0.0,
+        });
+
+        // 1 — KeyDown: order + fields.
+        assert_eq!(loft_gl_next_event(), EV_KEY_DOWN);
+        assert_eq!(loft_gl_event_key(), 99);
+        assert_eq!(loft_gl_event_mods(), MOD_CTRL);
+        assert!(!loft_gl_event_repeat());
+
+        // 2 — Text: value survives; key/mods RESET (no stale from the KeyDown).
+        assert_eq!(loft_gl_next_event(), EV_TEXT);
+        assert_eq!(text_of(loft_gl_event_text()), "é");
+        assert_eq!(loft_gl_event_key(), 0, "key leaked across events");
+        assert_eq!(loft_gl_event_mods(), 0, "mods leaked across events");
+
+        // 3 — MouseDown: fields; text RESET.
+        assert_eq!(loft_gl_next_event(), EV_MOUSE_DOWN);
+        assert_eq!(loft_gl_event_button(), 1);
+        assert_eq!(loft_gl_event_x(), 12.0);
+        assert_eq!(loft_gl_event_y(), 34.0);
+        assert_eq!(text_of(loft_gl_event_text()), "", "text leaked across events");
+
+        // 4 — Wheel.
+        assert_eq!(loft_gl_next_event(), EV_WHEEL);
+        assert_eq!(loft_gl_event_wheel(), -3);
+
+        // Drained, and idempotent when empty.
+        assert_eq!(loft_gl_next_event(), EV_NONE);
+        assert_eq!(loft_gl_next_event(), EV_NONE);
+    }
+
+    /// The terminal's named keys resolve to their (non-shifting) codes.
+    #[test]
+    fn named_keys_mapped() {
+        use winit::keyboard::{Key, NamedKey};
+        let backspace: Key = Key::Named(NamedKey::Backspace);
+        let home: Key = Key::Named(NamedKey::Home);
+        let pagedown: Key = Key::Named(NamedKey::PageDown);
+        assert_eq!(key_index(&backspace), Some(8));
+        assert_eq!(key_index(&home), Some(149));
+        assert_eq!(key_index(&pagedown), Some(152));
     }
 }
