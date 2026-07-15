@@ -4,3 +4,8 @@ target/
 .DS_Store
 # `loft test` scratch artifacts (roundtrip PNGs etc.)
 **/tests/_tmp_*
+
+# loft build cache / lockfiles
+.loft/
+loft.lock
+graphics/loft.lock

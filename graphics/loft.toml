@@ -1,6 +1,6 @@
 [package]
 name = "graphics"
-version = "0.4.1"
+version = "0.4.2"
 loft = ">=0.8"
 repository = "loft-libs-graphics"
 
