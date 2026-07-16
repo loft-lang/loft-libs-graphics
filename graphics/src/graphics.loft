@@ -35,16 +35,16 @@ pub fn color_a(color: integer) -> integer {
 // Pixels are stored row-major: data[y * width + x].
 
 pub struct Canvas {
-  width: integer,
-  height: integer,
-  data: vector<integer>
+  const width: integer,
+  const height: integer,
+  const data: vector<integer>
 }
 
 // Create a canvas filled with a solid color.
 pub fn canvas(cw: integer, ch: integer, fill_color: integer) -> Canvas {
-  result = Canvas { width: cw, height: ch };
-  result.data = [for _ in 0..cw * ch { fill_color }];
-  result
+  // Build `data` inside the literal so the const field is set once at
+  // construction (was a post-literal `result.data = …` fill).
+  Canvas { width: cw, height: ch, data: [for _ in 0..cw * ch { fill_color }] }
 }
 
 // Get pixel color at (x, y). Returns 0 if out of bounds.
@@ -601,16 +601,16 @@ pub fn gl_upload_indices(vao: integer, data: vector<integer>) -> integer;
 // moros terrain renderer is the next.  GL calls cannot run headless, so this is
 // validated by those consumers, not a unit test.
 struct GroupVbo {
-  gk:    integer,   // group key (NOT 'key' — reserved in hash-value structs)
-  vao:   integer,
-  count: integer,   // vertices = floats / stride
-  min_x: single, min_z: single, max_x: single, max_z: single,   // world bounds (future cull)
+  const gk:    integer,   // group key (NOT 'key' — reserved in hash-value structs)
+  const vao:   integer,
+  const count: integer,   // vertices = floats / stride
+  const min_x: single, const min_z: single, const max_x: single, const max_z: single,   // world bounds (future cull)
 }
 
 pub struct GroupVboSet {
-  slots:     hash<GroupVbo[gk]>,
-  stride:    integer,   // floats per vertex (e.g. 14 crystal, 10 ground)
-  draw_mode: integer,   // DRAW_TRIANGLES / DRAW_LINES / …
+  slots:     hash<GroupVbo[gk]>,   // not const: reassigned (`set.slots = []`) + grown via `+=`
+  const stride:    integer,   // floats per vertex (e.g. 14 crystal, 10 ground)
+  const draw_mode: integer,   // DRAW_TRIANGLES / DRAW_LINES / …
 }
 
 // Create an empty set for a fixed vertex stride + draw mode.
@@ -1081,13 +1081,13 @@ void main() {{
 /// A sprite sheet backed by a Canvas atlas uploaded as a GL texture.
 /// Sprites are arranged in a grid of `ss_cols` x `ss_rows` cells.
 pub struct SpriteSheet {
-  ss_tex: integer,      // GL texture handle
-  ss_shader: integer,   // textured quad shader
-  ss_vao: integer,      // unit quad VAO (shared)
-  ss_cols: integer,
-  ss_rows: integer,
-  ss_cell_w: integer,
-  ss_cell_h: integer,
+  const ss_tex: integer,      // GL texture handle
+  const ss_shader: integer,   // textured quad shader
+  const ss_vao: integer,      // unit quad VAO (shared)
+  const ss_cols: integer,
+  const ss_rows: integer,
+  const ss_cell_w: integer,
+  const ss_cell_h: integer,
 }
 
 /// Create a sprite sheet from a Canvas atlas.
