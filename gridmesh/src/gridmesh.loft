@@ -111,7 +111,7 @@ pub fn seg_mesh_new() -> SegMesh {
 // and `integer` kind/colour; they are narrowed to the storage width here.
 // `& 255` masks to the low byte (the explicit "narrow to storage width" the
 // current loft requires — a bare `as u8` is rejected as a maybe-overflowing cast).
-pub fn emit_segment(m: &SegMesh, kind: integer,
+pub fn emit_segment(m: SegMesh, kind: integer,
                     x0: float, y0: float, z0: float,
                     x1: float, y1: float, z1: float,
                     color: integer, owner: integer) {
@@ -129,7 +129,7 @@ pub fn seg_len(m: SegMesh) -> integer { len(m.kinds) }
 // arrays).  Used to assemble a render-group mesh from its chunks' CACHED
 // meshes and to concatenate chunk meshes into a full build — order-preserving,
 // so the consumer can rely on a stable per-group draw order.
-pub fn seg_mesh_append(dst: &SegMesh, src: SegMesh) {
+pub fn seg_mesh_append(dst: SegMesh, src: SegMesh) {
   dst.kinds += src.kinds;
   dst.x0s += src.x0s; dst.y0s += src.y0s; dst.z0s += src.z0s;
   dst.x1s += src.x1s; dst.y1s += src.y1s; dst.z1s += src.z1s;
@@ -235,7 +235,7 @@ pub fn field_new(layout: integer, xs: vector<integer>, ys: vector<integer>,
 // mesh reads (x, y) through its halo (i.e. (x, y) is within halo_k of that
 // border).  `+=` dedups by key (@P306), so many edits in one chunk and the
 // overlapping border marks all coalesce to one entry per chunk.
-fn mark_borders(f: &ChunkField, x: integer, y: integer) {
+fn mark_borders(f: ChunkField, x: integer, y: integer) {
   cs = 1 << f.chunk_shift;
   cx = chunk_div(x, cs); cy = chunk_div(y, cs);
   lx = chunk_loc(x, cs); ly = chunk_loc(y, cs);
@@ -256,7 +256,7 @@ fn mark_borders(f: &ChunkField, x: integer, y: integer) {
 // bucket (O(1) amortised), and mark its chunk (+ halo-border neighbours)
 // dirty.  Keeping the bucket current here is what makes collect_dirty_inputs
 // O(dirty) rather than a full re-partition.
-pub fn field_add_cell(f: &ChunkField, x: integer, y: integer) {
+pub fn field_add_cell(f: ChunkField, x: integer, y: integer) {
   ix = len(f.xs);
   f.xs += [x]; f.ys += [y];
   f.cidx += [CellRef{ck: enc_coord(x, y), ix: ix}];
@@ -273,7 +273,7 @@ pub fn field_add_cell(f: &ChunkField, x: integer, y: integer) {
 // without touching the coord arrays or index (the cell stays; only its
 // consumer-side payload — colour/height — changed).  Erase uses
 // field_remove_cell instead (it must also drop the cell from the index).
-pub fn field_mark_dirty(f: &ChunkField, x: integer, y: integer) {
+pub fn field_mark_dirty(f: ChunkField, x: integer, y: integer) {
   mark_borders(f, x, y);
 }
 
@@ -287,7 +287,7 @@ pub fn field_mark_dirty(f: &ChunkField, x: integer, y: integer) {
 // never read again — its index is in no bucket and no longer in cidx — and
 // re-painting the same coord allocates a FRESH index (field_add_cell appends),
 // so identity is never reused.
-pub fn field_remove_cell(f: &ChunkField, x: integer, y: integer) {
+pub fn field_remove_cell(f: ChunkField, x: integer, y: integer) {
   cr = f.cidx[enc_coord(x, y)];
   if cr == null { return; }          // not present — nothing to remove
   ix = cr.ix;
@@ -303,7 +303,7 @@ pub fn field_remove_cell(f: &ChunkField, x: integer, y: integer) {
 }
 
 // Clear the dirty index after a rebuild (@P307 OpClearKeyed: in-place free).
-pub fn clear_dirty(f: &ChunkField) {
+pub fn clear_dirty(f: ChunkField) {
   f.dirty = [];
 }
 
