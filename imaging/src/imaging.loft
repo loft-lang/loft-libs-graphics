@@ -6,9 +6,9 @@
 // Data per pixel of a PNG image.
 // Fields r, g, b hold red, green and blue intensity, each 0–255.
 pub struct Pixel {
-  const r: integer limit(0, 255) not null,
-  const g: integer limit(0, 255) not null,
-  const b: integer limit(0, 255) not null
+  const r: integer limit(0, 255),
+  const g: integer limit(0, 255),
+  const b: integer limit(0, 255)
 }
 
 // Returns the pixel colour as a packed 24-bit integer (0xRRGGBB).

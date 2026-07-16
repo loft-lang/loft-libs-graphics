@@ -9,17 +9,17 @@
 
 /// Axis-aligned bounding box for 2D collision.
 pub struct Rect {
-  const rx: float not null,
-  const ry: float not null,
-  const rw: float not null,
-  const rh: float not null,
+  const rx: float,
+  const ry: float,
+  const rw: float,
+  const rh: float,
 }
 
 /// Circle shape for 2D collision.
 pub struct Circle {
-  const cx: float not null,
-  const cy: float not null,
-  const cr: float not null,
+  const cx: float,
+  const cy: float,
+  const cr: float,
 }
 
 /// Test whether two axis-aligned rectangles overlap.
@@ -52,8 +52,8 @@ pub fn rect_circle_overlap(r: const Rect, c: const Circle) -> boolean {
 
 /// Overlap depth between two rectangles on each axis.
 pub struct Overlap {
-  const ox: float not null,
-  const oy: float not null,
+  const ox: float,
+  const oy: float,
 }
 
 /// Compute the overlap depth between two rectangles on each axis.
