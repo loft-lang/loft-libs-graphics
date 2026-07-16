@@ -1004,7 +1004,10 @@ pub fn draw_text(self: Canvas, font: integer, content: text, size: float,
     for dt_bx in 0..dt_bw {
       dt_idx = dt_by * dt_bw + dt_bx;
       if dt_idx >= dt_buf.len() { break; }
-      dt_a = dt_buf[dt_idx];
+      // `dt_idx` is computed (not a `for` index), so loft can't prove the read
+      // fit — discharge at the source. The `>=` guard above keeps it in bounds,
+      // so `?? 0` never actually fires.
+      dt_a = dt_buf[dt_idx] ?? 0;
       if dt_a > 0 {
         self.blend_pixel(dt_x + dt_bx, dt_y + dt_by, rgba(dt_cr, dt_cg, dt_cb, dt_a));
       }

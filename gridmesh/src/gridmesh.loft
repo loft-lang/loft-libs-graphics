@@ -36,7 +36,10 @@ pub fn enc_coord(x: integer, y: integer) -> integer {
 pub fn build_index(xs: vector<integer>, ys: vector<integer>) -> hash<CellRef[ck]> {
   cidx: hash<CellRef[ck]> = [];
   for bi_i in 0..len(xs) {
-    cidx += [CellRef{ck: enc_coord(xs[bi_i], ys[bi_i]), ix: bi_i}];
+    // `xs[bi_i]` is proven fit (index over `len(xs)`); `ys[bi_i]` indexes the
+    // PARALLEL vector, which loft can't prove fit, so discharge at the source.
+    // Callers pass same-length (xs, ys); the `?? 0` never actually fires.
+    cidx += [CellRef{ck: enc_coord(xs[bi_i], ys[bi_i] ?? 0), ix: bi_i}];
   }
   cidx
 }
@@ -163,7 +166,10 @@ fn chunk_div(v: integer, cs: integer) -> integer {
 }
 // Position of `v` within its chunk, in [0, cs).
 fn chunk_loc(v: integer, cs: integer) -> integer {
-  vr = v % cs;
+  // `?? 0` only to satisfy the modulo-by-zero lint — chunk_loc is always called
+  // with `cs = 1 << shift` (≥ 1), so the modulo never actually divides by zero.
+  // (Mirrors chunk_div's division discharge above.)
+  vr = (v % cs) ?? 0;
   if vr < 0 { vr + cs } else { vr }
 }
 
