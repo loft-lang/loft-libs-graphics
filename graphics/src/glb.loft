@@ -147,7 +147,7 @@ pub fn save_glb(m: mesh::Mesh, path: text) {
   pmax = glb_pos_max(m.vertices);
 
   json      = glb_json(m, pmin, pmax);
-  json_len  = json.len();
+  json_len  = json.size();
   json_pad  = glb_pad4(json_len);
   json_chunk = json_len + json_pad;
 
@@ -453,7 +453,7 @@ pub fn save_scene_glb(sc: scene::Scene, path: text) {
   total_bin = cur_offset;
 
   json      = glb_scene_json(sc, bin_offset);
-  json_len  = json.len();
+  json_len  = json.size();
   json_pad  = glb_pad4(json_len);
   json_chunk = json_len + json_pad;
 

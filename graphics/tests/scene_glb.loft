@@ -214,3 +214,24 @@ fn test_scene_glb_json_padding() {
   }
   delete("test_sglb_f.glb");
 }
+
+// @PLN110 regression: a non-ASCII node name makes the JSON chunk's BYTE length
+// exceed its CHARACTER count.  json_len must be size() (bytes), not len() (chars),
+// or the declared JSON chunk length is short → total_len disagrees with the file
+// and the .glb is corrupt.  This is the top-risk glb.loft byte-length site.
+fn test_scene_glb_utf8_name() {
+  su_s = scene::scene("café");
+  su_s.add_mesh(mesh::cube());
+  su_mati = su_s.add_material(scene::material("naïve"));
+  su_s.add_node(scene::node("café — 日本語 node", 0, su_mati));
+  glb::save_scene_glb(su_s, "test_sglb_utf8.glb");
+  su_sz = file("test_sglb_utf8.glb").size;
+  {su_f = file("test_sglb_utf8.glb");
+   su_f#format = LittleEndian;
+   su_f#read(4) as i32;  // magic 'glTF'
+   su_f#read(4) as i32;  // version 2
+   su_total = su_f#read(4) as i32;
+   assert(su_total as integer == su_sz, "total_len matches file size with a non-ASCII node name (size={su_sz})");
+  }
+  delete("test_sglb_utf8.glb");
+}
