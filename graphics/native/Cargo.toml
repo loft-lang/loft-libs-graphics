@@ -8,6 +8,12 @@ license = "LGPL-3.0-or-later"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# graphics keeps its hand-written `loft_register!` + `loft_register_bridges!`
+# (it needs symbol remaps `loft_* => n_*` and a partial bridges list —
+# `loft_save_png`/`loft_rasterize_text_into` use `vec_wrapper!` with no
+# `#[loft_native]`), so it does NOT use the source-scanning `loft-ffi-build`
+# generator (that would emit bare idents and a bridge for every symbol, neither
+# of which graphics' dual-ABI layout matches).
 loft-ffi = "0.1"
 loft-ffi-macros = "0.1"
 glutin = "0.32"

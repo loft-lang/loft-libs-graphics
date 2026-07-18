@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Jurjen Stellingwerff
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Tests for the math module.
-use math;
+use mesh3d;
 
 fn test_vec3_create() {
   mv = math::vec3(1.0, 2.0, 3.0);

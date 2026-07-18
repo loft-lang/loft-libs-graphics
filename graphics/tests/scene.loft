@@ -1,9 +1,7 @@
 // Copyright (c) 2026 Jurjen Stellingwerff
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Tests for the scene module.
-use math;
-use mesh;
-use scene;
+use mesh3d;
 
 fn test_scene_create() {
   sc = scene::scene("test scene");
