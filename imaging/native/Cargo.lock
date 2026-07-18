@@ -56,9 +56,9 @@ checksum = "61e45e81ba68f02881cfa9a5213e68ca114181f1d63eb180da57c2964d7264e6"
 
 [[package]]
 name = "loft-ffi-build"
-version = "0.1.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24f81c8c113de7481365efd31d99ec0df7024df808ac1e4bafd3f8330b1d16f9"
+checksum = "4b9a24793c730783efd818e1e7563dc008b7e1e7eddcd9964e212496e26aa2c7"
 
 [[package]]
 name = "loft-ffi-macros"
@@ -130,9 +130,9 @@ checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
 name = "syn"
-version = "2.0.117"
+version = "2.0.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
+checksum = "1b9ae57f904213ebb649ce6895b8a66c66f0203b9319718f69a5612a065b1422"
 dependencies = [
  "proc-macro2",
  "quote",

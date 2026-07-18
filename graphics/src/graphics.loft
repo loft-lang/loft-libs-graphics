@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Graphics library — 2D pixel canvas with drawing primitives.
 
-use math;
-use mesh;
-use scene;
+use mesh3d;
 use glb;
 
 // RGBA color packed as a single integer: 0xAARRGGBB.
@@ -35,16 +33,16 @@ pub fn color_a(color: integer) -> integer {
 // Pixels are stored row-major: data[y * width + x].
 
 pub struct Canvas {
-  width: integer,
-  height: integer,
-  data: vector<integer>
+  const width: integer,
+  const height: integer,
+  const data: vector<integer>
 }
 
 // Create a canvas filled with a solid color.
 pub fn canvas(cw: integer, ch: integer, fill_color: integer) -> Canvas {
-  result = Canvas { width: cw, height: ch };
-  result.data = [for _ in 0..cw * ch { fill_color }];
-  result
+  // Build `data` inside the literal so the const field is set once at
+  // construction (was a post-literal `result.data = …` fill).
+  Canvas { width: cw, height: ch, data: [for _ in 0..cw * ch { fill_color }] }
 }
 
 // Get pixel color at (x, y). Returns 0 if out of bounds.
@@ -53,7 +51,7 @@ pub fn get_pixel(self: const Canvas, gx: integer, gy: integer) -> integer {
     0
   } else {
     gp_idx = gy * self.width + gx;
-    gp_d = self.data;
+    gp_d = &self.data;
     if gp_idx < len(gp_d) { gp_d[gp_idx] ?? 0 } else { 0 }
   }
 }
@@ -62,7 +60,7 @@ pub fn get_pixel(self: const Canvas, gx: integer, gy: integer) -> integer {
 pub fn set_pixel(self: Canvas, sx: integer, sy: integer, color: integer) {
   if sx >= 0 and sx < self.width and sy >= 0 and sy < self.height {
     sp_idx = sy * self.width + sx;
-    sp_d = self.data;
+    sp_d = &self.data;
     if sp_idx < len(sp_d) {
       sp_d[sp_idx] = color;
     }
@@ -95,7 +93,7 @@ pub fn blend(dst: integer, src: integer) -> integer {
 pub fn blend_pixel(self: Canvas, bx: integer, by: integer, color: integer) {
   if bx >= 0 and bx < self.width and by >= 0 and by < self.height {
     bp_idx = by * self.width + bx;
-    bp_d = self.data;
+    bp_d = &self.data;
     if bp_idx < len(bp_d) {
       bp_d[bp_idx] = blend(bp_d[bp_idx] ?? 0, color);
     }
@@ -108,7 +106,7 @@ pub fn fill_rect(self: Canvas, rx: integer, ry: integer, rw: integer, rh: intege
   y0 = if ry < 0 { 0 } else { ry };
   x1 = if rx + rw > self.width { self.width } else { rx + rw };
   y1 = if ry + rh > self.height { self.height } else { ry + rh };
-  fr_d = self.data;
+  fr_d = &self.data;
   fr_n = len(fr_d);
   for fr_y in y0..y1 {
     for fr_x in x0..x1 {
@@ -125,7 +123,7 @@ pub fn hline(self: Canvas, hx0: integer, hx1: integer, hy: integer, color: integ
   if hy < 0 or hy >= self.height { return; }
   left = if hx0 < 0 { 0 } else { hx0 };
   right = if hx1 > self.width { self.width } else { hx1 };
-  hl_d = self.data;
+  hl_d = &self.data;
   hl_n = len(hl_d);
   for hl_x in left..right {
     hl_idx = hy * self.width + hl_x;
@@ -140,7 +138,7 @@ pub fn vline(self: Canvas, vx: integer, vy0: integer, vy1: integer, color: integ
   if vx < 0 or vx >= self.width { return; }
   top = if vy0 < 0 { 0 } else { vy0 };
   bottom = if vy1 > self.height { self.height } else { vy1 };
-  vl_d = self.data;
+  vl_d = &self.data;
   vl_n = len(vl_d);
   for vl_y in top..bottom {
     vl_idx = vl_y * self.width + vx;
@@ -601,16 +599,16 @@ pub fn gl_upload_indices(vao: integer, data: vector<integer>) -> integer;
 // moros terrain renderer is the next.  GL calls cannot run headless, so this is
 // validated by those consumers, not a unit test.
 struct GroupVbo {
-  gk:    integer,   // group key (NOT 'key' — reserved in hash-value structs)
-  vao:   integer,
-  count: integer,   // vertices = floats / stride
-  min_x: single, min_z: single, max_x: single, max_z: single,   // world bounds (future cull)
+  const gk:    integer,   // group key (NOT 'key' — reserved in hash-value structs)
+  const vao:   integer,
+  const count: integer,   // vertices = floats / stride
+  const min_x: single, const min_z: single, const max_x: single, const max_z: single,   // world bounds (future cull)
 }
 
 pub struct GroupVboSet {
-  slots:     hash<GroupVbo[gk]>,
-  stride:    integer,   // floats per vertex (e.g. 14 crystal, 10 ground)
-  draw_mode: integer,   // DRAW_TRIANGLES / DRAW_LINES / …
+  slots:     hash<GroupVbo[gk]>,   // not const: reassigned (`set.slots = []`) + grown via `+=`
+  const stride:    integer,   // floats per vertex (e.g. 14 crystal, 10 ground)
+  const draw_mode: integer,   // DRAW_TRIANGLES / DRAW_LINES / …
 }
 
 // Create an empty set for a fixed vertex stride + draw mode.
@@ -875,6 +873,95 @@ pub fn gl_mouse_button() -> integer;
 pub fn gl_mouse_wheel() -> integer;
 #native "loft_gl_mouse_wheel"
 
+// --- Input events (Gap 01): an ordered, drained-per-frame event queue ---
+//
+// The polling API above loses text, key-repeat, per-event modifiers, and event
+// ORDER.  After gl_poll_events(), drain the queue: call gl_next_event()
+// repeatedly (it returns an EV_* tag, or EV_NONE when empty) and read the
+// current event's fields with the gl_event_* accessors below.  Delivers text /
+// IME, key repeat, per-event modifiers, the named keys the polling API drops,
+// and multitouch — in arrival order.  Example:
+//   while gl_poll_events() {
+//     t = gl_next_event();
+//     while t != EV_NONE {
+//       if t == EV_TEXT { type_text(gl_event_text()); }
+//       else if t == EV_KEY_DOWN { key(gl_event_key(), gl_event_mods()); }
+//       t = gl_next_event();
+//     }
+//     // ... render ...
+//   }
+
+// Event type tags returned by gl_next_event().
+EV_NONE = 0;
+EV_KEY_DOWN = 1;
+EV_KEY_UP = 2;
+EV_TEXT = 3;
+EV_MOUSE_DOWN = 4;
+EV_MOUSE_UP = 5;
+EV_MOUSE_MOVE = 6;
+EV_WHEEL = 7;
+EV_TOUCH_BEGIN = 8;
+EV_TOUCH_MOVE = 9;
+EV_TOUCH_END = 10;
+EV_RESIZE = 11;
+
+// Modifier bitmask for gl_event_mods().
+MOD_SHIFT = 1;
+MOD_CTRL = 2;
+MOD_ALT = 4;
+MOD_SUPER = 8;
+
+// Named keys the event queue reports (extend the KEY_* set above).
+KEY_ENTER = 13;
+KEY_BACKSPACE = 8;
+KEY_DELETE = 147;
+KEY_INSERT = 148;
+KEY_HOME = 149;
+KEY_END = 150;
+KEY_PAGEUP = 151;
+KEY_PAGEDOWN = 152;
+
+// Pop the next queued input event and latch it; returns its EV_* tag, or
+// EV_NONE when the queue is drained.  Call after gl_poll_events().
+pub fn gl_next_event() -> integer;
+#native "loft_gl_next_event"
+
+// Named/keycode of the latched key event (the KEY_* constants).
+pub fn gl_event_key() -> integer;
+#native "loft_gl_event_key"
+
+// Modifier bitmask of the latched event (MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_SUPER).
+pub fn gl_event_mods() -> integer;
+#native "loft_gl_event_mods"
+
+// True if the latched key-down is an auto-repeat.
+pub fn gl_event_repeat() -> boolean;
+#native "loft_gl_event_repeat"
+
+// UTF-8 text of the latched EV_TEXT event ("" otherwise).
+pub fn gl_event_text() -> text;
+#native "loft_gl_event_text"
+
+// X position (pixels) of the latched mouse/touch event; width for EV_RESIZE.
+pub fn gl_event_x() -> float;
+#native "loft_gl_event_x"
+
+// Y position (pixels) of the latched mouse/touch event; height for EV_RESIZE.
+pub fn gl_event_y() -> float;
+#native "loft_gl_event_y"
+
+// Button of the latched mouse event (1=left, 2=right, 4=middle).
+pub fn gl_event_button() -> integer;
+#native "loft_gl_event_button"
+
+// Wheel delta of the latched EV_WHEEL event (positive = up).
+pub fn gl_event_wheel() -> integer;
+#native "loft_gl_event_wheel"
+
+// Stable finger id of the latched EV_TOUCH_* event.
+pub fn gl_event_touch_id() -> integer;
+#native "loft_gl_event_touch_id"
+
 // --- Text rendering (GL3) ---
 
 // Load a font from a file path. Returns a font handle (>= 0) or null on error.
@@ -915,6 +1002,9 @@ pub fn draw_text(self: Canvas, font: integer, content: text, size: float,
     for dt_bx in 0..dt_bw {
       dt_idx = dt_by * dt_bw + dt_bx;
       if dt_idx >= dt_buf.len() { break; }
+      // `dt_idx` is computed (not a `for` index), so loft can't prove the read
+      // fit — discharge at the source. The `>=` guard above keeps it in bounds,
+      // so `?? 0` never actually fires.
       dt_a = dt_buf[dt_idx] ?? 0;
       if dt_a > 0 {
         self.blend_pixel(dt_x + dt_bx, dt_y + dt_by, rgba(dt_cr, dt_cg, dt_cb, dt_a));
@@ -992,13 +1082,13 @@ void main() {{
 /// A sprite sheet backed by a Canvas atlas uploaded as a GL texture.
 /// Sprites are arranged in a grid of `ss_cols` x `ss_rows` cells.
 pub struct SpriteSheet {
-  ss_tex: integer,      // GL texture handle
-  ss_shader: integer,   // textured quad shader
-  ss_vao: integer,      // unit quad VAO (shared)
-  ss_cols: integer,
-  ss_rows: integer,
-  ss_cell_w: integer,
-  ss_cell_h: integer,
+  const ss_tex: integer,      // GL texture handle
+  const ss_shader: integer,   // textured quad shader
+  const ss_vao: integer,      // unit quad VAO (shared)
+  const ss_cols: integer,
+  const ss_rows: integer,
+  const ss_cell_w: integer,
+  const ss_cell_h: integer,
 }
 
 /// Create a sprite sheet from a Canvas atlas.

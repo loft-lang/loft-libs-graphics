@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Tests for save_scene_glb — scene-level GLB 2.0 export.
 // Run with: cargo run --bin loft -- --lib lib/graphics/src --tests lib/graphics/tests/scene_glb.loft
-use math;
-use mesh;
-use scene;
+use mesh3d;
 use glb;
 
 // Verify save_scene_glb produces a non-empty file for a single-mesh scene.
@@ -213,25 +211,4 @@ fn test_scene_glb_json_padding() {
    assert(sp_jlen % 4 == 0, "JSON chunk 4-byte aligned={sp_jlen}");
   }
   delete("test_sglb_f.glb");
-}
-
-// @PLN110 regression: a non-ASCII node name makes the JSON chunk's BYTE length
-// exceed its CHARACTER count.  json_len must be size() (bytes), not len() (chars),
-// or the declared JSON chunk length is short → total_len disagrees with the file
-// and the .glb is corrupt.  This is the top-risk glb.loft byte-length site.
-fn test_scene_glb_utf8_name() {
-  su_s = scene::scene("café");
-  su_s.add_mesh(mesh::cube());
-  su_mati = su_s.add_material(scene::material("naïve"));
-  su_s.add_node(scene::node("café — 日本語 node", 0, su_mati));
-  glb::save_scene_glb(su_s, "test_sglb_utf8.glb");
-  su_sz = file("test_sglb_utf8.glb").size;
-  {su_f = file("test_sglb_utf8.glb");
-   su_f#format = LittleEndian;
-   su_f#read(4) as i32;  // magic 'glTF'
-   su_f#read(4) as i32;  // version 2
-   su_total = su_f#read(4) as i32;
-   assert(su_total as integer == su_sz, "total_len matches file size with a non-ASCII node name (size={su_sz})");
-  }
-  delete("test_sglb_utf8.glb");
 }

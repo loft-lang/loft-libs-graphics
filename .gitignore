@@ -2,3 +2,7 @@ target/
 */native/target/
 *.tar.gz
 .DS_Store
+**/.loft/
+loft.lock
+*/loft.lock
+**/tests/_tmp_*.png

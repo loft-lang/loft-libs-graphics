@@ -1,0 +1,27 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Binding smoke test for the Gap 01 input-event queue: the queue is pollable
+// without a GL window (gl_next_event / gl_event_* touch only the event queue,
+// not GL), so this validates the loft<->native binding, constant exports, and
+// return marshalling on both interpreter and --native — no display needed.
+use graphics;
+
+fn main() {
+  // With no input, the queue is empty: next_event returns EV_NONE and the
+  // accessors read their reset defaults.
+  assert(graphics::gl_next_event() == graphics::EV_NONE);
+  assert(graphics::gl_event_key() == 0);
+  assert(graphics::gl_event_mods() == 0);
+  assert(graphics::gl_event_text() == "");
+  assert(graphics::gl_event_x() == 0.0);
+  assert(graphics::gl_event_wheel() == 0);
+  // Constants are exported with the expected values (kept in sync with the
+  // native EV_*/MOD_*/KEY_* codes).
+  assert(graphics::EV_TEXT == 3);
+  assert(graphics::EV_RESIZE == 11);
+  assert(graphics::MOD_CTRL == 2);
+  assert(graphics::KEY_HOME == 149);
+  assert(graphics::KEY_ENTER == 13);
+  println("graphics input_events smoke: PASS");
+}
