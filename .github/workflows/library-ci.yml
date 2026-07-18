@@ -37,14 +37,28 @@ jobs:
         # loft-libs-core  → arguments, random, crypto
         # loft-libs-net   → web, server, game_protocol
         # loft-libs-graphics → graphics, imaging, gridmesh, shapes
-        # graphics is held back until mesh3d/glb 0.1.1 are registered
-        # (it resolves them from the registry, so CI can't pass until then).
-        package: [shapes, gridmesh, imaging]
+        package: [shapes, gridmesh, imaging, graphics]
     steps:
       - uses: actions/checkout@v4
 
       - name: Install mold (loft's pinned linker)
         run: sudo apt-get update -y && sudo apt-get install -y mold
+
+      # A package that binds native host libraries declares them in its
+      # loft.toml `build-deps` (e.g. graphics → libgl-dev, libasound2-dev).
+      # Install them so its native cdylib links in BOTH interpret (the
+      # cdylib is still built to call #native fns) and --native.  No-op for
+      # pure-loft packages.
+      - name: Install package build-deps (from loft.toml)
+        working-directory: ${{ matrix.package }}
+        run: |
+          deps=$(sed -n 's/^build-deps = "\(.*\)"/\1/p' loft.toml | tr ',' ' ')
+          if [ -n "$deps" ]; then
+            echo "installing build-deps: $deps"
+            sudo apt-get install -y $deps
+          else
+            echo "no build-deps declared"
+          fi
 
       - name: Clone loft source
         uses: actions/checkout@v4
