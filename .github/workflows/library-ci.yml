@@ -37,7 +37,9 @@ jobs:
         # loft-libs-core  → arguments, random, crypto
         # loft-libs-net   → web, server, game_protocol
         # loft-libs-graphics → graphics, imaging, gridmesh, shapes
-        package: [shapes, gridmesh]
+        # graphics is held back until mesh3d/glb 0.1.1 are registered
+        # (it resolves them from the registry, so CI can't pass until then).
+        package: [shapes, gridmesh, imaging]
     steps:
       - uses: actions/checkout@v4
 
