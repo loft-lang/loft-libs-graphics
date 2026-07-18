@@ -17,9 +17,9 @@
 // ## The Pixel Struct
 //
 // Each element of `img.data` is a `Pixel` with three fields:
-//   r: integer limit(0, 255) not null — red channel
-//   g: integer limit(0, 255) not null — green channel
-//   b: integer limit(0, 255) not null — blue channel
+//   r: integer limit(0, 255) — red channel
+//   g: integer limit(0, 255) — green channel
+//   b: integer limit(0, 255) — blue channel
 // Values range from 0 (no intensity) to 255 (full intensity).
 // ## Pixel Access
 //
