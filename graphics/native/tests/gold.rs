@@ -230,7 +230,17 @@ fn gold_compare_assets(
     };
     let root = graphics_pkg_root();
     let script = root.join(example);
-    assert!(script.exists(), "example not found: {}", script.display());
+    // The gold-image examples live in the monorepo `lib/graphics/examples/`
+    // and are not carried into the extracted chunk repo, so skip (like the
+    // missing-loft / missing-cdylib skips above) rather than fail when the
+    // example script is absent.  The full gold regression runs in the monorepo.
+    if !script.exists() {
+        eprintln!(
+            "skipping graphics gold test: example not present in this checkout: {}",
+            script.display()
+        );
+        return;
+    }
     let gold = root.join("tests/gold").join(gold_name);
 
     let tmp = tempdir();
