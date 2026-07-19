@@ -1,6 +1,6 @@
 [package]
 name = "imaging"
-version = "0.2.0"
+version = "0.2.1"
 loft = ">=0.8"
 repository = "loft-libs-graphics"
 
@@ -15,11 +15,16 @@ native = "loft_imaging"
 [native]
 crate = "loft-imaging"
 
-# NOTE — the in-monorepo `lib/imaging/` also carries a `[wasm.bridge]`
-# section + `wasm/` Rust bridge crate.  That bridge depends on the
-# unpublished `loft` crate (`{ path = "../../.." }`), which cannot
-# work in a chunk repo.  Stage A ships imaging WITHOUT the bridge —
-# `--html` consumers of imaging are not viable until a `loft-host-ffi`
-# crate is published to crates.io and the bridge is rewritten against
-# it.  No current monorepo consumer uses imaging via `--html`, so
-# this is a deferred follow-up, not a regression.
+# Browser (`--html`) bridge for the store-mutating `#native` fns.  The
+# `--html` codegen routes `n_load_png`/`n_save_png` to the `pub fn`s in
+# `wasm/src/lib.rs`, which decode/encode via host imports (`loft_gl.*`
+# provided by `wasm/host.js`: the browser's Image/Canvas API).  The
+# bridge crate path-deps the sibling `loft` checkout (`../../../loft`),
+# the pattern the crypto/web bridges use — no crates.io publish needed.
+[wasm.bridge]
+crate = "loft-imaging-wasm"
+host_js = "wasm/host.js"
+
+[wasm.bridge.routes]
+n_load_png = "imaging_load_png"
+n_save_png = "imaging_save_png"
