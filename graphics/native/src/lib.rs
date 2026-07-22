@@ -533,8 +533,18 @@ pub extern "C" fn loft_gl_swap_buffers() {
 
 #[loft_native]
 #[unsafe(no_mangle)]
-pub extern "C" fn loft_gl_clear(color: u32) {
+pub extern "C" fn loft_gl_clear(color: i64) {
     gl_guard!();
+    // `i64`, not `u32`: `graphics.loft` declares `gl_clear(color: integer)`, and loft
+    // emits the extern from the DECLARATION (`integer` -> `i64`,
+    // doc/claude/PACKAGES.md) and calls it directly.  A narrower C signature is
+    // undefined behaviour rather than a narrowing — the callee reads a register half
+    // the caller never defined.  Harmless in PRACTICE here, since a packed colour
+    // occupies the low 32 bits either way, which is why it never misbehaved; corrected
+    // so the boundary is uniformly right rather than right by luck.  The same class,
+    // on a RETURN, is what silently defeated `server::listen`'s bind check in
+    // loft-libs-net.
+    let color = color as u32;
     // Color is packed as 0xAARRGGBB by graphics::rgba().
     let a = ((color >> 24) & 0xFF) as f32 / 255.0;
     let r = ((color >> 16) & 0xFF) as f32 / 255.0;
