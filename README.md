@@ -11,21 +11,25 @@ subdirectory is an independent loft package published to the
 registry under its own name.
 
 Per the chunked-repo design in
-[loft's lib_plans/12-library-extraction/](https://github.com/jjstwerff/loft/blob/main/doc/claude/lib_plans/12-library-extraction/README.md)
+[loft's lib_plans/12-library-extraction/](https://github.com/loft-lang/loft/blob/main/doc/claude/lib_plans/12-library-extraction/README.md)
 § Chunk grouping.
 
 ## Packages
 
-| Subdir | Package | Status |
+All four are published to the registry and installable today.
+
+| Subdir | Package | Latest |
 |---|---|---|
-| [`shapes/`](shapes/) | `shapes` — 2D shape drawing + collision detection | v0.1.0 (extracted 2026-05-24) |
-| [`gridmesh/`](gridmesh/) | `gridmesh` — chunk-local mesh generation primitives | v0.1.0 (extracted 2026-05-24) |
-| `graphics/` | `graphics` — drawing primitives, OpenGL bindings | TODO (blocked on `Type::Reference` codegen forwarding for store-aware GL functions) |
-| `imaging/` | `imaging` — PNG load/save, image manipulation | TODO (blocked on same codegen feature as graphics) |
+| [`graphics/`](graphics/) | `graphics` — drawing primitives, 2D canvas + 3D scene rendering, OpenGL/WebGL bindings | v0.5.0 |
+| [`imaging/`](imaging/) | `imaging` — PNG load/save, image manipulation | v0.2.1 |
+| [`shapes/`](shapes/) | `shapes` — 2D shape drawing + collision detection | v0.3.0 |
+| [`gridmesh/`](gridmesh/) | `gridmesh` — chunk-local mesh generation primitives | v0.1.2 |
 
 ## Installing a package
 
 ```sh
+loft install graphics      # 2D canvas + 3D scene rendering
+loft install imaging       # PNG load/save + pixel operations
 loft install shapes        # 2D shapes + collision
 loft install gridmesh      # mesh generation primitives
 ```
@@ -42,8 +46,10 @@ packages in this multi-package repo (same as
 
 | Package + version | Git tag |
 |---|---|
-| shapes 0.1.0 | `shapes-v0.1.0` |
-| gridmesh 0.1.0 | `gridmesh-v0.1.0` |
+| graphics 0.5.0 | `graphics-v0.5.0` |
+| imaging 0.2.1 | `imaging-v0.2.1` |
+| shapes 0.3.0 | `shapes-v0.3.0` |
+| gridmesh 0.1.2 | `gridmesh-v0.1.2` |
 
 ## License
 
