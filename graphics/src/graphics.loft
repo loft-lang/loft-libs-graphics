@@ -441,20 +441,28 @@ pub fn fill_triangle(self: Canvas, tx0: integer, ty0: integer, tx1: integer, ty1
   if ta_y > tb_y { tr_t = ta_x; ta_x = tb_x; tb_x = tr_t; tr_t = ta_y; ta_y = tb_y; tb_y = tr_t; }
   if ta_y == tc_y { return; }  // degenerate
   for tr_y in ta_y..tc_y + 1 {
-    // x along edge A→C (the long edge, always valid).  `?? 0`
-    // suppresses the div lint — `tc_y - ta_y != 0` is guaranteed by
-    // the degenerate-triangle early-return above.  Parens scope `??`
-    // to just the div so the parser's null-fallback swap fires.
-    tr_xac = ta_x + (tc_x - ta_x) * ((tr_y - ta_y) / (tc_y - ta_y) ?? 0);
+    // x along edge A→C (the long edge, always valid).
+    //
+    // MULTIPLY BEFORE DIVIDING.  These are integers, so
+    // `(tr_y - ta_y) / (tc_y - ta_y)` on its own is 0 on every
+    // scanline but the last — which collapses the whole fill to a
+    // vertical line at the apex plus the base row.  Scaling the run
+    // first keeps the ratio's precision inside the integer divide.
+    //
+    // `?? 0` suppresses the div lint — `tc_y - ta_y != 0` is
+    // guaranteed by the degenerate-triangle early-return above.
+    // Parens scope `??` to just the div so the parser's null-fallback
+    // swap fires.
+    tr_xac = ta_x + ((tc_x - ta_x) * (tr_y - ta_y) / (tc_y - ta_y) ?? 0);
     // x along the short edge (A→B or B→C depending on scanline).
     // Both branches gate their divisor explicitly with the AND-side
     // `!= ta_y` / `!= tb_y` check, so `?? 0` is lint suppression.
     tr_xother = tr_xac;
     if tr_y < tb_y and tb_y != ta_y {
-      tr_xother = ta_x + (tb_x - ta_x) * ((tr_y - ta_y) / (tb_y - ta_y) ?? 0);
+      tr_xother = ta_x + ((tb_x - ta_x) * (tr_y - ta_y) / (tb_y - ta_y) ?? 0);
     }
     if tr_y >= tb_y and tc_y != tb_y {
-      tr_xother = tb_x + (tc_x - tb_x) * ((tr_y - tb_y) / (tc_y - tb_y) ?? 0);
+      tr_xother = tb_x + ((tc_x - tb_x) * (tr_y - tb_y) / (tc_y - tb_y) ?? 0);
     }
     if tr_y >= tb_y and tc_y == tb_y {
       tr_xother = tb_x;

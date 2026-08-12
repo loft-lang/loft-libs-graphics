@@ -305,6 +305,48 @@ fn test_fill_triangle_flat_top() {
   assert(tv2.get_pixel(15, 5) == tc2, "flat-top right");
 }
 
+// The interior, sampled AWAY from the apex column and the base row.
+//
+// Every assertion in test_fill_triangle above lands on either the
+// apex column (x == 10) or the base row (y == 18) — and a fill that
+// draws nothing but those two lines satisfies all of them.  That is
+// exactly what a divide-before-multiply in the edge interpolation
+// produces, so those tests cannot see it.  These points are inside
+// the triangle and on neither line, which pins the actual fill.
+fn test_fill_triangle_interior_off_axis() {
+  tvi = graphics::canvas(20, 20, 0);
+  tci = graphics::rgb(0, 200, 100);
+  // Apex (10,2), base from (2,18) to (18,18).
+  tvi.fill_triangle(10, 2, 2, 18, 18, 18, tci);
+  // Half-way down the span is roughly x=6..14 — sample either side
+  // of the centre column.
+  assert(tvi.get_pixel(7, 11) == tci, "interior left of the apex column");
+  assert(tvi.get_pixel(13, 11) == tci, "interior right of the apex column");
+  // Just inside the slanted edges, near the base.
+  assert(tvi.get_pixel(4, 16) == tci, "interior near the left edge");
+  assert(tvi.get_pixel(16, 16) == tci, "interior near the right edge");
+  // The matching OUTSIDE points, so a bounding-box over-fill cannot
+  // pass either.
+  assert(tvi.get_pixel(2, 6) == 0, "outside beyond the left edge");
+  assert(tvi.get_pixel(18, 6) == 0, "outside beyond the right edge");
+}
+
+// A flat-top triangle degenerates the other way: divide-before-
+// multiply pins both edges to their top x, so the fill comes out as a
+// RECTANGLE spanning the full top width all the way down.  The
+// corners below the slanted edges catch that.
+fn test_fill_triangle_flat_top_not_a_rectangle() {
+  tvr = graphics::canvas(20, 20, 0);
+  tcr = graphics::rgb(255, 0, 128);
+  // Flat top (5,5)-(15,5), apex down at (10,15).
+  tvr.fill_triangle(5, 5, 15, 5, 10, 15, tcr);
+  assert(tvr.get_pixel(10, 14) == tcr, "filled just above the bottom apex");
+  // By the last row the span has narrowed to about x=10, so the outer
+  // columns must be empty.
+  assert(tvr.get_pixel(5, 14) == 0, "bottom-left corner is outside");
+  assert(tvr.get_pixel(15, 14) == 0, "bottom-right corner is outside");
+}
+
 fn test_fill_triangle_degenerate() {
   tv3 = graphics::canvas(10, 10, 0);
   tc3 = graphics::rgb(100, 100, 100);
