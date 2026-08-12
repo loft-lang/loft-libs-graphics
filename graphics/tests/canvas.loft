@@ -355,3 +355,50 @@ fn test_fill_triangle_degenerate() {
   // Should not crash; degenerate triangle draws nothing
   assert(tv3.get_pixel(5, 5) == 0, "degenerate triangle");
 }
+
+// `canvas` builds its pixel buffer by doubling and appending single
+// elements on the set bits of the count, rather than one element at a
+// time.  That is ~17x faster and it lands on the exact count by
+// construction — but only if the bit walk is right, and an off-by-one
+// there gives a buffer that is half the size or one too long.
+//
+// So the sizes below are chosen for their BIT PATTERNS, not for being
+// realistic: a power of two, one less and one more than a power of two,
+// a Mersenne-style all-ones, a prime, and the two degenerate ends.
+// Each asserts the length AND that the first, a middle and the last
+// pixel carry the fill — a short buffer would otherwise read as fine
+// through `get_pixel`, which answers 0 out of range.
+fn test_canvas_buffer_is_exactly_the_pixel_count() {
+  tbc_col = graphics::rgb(11, 22, 33);
+  tbc_sizes = [1, 2, 3, 4, 7, 8, 9, 15, 16, 17, 31, 63, 64, 65, 127, 255, 256, 257, 1023];
+  for tbc_n in tbc_sizes {
+    tbc_cv = graphics::canvas(tbc_n, 1, tbc_col);
+    assert(tbc_cv.data.len() == tbc_n,
+           "n={tbc_n}: buffer is {tbc_cv.data.len()}, want {tbc_n}");
+    assert(tbc_cv.data[0] == tbc_col, "n={tbc_n}: first pixel");
+    assert(tbc_cv.data[tbc_n / 2] == tbc_col, "n={tbc_n}: middle pixel");
+    assert(tbc_cv.data[tbc_n - 1] == tbc_col, "n={tbc_n}: last pixel");
+  }
+}
+
+// Two dimensions multiplied, so the count is not a loop bound the
+// caller handed in — 97 x 61 = 5917, a product of two primes.
+fn test_canvas_two_dimensions_multiply_exactly() {
+  ttd_cv = graphics::canvas(97, 61, graphics::rgb(1, 2, 3));
+  assert(ttd_cv.data.len() == 5917, "97x61 = {ttd_cv.data.len()}, want 5917");
+  assert(ttd_cv.get_pixel(96, 60) == graphics::rgb(1, 2, 3), "the far corner is filled");
+}
+
+// The degenerate ends.  A zero or negative dimension must give an empty
+// buffer rather than looping forever or allocating something huge.
+fn test_canvas_empty_dimensions() {
+  ted_z = graphics::canvas(0, 5, 99);
+  assert(ted_z.data.len() == 0, "zero width is an empty buffer");
+  ted_h = graphics::canvas(5, 0, 99);
+  assert(ted_h.data.len() == 0, "zero height is an empty buffer");
+  ted_n = graphics::canvas(-3, 4, 99);
+  assert(ted_n.data.len() == 0, "a negative dimension is an empty buffer");
+  ted_1 = graphics::canvas(1, 1, 99);
+  assert(ted_1.data.len() == 1, "one pixel");
+  assert(ted_1.data[0] == 99, "and it carries the fill");
+}
