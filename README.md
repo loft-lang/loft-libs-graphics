@@ -20,17 +20,17 @@ All four are published to the registry and installable today.
 
 | Subdir | Package | Latest |
 |---|---|---|
-| [`graphics/`](graphics/) | `graphics` — drawing primitives, 2D canvas + 3D scene rendering, OpenGL/WebGL bindings | v0.5.2 |
-| [`imaging/`](imaging/) | `imaging` — PNG load/save, image manipulation | v0.2.1 |
-| [`shapes/`](shapes/) | `shapes` — 2D shape drawing + collision detection | v0.3.0 |
-| [`gridmesh/`](gridmesh/) | `gridmesh` — chunk-local mesh generation primitives | v0.1.2 |
+| [`graphics/`](graphics/) | `graphics` — drawing primitives, 2D canvas + 3D scene rendering, OpenGL/WebGL bindings | v0.5.3 |
+| [`imaging/`](imaging/) | `imaging` — PNG load/save, image manipulation | v0.2.2 |
+| [`shapes/`](shapes/) | `shapes` — 2D collision detection | v0.4.1 |
+| [`gridmesh/`](gridmesh/) | `gridmesh` — chunk-local mesh generation primitives | v0.2.1 |
 
 ## Installing a package
 
 ```sh
 loft install graphics      # 2D canvas + 3D scene rendering
 loft install imaging       # PNG load/save + pixel operations
-loft install shapes        # 2D shapes + collision
+loft install shapes        # 2D collision detection
 loft install gridmesh      # mesh generation primitives
 ```
 
@@ -46,10 +46,10 @@ packages in this multi-package repo (same as
 
 | Package + version | Git tag |
 |---|---|
-| graphics 0.5.2 | `graphics-v0.5.2` |
-| imaging 0.2.1 | `imaging-v0.2.1` |
-| shapes 0.3.0 | `shapes-v0.3.0` |
-| gridmesh 0.1.2 | `gridmesh-v0.1.2` |
+| graphics 0.5.3 | `graphics-v0.5.3` |
+| imaging 0.2.2 | `imaging-v0.2.2` |
+| shapes 0.4.1 | `shapes-v0.4.1` |
+| gridmesh 0.2.1 | `gridmesh-v0.2.1` |
 
 ## License
 
