@@ -1,0 +1,130 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Worked examples for the `shapes` library (@PLN141).  Each `test_*` below is a
+// REAL, run-every-CI demonstration of a contract that the function's signature
+// cannot state; the function documents itself by CITING the tag with
+// `// Example: @SHP-00N`, and `check_doc_drift.sh examples` fails if a citation
+// goes dangling (no test carries the tag).  These are teaching examples, distinct
+// from the per-function assertion suite in `shapes.loft`.
+//
+// Everything here is `float -> boolean` or `float -> float`, so the type checker
+// can see none of it.  What a caller gets wrong is which BOUNDARY the predicates
+// draw, what the depth numbers do NOT say, and how far a circle test differs from
+// the box test it looks like.
+use shapes;
+
+// @SHP-001 — every overlap predicate here is STRICT: shapes that TOUCH do not
+// overlap.  `rects_overlap` compares `a.rx < b.rx + b.rw` (not `<=`),
+// `circles_overlap` compares squared distance `<` the squared radius sum, and
+// `rect_circle_overlap` compares `<` the squared radius.  So a box resting exactly
+// against a wall, two tangent circles, and two tiles sharing an edge all answer
+// FALSE.  That is the useful half of the convention — a grid of abutting tiles
+// never reports itself as one huge collision, and a mover pushed out to exactly
+// touching is done, not still stuck (see @SHP-002).  A caller who wants "touching
+// counts as a hit" gets no such answer from this library and must inflate one
+// shape by an epsilon itself.  It is also what makes 0.0 an unambiguous
+// no-overlap sentinel in the depth functions: a real overlap always penetrates by
+// strictly more than zero.
+fn test_touching_is_not_overlapping() {
+  left = shapes::Rect { rx: 0.0, ry: 0.0, rw: 10.0, rh: 10.0 };
+  right = shapes::Rect { rx: 10.0, ry: 0.0, rw: 10.0, rh: 10.0 };
+  assert(!shapes::rects_overlap(left, right), "edge-to-edge rects do not overlap");
+  assert(!shapes::aabb_overlap(0.0, 0.0, 10.0, 10.0, 10.0, 0.0, 10.0, 10.0),
+         "the raw-coordinate form draws the same boundary");
+
+  // Two circles exactly a diameter apart touch at one point — not an overlap.
+  a = shapes::Circle { cx: 0.0, cy: 0.0, cr: 5.0 };
+  b = shapes::Circle { cx: 10.0, cy: 0.0, cr: 5.0 };
+  assert(!shapes::circles_overlap(a, b), "tangent circles do not overlap");
+  nudged = shapes::Circle { cx: 9.999, cy: 0.0, cr: 5.0 };
+  assert(shapes::circles_overlap(a, nudged), "any real interpenetration does");
+
+  // A circle resting on the rectangle's right edge: closest point (10, 5),
+  // distance 2.0, radius 2.0 — equal, so false.
+  r = shapes::Rect { rx: 0.0, ry: 0.0, rw: 10.0, rh: 10.0 };
+  resting = shapes::Circle { cx: 12.0, cy: 5.0, cr: 2.0 };
+  assert(!shapes::rect_circle_overlap(r, resting), "a circle resting on the edge is clear");
+
+  // The consequence worth having: a row of tiles laid edge to edge is quiet.
+  for i in 0..4 {
+    tile = shapes::Rect { rx: (i as float) * 10.0, ry: 0.0, rw: 10.0, rh: 10.0 };
+    next_tile = shapes::Rect { rx: ((i + 1) as float) * 10.0, ry: 0.0, rw: 10.0, rh: 10.0 };
+    assert(!shapes::rects_overlap(tile, next_tile), "abutting tiles never collide");
+  }
+}
+
+// @SHP-002 — the depth functions answer HOW FAR, never WHICH WAY.  `Overlap.ox` /
+// `Overlap.oy` are unsigned penetration distances, so the caller derives the sign
+// from the relative positions: the mover is left of the wall, therefore the
+// correction is `-ox`.  Applying `+ox` — the same number, the other way — is a
+// well-typed call that drives the mover deeper in.  And the axis to resolve on is
+// the one with the SMALLER depth: both separate, but the larger one moves 3.5×
+// further here, which on screen reads as a teleport rather than a stop.  After
+// correcting by exactly the depth the two are edge to edge, which the strict
+// predicate of @SHP-001 reads as clear — that is why "push out by exactly ox"
+// terminates instead of leaving a one-epsilon residue.  `aabb_depth_x` /
+// `aabb_depth_y` answer the same numbers without allocating an `Overlap`, but they
+// are independent calls that each re-run the overlap test, and their 0.0 means
+// "these do not overlap at all" — never "they meet with zero penetration on this
+// axis", which the strict predicate makes impossible.
+fn test_depth_says_how_far_not_which_way() {
+  mover = shapes::Rect { rx: 0.0, ry: 0.0, rw: 10.0, rh: 10.0 };
+  wall = shapes::Rect { rx: 8.0, ry: 3.0, rw: 10.0, rh: 10.0 };
+  assert(shapes::rects_overlap(mover, wall), "the mover is inside the wall");
+
+  d = shapes::rect_overlap_depth(mover, wall);
+  assert(d.ox == 2.0, "2 units of penetration on x");
+  assert(d.oy == 7.0, "7 units of penetration on y");
+
+  // The sign is the caller's: -ox is out, +ox is further in.
+  wrong_way = shapes::Rect { rx: mover.rx + d.ox, ry: mover.ry, rw: mover.rw, rh: mover.rh };
+  assert(shapes::rects_overlap(wrong_way, wall), "the wrong sign pushes deeper, not out");
+  resolved = shapes::Rect { rx: mover.rx - d.ox, ry: mover.ry, rw: mover.rw, rh: mover.rh };
+  assert(!shapes::rects_overlap(resolved, wall), "smaller axis, correct sign: clear");
+
+  // Resolving on the larger axis is not wrong, it is just 3.5× the correction.
+  overshot = shapes::Rect { rx: mover.rx, ry: mover.ry - d.oy, rw: mover.rw, rh: mover.rh };
+  assert(!shapes::rects_overlap(overshot, wall), "the y correction separates them too");
+  assert(d.oy > d.ox, "...but moves 7 where 2 would have done");
+
+  // The struct-free pair: same numbers, two calls, and 0.0 means no overlap.
+  assert(shapes::aabb_depth_x(0.0, 0.0, 10.0, 10.0, 8.0, 3.0, 10.0, 10.0) == d.ox,
+         "aabb_depth_x agrees with Overlap.ox");
+  assert(shapes::aabb_depth_y(0.0, 0.0, 10.0, 10.0, 8.0, 3.0, 10.0, 10.0) == d.oy,
+         "aabb_depth_y agrees with Overlap.oy");
+  assert(shapes::aabb_depth_x(0.0, 0.0, 10.0, 10.0, 20.0, 20.0, 5.0, 5.0) == 0.0,
+         "no overlap at all reads 0.0 on x");
+  assert(shapes::aabb_depth_y(0.0, 0.0, 10.0, 10.0, 20.0, 20.0, 5.0, 5.0) == 0.0,
+         "no overlap at all reads 0.0 on y");
+}
+
+// @SHP-003 — `rect_circle_overlap` is a real circle test, and the cheap
+// substitute for it disagrees exactly where circles are used: at the corners.  It
+// clamps the circle's centre into the BOX and measures from there, so a circle
+// sitting off a corner can have its bounding box well inside the rectangle while
+// the circle itself misses by a diagonal.  Approximating with `aabb_overlap` on
+// the circle's bounding box therefore reports a hit in every corner region — an
+// invisible square shoulder on each corner of every obstacle.  The same clamp is
+// why containment answers TRUE: a circle wholly inside clamps to its own centre,
+// distance 0, so "overlap" here includes "one contains the other", which a
+// nearest-point-on-the-PERIMETER reading would get backwards.
+fn test_circle_is_not_its_bounding_box() {
+  r = shapes::Rect { rx: 0.0, ry: 0.0, rw: 10.0, rh: 10.0 };
+
+  // Off the (10, 10) corner by (3, 3): distance 4.24 with a radius of 4.
+  near = shapes::Circle { cx: 13.0, cy: 13.0, cr: 4.0 };
+  assert(shapes::aabb_overlap(0.0, 0.0, 10.0, 10.0,
+                              near.cx - near.cr, near.cy - near.cr,
+                              near.cr * 2.0, near.cr * 2.0),
+         "the circle's BOUNDING BOX reaches into the rectangle");
+  assert(!shapes::rect_circle_overlap(r, near), "...the circle itself does not");
+
+  // One unit closer along the diagonal and the corner is genuinely hit.
+  hit = shapes::Circle { cx: 12.0, cy: 12.0, cr: 4.0 };
+  assert(shapes::rect_circle_overlap(r, hit), "distance 2.83 under a radius of 4");
+
+  // Containment is overlap: the clamp lands on the centre, distance 0.
+  inside = shapes::Circle { cx: 5.0, cy: 5.0, cr: 2.0 };
+  assert(shapes::rect_circle_overlap(r, inside), "a circle wholly inside overlaps");
+}
