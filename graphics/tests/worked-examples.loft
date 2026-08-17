@@ -21,7 +21,8 @@ use graphics;
 // chunk length, "IHDR", width, height, then one bit-depth byte.  2 = RGB,
 // 6 = RGBA.  Lets the save example below read what was actually written.
 fn png_colour_type(path: text) -> integer {
-  pct = 0;
+  // The scope block is what flushes and closes the handle; loft has no block
+  // scoping, so `pct` is still readable after it.
   {
     f = file(path);
     f#format = BigEndian;
