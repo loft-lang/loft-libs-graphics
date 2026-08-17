@@ -53,6 +53,8 @@ pub fn axial_dr(d: integer) -> integer {
 }
 
 // Offset coord `k` steps from (x, y) along hex axis `d`.
+// Example: @GRM-005 — step_x/step_y are a PAIR on the same (x, y); row parity is
+// why step_x needs the y argument.
 pub fn step_x(x: integer, y: integer, d: integer, k: integer) -> integer {
   par = y - (y / 2) * 2; if par < 0 { par = par + 2; }
   q2 = (x - (y - par) / 2) + k * axial_dq(d);
@@ -66,6 +68,8 @@ pub fn step_y(_x: integer, y: integer, d: integer, k: integer) -> integer {
 
 // snap index of the cell at (x, y), or -1 if none.  (`cidx` not `index`
 // — `index` is a reserved keyed-collection-type keyword in loft.)
+// Example: @GRM-005 — a miss is the -1 sentinel, so guard with `>= 0`, not a
+// null test.
 pub fn idx_at(cidx: hash<CellRef[ck]>, x: integer, y: integer) -> integer {
   r = cidx[enc_coord(x, y)];
   if r == null { return 0 - 1; }
@@ -279,6 +283,8 @@ pub fn field_mark_dirty(f: ChunkField, x: integer, y: integer) {
 // never read again — its index is in no bucket and no longer in cidx — and
 // re-painting the same coord allocates a FRESH index (field_add_cell appends),
 // so identity is never reused.
+// Example: @GRM-003 — the indices a consumer already holds stay valid across a
+// removal; a repaint is a new one.
 pub fn field_remove_cell(f: ChunkField, x: integer, y: integer) {
   cr = f.cidx[enc_coord(x, y)];
   if cr == null { return; }          // not present — nothing to remove
@@ -295,6 +301,8 @@ pub fn field_remove_cell(f: ChunkField, x: integer, y: integer) {
 }
 
 // Clear the dirty index after a rebuild (@P307 OpClearKeyed: in-place free).
+// Example: @GRM-001 — where `clear_dirty` sits in the edit → collect → rebuild
+// cycle, and what skipping it costs.
 pub fn clear_dirty(f: ChunkField) {
   f.dirty = [];
 }
@@ -357,6 +365,8 @@ fn gather_halo(f: ChunkField, cell_ixs: vector<integer>, this_ck: integer,
 
 // One ChunkInput per chunk that holds cells (the full-build work-list).
 // Reads the wired-in `f.buckets` (no re-partition).
+// Example: @GRM-002 — emit for `cell_ixs`, only READ `halo_ixs`; the partition that
+// makes border geometry appear exactly once.
 pub fn all_inputs(f: ChunkField, halo_k: integer) -> vector<ChunkInput> {
   out: vector<ChunkInput> = [];
   for b in f.buckets {
@@ -372,6 +382,7 @@ pub fn all_inputs(f: ChunkField, halo_k: integer) -> vector<ChunkInput> {
 // the cost is O(dirty chunks × their cells), independent of total N.  A
 // dirty chunk with no owned cells (a halo-marked empty neighbour) is
 // skipped.  Clear the dirty index after rebuilding.
+// Example: @GRM-001 — the edit → collect → rebuild → clear cycle end to end.
 pub fn collect_dirty_inputs(f: ChunkField, halo_k: integer) -> vector<ChunkInput> {
   out: vector<ChunkInput> = [];
   for dk in f.dirty {
@@ -438,6 +449,8 @@ pub fn all_groups(f: ChunkField, group_dim: integer) -> vector<GroupInput> {
 // enumerates its group_dim × group_dim member chunk coords analytically and
 // probes f.buckets — O(dirty groups × group_dim²), independent of total N.
 // (Never scans all chunks, which would make per-edit cost grow with N.)
+// Example: @GRM-004 — `chunk_cks` lists the group's CLEAN chunks too (copy their
+// cached meshes); reading it as "chunks to rebuild" rebuilds the whole group.
 pub fn collect_dirty_groups(f: ChunkField, group_dim: integer) -> vector<GroupInput> {
   dirty_groups: hash<GroupKey[gk]> = [];
   for dk in f.dirty {

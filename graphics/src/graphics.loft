@@ -12,11 +12,18 @@ use glb;
 // Pack RGBA channels into a single integer using bitwise ops.
 // Layout: bits 24..31 = alpha, 16..23 = red, 8..15 = green, 0..7 = blue.
 // Loft integers are 64-bit signed post-2c, so the packed value fits
-// directly — no widening cast needed.
+// directly — no widening cast needed.  Each channel is MASKED to 8 bits, so an
+// out-of-range argument wraps rather than saturating or being refused.
+// Example: @GFX-001 — the alpha byte is the one a hand-written hex literal
+// leaves at zero, and a zero alpha is fully transparent.
 pub fn rgba(cr: integer, cg: integer, cb: integer, ca: integer) -> integer {
   ((ca & 255) << 24) | ((cr & 255) << 16) | ((cg & 255) << 8) | (cb & 255)
 }
 
+// Opaque colour: the same pack with alpha 255.  `rgb(255, 0, 0)` is 0xFFFF0000 —
+// NOT the 0xFF0000 a reader reaches for, which has alpha 0.
+// Example: @GFX-001 — why the literal and this call are different colours, and
+// what each compositing path does with the difference.
 pub fn rgb(cr: integer, cg: integer, cb: integer) -> integer {
   rgba(cr, cg, cb, 255)
 }
@@ -78,7 +85,11 @@ pub fn canvas(cw: integer, ch: integer, fill_color: integer) -> Canvas {
   Canvas { width: cw, height: ch, data: filled(cw * ch, fill_color) }
 }
 
-// Get pixel color at (x, y). Returns 0 if out of bounds.
+// Get pixel color at (x, y). Returns 0 if out of bounds — and 0 is a COLOUR the
+// canvas can hold (`rgba(0, 0, 0, 0)`), so the answer cannot serve as a bounds
+// test.  Bound with `width`/`height`.
+// Example: @GFX-003 — a neighbourhood scan that tests the returned colour
+// miscounts its own transparent pixels as off-canvas.
 pub fn get_pixel(self: const Canvas, gx: integer, gy: integer) -> integer {
   if gx < 0 or gx >= self.width or gy < 0 or gy >= self.height {
     0
@@ -89,7 +100,12 @@ pub fn get_pixel(self: const Canvas, gx: integer, gy: integer) -> integer {
   }
 }
 
-// Set pixel color at (x, y). No-op if out of bounds.
+// Set pixel color at (x, y). No-op if out of bounds.  STORES the colour byte for
+// byte, alpha included — it does not composite; `blend_pixel` does.
+// Example: @GFX-002 — storing a half-transparent colour replaces what was under
+// it, rather than showing through it.
+// Example: @GFX-003 — an out-of-range coordinate is declined in silence, so a
+// wrong index is a missing part of the drawing, never a message.
 pub fn set_pixel(self: Canvas, sx: integer, sy: integer, color: integer) {
   if sx >= 0 and sx < self.width and sy >= 0 and sy < self.height {
     sp_idx = sy * self.width + sx;
@@ -122,7 +138,9 @@ pub fn blend(dst: integer, src: integer) -> integer {
   rgba(br, bg, bb, ba)
 }
 
-// Draw a pixel with alpha blending at (x, y).
+// Draw a pixel with alpha blending at (x, y) — the compositing counterpart to
+// `set_pixel`, and the one a caller reaching for alpha usually meant.
+// Example: @GFX-002 — store versus composite, side by side.
 pub fn blend_pixel(self: Canvas, bx: integer, by: integer, color: integer) {
   if bx >= 0 and bx < self.width and by >= 0 and by < self.height {
     bp_idx = by * self.width + bx;
@@ -133,7 +151,10 @@ pub fn blend_pixel(self: Canvas, bx: integer, by: integer, color: integer) {
   }
 }
 
-// Fill a rectangle with a solid color. Clipped to canvas bounds.
+// Fill a rectangle with a solid color. Clipped to canvas bounds.  Like every
+// solid primitive here it STORES the colour (see `set_pixel`); a rectangle drawn
+// in a half-transparent colour is not a translucent overlay.
+// Example: @GFX-002 — what the buffer holds afterwards.
 pub fn fill_rect(self: Canvas, rx: integer, ry: integer, rw: integer, rh: integer, color: integer) {
   x0 = if rx < 0 { 0 } else { rx };
   y0 = if ry < 0 { 0 } else { ry };
@@ -151,7 +172,10 @@ pub fn fill_rect(self: Canvas, rx: integer, ry: integer, rw: integer, rh: intege
   }
 }
 
-// Draw a horizontal line from (x0, y) to (x1, y). Clipped.
+// Draw a horizontal line from (x0, y) to (x1, y). Clipped.  The end is
+// EXCLUSIVE — `[x0, x1)` — and a reversed span draws nothing rather than being
+// normalised.
+// Example: @GFX-004 — where a span starts and stops, and what silence looks like.
 pub fn hline(self: Canvas, hx0: integer, hx1: integer, hy: integer, color: integer) {
   if hy < 0 or hy >= self.height { return; }
   left = if hx0 < 0 { 0 } else { hx0 };
@@ -166,7 +190,9 @@ pub fn hline(self: Canvas, hx0: integer, hx1: integer, hy: integer, color: integ
   }
 }
 
-// Draw a vertical line from (x, y0) to (x, y1). Clipped.
+// Draw a vertical line from (x, y0) to (x, y1). Clipped.  Exclusive end and
+// no normalisation, exactly like `hline`.
+// Example: @GFX-004 — the half-open span rule on both axes.
 pub fn vline(self: Canvas, vx: integer, vy0: integer, vy1: integer, color: integer) {
   if vx < 0 or vx >= self.width { return; }
   top = if vy0 < 0 { 0 } else { vy0 };
@@ -181,7 +207,9 @@ pub fn vline(self: Canvas, vx: integer, vy0: integer, vy1: integer, color: integ
   }
 }
 
-// Draw a rectangle outline (1px border). Clipped.
+// Draw a rectangle outline (1px border). Clipped.  Built from four half-open
+// spans, so (x, y, w, h) covers x .. x + w - 1 by y .. y + h - 1.
+// Example: @GFX-004 — the exact pixels, and the hollow interior.
 pub fn draw_rect(self: Canvas, drx: integer, dry: integer, drw: integer, drh: integer, color: integer) {
   self.hline(drx, drx + drw, dry, color);
   self.hline(drx, drx + drw, dry + drh - 1, color);
@@ -512,6 +540,9 @@ fn save_png_raw(path: text, width: integer, height: integer, data: const vector<
 
 // Save canvas as a PNG file. Automatically uses RGBA if any pixel has alpha < 255,
 // otherwise uses RGB. Returns true on success.
+// Example: @GFX-005 — the choice is read off the pixels, so ONE alpha-0 pixel
+// (a hand-written hex literal — @GFX-001) makes the whole file RGBA and that
+// pixel a transparent hole.
 pub fn save_png(self: const Canvas, path: text) -> boolean {
   save_png_raw(path, self.width, self.height, self.data)
 }

@@ -27,15 +27,51 @@ mod image_fields {
     pub const DATA: u16 = 20; // vector ref (Pixel elements, 3 bytes each)
 }
 
+/// Decode `path` into exactly `width * height` RGB triples.
+///
+/// A loft `Image` is `width * height` three-byte `Pixel` records, so every PNG
+/// colour type has to be folded down to plain 8-bit RGB here — the store layout
+/// has nowhere to put a fourth channel and no way to say "this row is 1 byte per
+/// pixel".  Anything left un-folded is not a smaller image, it is the raw byte
+/// stream re-cut into threes: an RGBA file yields alpha-shifted colours and 4/3
+/// of the pixel count, a greyscale file yields a third of it.  Returns `None`
+/// rather than a mismatched buffer, so the caller's failure path is the one that
+/// runs.
 fn decode_png(path: &str) -> Option<(u32, u32, Vec<u8>)> {
     let file = File::open(path).ok()?;
-    let decoder = Decoder::new(BufReader::new(file));
+    let mut decoder = Decoder::new(BufReader::new(file));
+    // Expand palette indices and sub-byte greyscale, and drop 16-bit samples to
+    // 8, so the only output colour types left are the four folded below.
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info().ok()?;
     let buf_size = reader.output_buffer_size();
-    let mut pixels = vec![0u8; buf_size];
-    let info = reader.next_frame(&mut pixels).ok()?;
-    pixels.truncate(info.buffer_size());
-    Some((info.width, info.height, pixels))
+    let mut buf = vec![0u8; buf_size];
+    let info = reader.next_frame(&mut buf).ok()?;
+    buf.truncate(info.buffer_size());
+    if info.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+    let rgb: Vec<u8> = match info.color_type {
+        png::ColorType::Rgb => buf,
+        png::ColorType::Rgba => buf
+            .chunks_exact(4)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect(),
+        png::ColorType::Grayscale => buf.iter().flat_map(|&g| [g, g, g]).collect(),
+        png::ColorType::GrayscaleAlpha => buf
+            .chunks_exact(2)
+            .flat_map(|p| [p[0], p[0], p[0]])
+            .collect(),
+        // normalize_to_color8 expands these; reaching here means it did not.
+        png::ColorType::Indexed => return None,
+    };
+    let expected = (info.width as usize)
+        .checked_mul(info.height as usize)?
+        .checked_mul(3)?;
+    if rgb.len() != expected {
+        return None;
+    }
+    Some((info.width, info.height, rgb))
 }
 
 /// Decode a PNG file and write the result directly into an Image struct.
@@ -64,7 +100,12 @@ pub unsafe extern "C" fn n_load_png(
         store.set_long(image.rec, image.pos, image_fields::WIDTH, i64::from(w));
         store.set_long(image.rec, image.pos, image_fields::HEIGHT, i64::from(h));
         // Create pixel vector and bulk-copy RGB data (3 bytes per Pixel).
-        let vec = store.alloc_vector_from_bytes(3, pixels.len() as u32 / 3, pixels.as_ptr(), pixels.len());
+        let vec = store.alloc_vector_from_bytes(
+            3,
+            pixels.len() as u32 / 3,
+            pixels.as_ptr(),
+            pixels.len(),
+        );
         store.set_int(image.rec, image.pos, image_fields::DATA, vec.rec as i32);
     }
     true
@@ -104,7 +145,11 @@ pub unsafe extern "C" fn n_save_png(
     if w == 0 || h == 0 || data_rec == 0 {
         return false;
     }
-    let data_ref = LoftRef { store_nr: image.store_nr, rec: data_rec, pos: 0 };
+    let data_ref = LoftRef {
+        store_nr: image.store_nr,
+        rec: data_rec,
+        pos: 0,
+    };
     let count = unsafe { store.vector_len(&data_ref) };
     let expected = w * h;
     if count < expected {

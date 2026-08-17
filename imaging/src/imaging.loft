@@ -4,7 +4,14 @@
 // Types and functions for reading PNG images.
 
 // Data per pixel of a PNG image.
-// Fields r, g, b hold red, green and blue intensity, each 0–255.
+// Fields r, g, b hold red, green and blue intensity, each 0–255.  The channels
+// are const, so a pixel is REPLACED (`img.data[i] = Pixel{…}`), never edited in
+// place, and `limit(0, 255)` is a range rather than a clamp — a value outside it
+// stores 0.
+// Example: @IMG-003 — replacing a pixel, and why the local you read it into is a
+// view of its slot rather than a snapshot.
+// Example: @IMG-004 — the range is not a clamp: doubling a bright channel stores
+// 0, so brightening turns the brightest pixels black.
 pub struct Pixel {
   const r: integer limit(0, 255),
   const g: integer limit(0, 255),
@@ -18,7 +25,10 @@ pub fn value(self: Pixel) -> integer {
 }
 
 // Database structure with image data.
-// The actual data is in height rows of width length.
+// The actual data is in height rows of width length: `data` is one FLAT vector in
+// row-major order, so the pixel at (x, y) is `data[y * width + x]`, and
+// `len(data) == width * height` always holds on an image `png()` handed back.
+// Example: @IMG-001 — the addressing rule, and what the null check buys.
 pub struct Image {
   name: text,
   width: integer,
@@ -43,13 +53,20 @@ pub fn save_png(self: const Image, path: text) -> boolean {
 }
 
 // Decodes a PNG file and returns an Image.
-// Returns null if the file is not in text format.
+// Returns null when there is nothing to decode — the path does not exist, names
+// a directory, or holds bytes this decoder cannot read.  So the answer is either
+// a complete image (`len(data) == width * height`) or null; there is no
+// half-filled Image to guard against.  Any PNG colour type loads: RGBA, greyscale
+// and palette files are folded to RGB, alpha discarded.
 // Use to load sprite sheets or textures.
+// Example: @IMG-001 — the three ways to get null, and the completeness the null
+// check buys past it.
+// Example: @IMG-002 — every colour type arrives as RGB; alpha is DISCARDED, so a
+// sprite sheet needs a colour key rather than a transparency test.
 pub fn png(self: File) -> Image {
   if self.format == Format.TextFile {
     result = Image { };
-    load_png(self.path, result);
-    result
+    if load_png(self.path, result) { result } else { null }
   } else {
     null
   }

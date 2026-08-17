@@ -7,3 +7,5 @@ target/
 loft.lock
 */loft.lock
 **/tests/_tmp_*.png
+native-auto/
+**/native-auto/

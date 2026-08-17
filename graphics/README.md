@@ -31,10 +31,32 @@ loft install graphics
   `draw_sprite`); `Painter2D` for fixed-function 2D draws over GL; SFX helpers
   (`sfx_beep` / `sfx_chirp` / `sfx_descend`).
 
+### Colours and the canvas
+
+A colour is one `integer` packed **0xAARRGGBB** — build it with `rgba` / `rgb`
+rather than a hex literal, which leaves the alpha byte at 0 (fully transparent).
+`Canvas.data` is a flat, row-major `vector<integer>`: the pixel at (x, y) is
+`data[y * width + x]`.  Every solid primitive **stores** its colour; only
+`blend_pixel` composites.  Span ends are **exclusive**, and a reversed span draws
+nothing.
+
 ### Native code
 
 `loft_graphics_native` cdylib backs the GL + PNG + font + audio calls via
 `glutin` / `gl` / `winit` / `fontdue` / `png` / `image` / `rodio`.
+
+## Worked examples
+
+The contracts a signature cannot state are demonstrated by running tests
+(@PLN141): [tests/worked-examples.loft](tests/worked-examples.loft) —
+`@GFX-001` the alpha byte a hex literal forgets, `@GFX-002` store versus
+composite, `@GFX-003` why `get_pixel`'s 0 is not a bounds test, `@GFX-004`
+half-open spans that are never normalised, `@GFX-005` how `save_png` picks RGB
+or RGBA off the pixels.
+
+They cover the software-canvas half — the half CI can run.  The `gl_*` bindings
+need a window and have no CI demonstrator, so they carry no tags rather than
+tags pointing at a test that cannot exercise them.
 
 ## Provenance
 
