@@ -1,0 +1,182 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Worked examples for the `graphics` library (@PLN141).  Each `test_*` below is a
+// REAL, run-every-CI demonstration of a contract the signature cannot state; the
+// function documents itself by CITING the tag with `// Example: @GFX-00N`, and
+// `check_doc_drift.sh examples` fails if a citation goes dangling (no test carries
+// the tag).  These are teaching examples, distinct from the per-primitive
+// assertion suite in `canvas.loft`.
+//
+// They cover the SOFTWARE canvas half of the library — the half CI can run.  A
+// colour is a bare `integer` and a canvas is a flat `vector<integer>`, so the
+// compiler sees nothing: which byte holds alpha, whether a call composites or
+// overwrites, whether an answer of 0 means "transparent" or "not on the canvas",
+// and where a span ends are all conventions a caller can only get from a call
+// site.  The `gl_*` half needs a window and has no CI demonstrator; it is a
+// recorded coverage gap rather than a tag against a test that cannot run.
+use graphics;
+
+// The PNG IHDR colour-type byte sits at offset 25: 8 signature bytes, a 4-byte
+// chunk length, "IHDR", width, height, then one bit-depth byte.  2 = RGB,
+// 6 = RGBA.  Lets the save example below read what was actually written.
+fn png_colour_type(path: text) -> integer {
+  pct = 0;
+  {
+    f = file(path);
+    f#format = BigEndian;
+    f#next = 25;
+    pct = f#read as u8;
+  }
+  pct
+}
+
+// @GFX-001 — a colour is one `integer` packed 0xAARRGGBB, and the alpha byte is
+// the one a reader forgets.  `rgb(255, 0, 0)` is 0xFFFF0000, NOT 0xFF0000: the
+// hex literal that names the same three channels leaves the top byte zero, which
+// is a fully TRANSPARENT red.  Nothing catches that — both are `integer`, both
+// report `color_r` 255, and `set_pixel` stores either one happily — but every
+// compositing path reads the alpha, so a hand-written literal blends to nothing
+// and (see @GFX-005) turns a saved file into RGBA.  `rgba` masks each argument to
+// 8 bits rather than rejecting it, so an out-of-range channel wraps silently
+// instead of saturating.
+fn test_a_colour_carries_an_alpha_byte() {
+  red = graphics::rgb(255, 0, 0);
+  assert(red == 0xFFFF0000, "rgb() fills the alpha byte: the layout is 0xAARRGGBB");
+  assert(graphics::color_a(red) == 255, "so a constructed colour is opaque");
+
+  // The literal names the same three channels...
+  assert(graphics::color_r(0xFF0000) == 255, "0xFF0000 really is full red");
+  assert(graphics::color_g(0xFF0000) == 0 && graphics::color_b(0xFF0000) == 0, "and nothing else");
+  // ...and no alpha at all.
+  assert(graphics::color_a(0xFF0000) == 0, "but its alpha byte is 0 — fully transparent");
+  assert(0xFF0000 != red, "so the literal is not the colour rgb(255, 0, 0) makes");
+
+  // Which is what every compositing path acts on.
+  black = graphics::rgb(0, 0, 0);
+  assert(graphics::blend(black, 0xFF0000) == black, "a literal red composites to nothing");
+  assert(graphics::blend(black, red) == red, "the constructed one replaces the destination");
+
+  // Out-of-range channels are masked, not clamped and not refused.
+  assert(graphics::rgba(256, 0, 0, 255) == graphics::rgba(0, 0, 0, 255), "256 & 255 is 0");
+}
+
+// @GFX-002 — the solid primitives STORE a colour; only `blend_pixel` composites
+// one.  `set_pixel`, `fill_rect`, `hline`/`vline`, `draw_rect`, `draw_line`,
+// the circle and triangle fills all write the argument into the buffer byte for
+// byte, alpha included — so painting with a half-transparent colour does not
+// show the destination through it, it REPLACES the destination with a colour
+// that merely records "half transparent".  The pixel underneath is gone, and
+// the alpha rides along until something else reads it (a later `blend`, or
+// `save_png` — @GFX-005).  `blend_pixel` is the door that does what a caller
+// reaching for alpha usually meant.
+fn test_solid_primitives_store_alpha_rather_than_applying_it() {
+  half_white = graphics::rgba(255, 255, 255, 128);
+  black = graphics::rgb(0, 0, 0);
+  cv = graphics::canvas(4, 2, black);
+
+  cv.set_pixel(0, 0, half_white);
+  assert(cv.get_pixel(0, 0) == half_white, "set_pixel wrote the argument verbatim");
+  assert(graphics::color_a(cv.get_pixel(0, 0)) == 128, "alpha and all — the black underneath is gone");
+
+  cv.blend_pixel(1, 0, half_white);
+  assert(cv.get_pixel(1, 0) == graphics::rgba(128, 128, 128, 255),
+         "blend_pixel composited: half of white over black is mid grey, and opaque");
+
+  // Every span and shape primitive takes the set_pixel route.
+  cv.fill_rect(2, 0, 2, 1, half_white);
+  assert(cv.get_pixel(2, 0) == half_white, "fill_rect stores too — it is not a translucent overlay");
+  assert(cv.get_pixel(3, 0) == half_white, "for the whole rectangle");
+  assert(cv.get_pixel(0, 1) == black, "and leaves the row below alone");
+}
+
+// @GFX-003 — `get_pixel` answers 0 for a coordinate off the canvas, and 0 is a
+// COLOUR the canvas can legitimately hold: `rgba(0, 0, 0, 0)` is the integer 0,
+// and it is what `canvas(w, h, 0)` fills with.  So the answer cannot tell
+// "outside" from "transparent black", in either direction, and a neighbourhood
+// scan that uses the returned colour as its bounds test miscounts its own
+// pixels.  The only honest bound is `width`/`height`.  `set_pixel` is the mirror
+// image: it silently declines an out-of-range coordinate, so a wrong index is
+// not a crash and not a message, it is simply a drawing that is missing something.
+fn test_zero_from_get_pixel_is_a_colour_not_a_bound() {
+  assert(graphics::rgba(0, 0, 0, 0) == 0, "transparent black IS the integer 0");
+
+  cv = graphics::canvas(4, 4, graphics::rgb(0, 0, 0));   // OPAQUE black
+  cv.set_pixel(0, 0, 0);                                  // one transparent-black pixel
+  by_colour = 0;
+  by_bounds = 0;
+  for x in 0..3 {
+    sx = x - 1;                                           // -1, 0, 1
+    if cv.get_pixel(sx, 0) == 0 { by_colour += 1; }
+    if sx < 0 or sx >= cv.width { by_bounds += 1; }
+  }
+  assert(by_bounds == 1, "exactly one of the three samples is off the canvas");
+  assert(by_colour == 2, "but two answer 0 — the transparent pixel reads as 'outside'");
+
+  // And a write off the canvas is declined in silence.
+  cv.set_pixel(9, 9, graphics::rgb(255, 0, 0));
+  assert(cv.data.len() == 16, "no growth, no error — the pixel simply never lands");
+}
+
+// @GFX-004 — the span primitives take a HALF-OPEN end and never normalise a
+// reversed one.  `hline(x0, x1, y, c)` fills `[x0, x1)`, so `x1` itself stays
+// clear and a caller thinking in inclusive coordinates loses the last pixel of
+// every span; `vline(x, y0, y1, c)` is the same on the other axis.  Passing the
+// ends the other way round — `hline(6, 1, …)` — is not corrected and not
+// reported: the loop runs zero times and the call draws nothing at all, which is
+// the shape that turns "my rectangle has a missing side" into a long afternoon.
+// `draw_rect` is built from four of these spans, and its `(x, y, w, h)` covers
+// exactly `x .. x + w - 1` by `y .. y + h - 1`.
+fn test_spans_are_half_open_and_never_normalised() {
+  cv = graphics::canvas(8, 4, 0);
+  mark = graphics::rgb(0, 255, 0);
+  cv.hline(1, 6, 0, mark);
+  assert(cv.get_pixel(0, 0) == 0, "before the span");
+  assert(cv.get_pixel(1, 0) == mark, "x0 is included");
+  assert(cv.get_pixel(5, 0) == mark, "x1 - 1 is the last pixel drawn");
+  assert(cv.get_pixel(6, 0) == 0, "x1 itself is NOT drawn — the end is exclusive");
+
+  cv.vline(2, 1, 3, mark);
+  assert(cv.get_pixel(2, 1) == mark && cv.get_pixel(2, 2) == mark, "y0 .. y1 - 1");
+  assert(cv.get_pixel(2, 3) == 0, "exclusive on this axis too");
+
+  // A reversed span is silence, not a correction.
+  rev = graphics::canvas(8, 4, 0);
+  rev.hline(6, 1, 0, mark);
+  drawn = 0;
+  for rx in 0..8 { if rev.get_pixel(rx, 0) != 0 { drawn += 1; } }
+  assert(drawn == 0, "hline(6, 1, ...) draws nothing — no error, no pixels");
+
+  // draw_rect composes four spans, and reads the way its name suggests.
+  box = graphics::canvas(8, 8, 0);
+  box.draw_rect(1, 1, 5, 4, mark);
+  assert(box.get_pixel(1, 1) == mark && box.get_pixel(5, 1) == mark, "top edge spans 5 columns");
+  assert(box.get_pixel(1, 4) == mark && box.get_pixel(5, 4) == mark, "bottom edge is 4 rows down");
+  assert(box.get_pixel(6, 1) == 0, "and stops there");
+  assert(box.get_pixel(3, 2) == 0, "the outline is hollow");
+}
+
+// @GFX-005 — `save_png` chooses the file's colour type from the PIXELS, not from
+// an argument: every pixel opaque writes a three-channel RGB file, and a SINGLE
+// pixel with alpha below 255 writes RGBA for the whole image.  That makes the
+// alpha byte of @GFX-001 visible on disk.  One hand-written hex literal painted
+// into an otherwise opaque picture adds an alpha channel to the file and punches
+// a fully transparent hole where that pixel is — which looks like nothing at all
+// in a viewer with a white background and like a hole in one with a dark one.
+// The same rule is why `canvas(w, h, 0)` saves as a fully TRANSPARENT image
+// rather than the black its zero suggests.
+fn test_save_png_reads_its_colour_type_off_the_pixels() {
+  opaque = graphics::canvas(2, 2, graphics::rgb(255, 0, 0));
+  assert(opaque.save_png("_tmp_gfx_opaque.png"), "saved the opaque canvas");
+  assert(png_colour_type("_tmp_gfx_opaque.png") == 2, "all opaque -> a 3-channel RGB file");
+
+  tainted = graphics::canvas(2, 2, graphics::rgb(255, 0, 0));
+  tainted.set_pixel(0, 0, 0xFF0000);
+  assert(tainted.save_png("_tmp_gfx_tainted.png"), "saved the canvas with one literal-coloured pixel");
+  assert(png_colour_type("_tmp_gfx_tainted.png") == 6,
+         "ONE alpha-0 pixel turns the whole file RGBA, and that pixel invisible");
+
+  zero = graphics::canvas(2, 2, 0);
+  assert(zero.save_png("_tmp_gfx_zero.png"), "saved the zero-filled canvas");
+  assert(png_colour_type("_tmp_gfx_zero.png") == 6, "canvas(w, h, 0) is transparent, not black");
+}
