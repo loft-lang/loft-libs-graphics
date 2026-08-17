@@ -122,8 +122,8 @@ fn test_a_pixel_is_replaced_not_edited() {
   kept_b = first.b;
 
   img.data[0] = Pixel{r: 1, g: 2, b: 3};
-  now = img.data[0] ?? Pixel{r: 0, g: 0, b: 0};
-  assert(now.r == 1 && now.g == 2 && now.b == 3, "the whole-element assignment landed");
+  after = img.data[0] ?? Pixel{r: 0, g: 0, b: 0};
+  assert(after.r == 1 && after.g == 2 && after.b == 3, "the whole-element assignment landed");
 
   // `first` was read before the write and still moved with the slot.
   assert(first.r == 1 && first.g == 2 && first.b == 3,
