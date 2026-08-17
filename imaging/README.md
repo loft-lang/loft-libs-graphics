@@ -14,11 +14,28 @@ loft install imaging
 ## Surface
 
 - `Image` / `Pixel` types.
-- `load_png(path) -> Image` / `save_png(img, path) -> boolean`.
-- Format helpers (`format_image`, etc.).
+- `file(path).png() -> Image` — decode.  Answers a COMPLETE image or `null`;
+  there is no half-filled `Image`.  Every PNG colour type loads (RGBA,
+  greyscale, grey+alpha, palette, 16-bit), folded to 8-bit RGB — **alpha is
+  discarded**.
+- `img.save_png(path) -> boolean` — encode as 8-bit RGB.  `Image.name` is not
+  used; the path argument decides where it lands.
+- `px.value() -> integer` — the pixel packed as `0xRRGGBB`.
 
-Native code (cdylib `loft_imaging`) backs PNG codec via the `png`
+`Image.data` is one flat, row-major `vector<Pixel>`: the pixel at (x, y) is
+`data[y * width + x]`, and `len(data) == width * height`.
+
+Native code (cdylib `loft_imaging`) backs the PNG codec via the `png`
 crate.
+
+## Worked examples
+
+The contracts a signature cannot state are demonstrated by running tests
+(@PLN141): [tests/worked-examples.loft](tests/worked-examples.loft) —
+`@IMG-001` whole-image-or-null plus the addressing rule, `@IMG-002` every colour
+type arrives as RGB with alpha dropped, `@IMG-003` a pixel is replaced rather
+than edited (and the local you read it into is a view of its slot), `@IMG-004`
+`limit(0, 255)` is a range, not a clamp.
 
 ## Stage A constraints
 
