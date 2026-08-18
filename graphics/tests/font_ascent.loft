@@ -5,18 +5,20 @@
 use graphics;
 
 fn test_font_ascent_is_positive_and_scales() {
-  // #255: path is program-relative (resolved against this test file's dir);
-  // the bundled font lives at the package root's examples/ → "../examples/".
-  f = graphics::gl_load_font("../examples/DejaVuSans-Bold.ttf");
-  // Skip gracefully if the bundled font can't be found in this run dir
-  // (keeps the package suite green where the cwd differs).
-  if f >= 0 {
-    a_small = graphics::gl_font_ascent(f, 20.0);
-    a_large = graphics::gl_font_ascent(f, 40.0);
-    assert(a_small > 0.0, "ascent at 20px should be positive ({a_small})");
-    assert(a_large > a_small, "ascent grows with size ({a_large} vs {a_small})");
-    // The ascent must be a sensible fraction of the em — strictly less than the
-    // full pixel size for a typical Latin font (ascent ~0.7-0.95 em).
-    assert(a_large < 40.0, "ascent at 40px should be below the em size ({a_large})");
-  }
+  // #255: the path is program-relative (resolved against THIS test file's dir),
+  // so the fixture at the package root's examples/ is "../examples/".  That
+  // resolution is the thing under test as much as the metric is: before the fix
+  // this path missed under --native, which runs from a temp dir.
+  f = graphics::gl_load_font("../examples/LiberationSansNarrow-Bold.ttf");
+  // NOT a graceful skip.  This assertion is the point: the suite used to wrap
+  // the body in `if f >= 0` with no font in the repo, so it never ran and would
+  // have passed with the fix reverted.
+  assert(f >= 0, "the bundled fixture font must load (handle {f})");
+  a_small = graphics::gl_font_ascent(f, 20.0);
+  a_large = graphics::gl_font_ascent(f, 40.0);
+  assert(a_small > 0.0, "ascent at 20px should be positive ({a_small})");
+  assert(a_large > a_small, "ascent grows with size ({a_large} vs {a_small})");
+  // The ascent must be a sensible fraction of the em — strictly less than the
+  // full pixel size for a typical Latin font (ascent ~0.7-0.95 em).
+  assert(a_large < 40.0, "ascent at 40px should be below the em size ({a_large})");
 }
