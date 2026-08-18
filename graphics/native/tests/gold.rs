@@ -3,15 +3,21 @@
 
 //! Gold-image regression tests for the graphics library's software
 //! rasterizer.  Each test runs a loft example in a tempdir, decodes
-//! the produced PNG plus the reference under `lib/graphics/tests/gold/`,
-//! and asserts they match within a small per-channel tolerance.
+//! the produced PNG plus the reference under `tests/gold/`, and asserts
+//! they match within a small per-channel tolerance.
 //!
-//! Lives under `lib/graphics/native/tests/` so it travels with the
-//! library when `lib/graphics/` extracts to `loft-libs-graphics`.
-//! In the monorepo it's invoked via `make test-packages-native` (or
-//! `cd lib/graphics/native && cargo test --release`).  In the chunk
-//! repo it's invoked by the `library-ci.yml` template's "Rust
-//! integration tests (if present)" step.
+//! Invoked by the shared library CI's "Rust integration tests (if
+//! present)" step, i.e. `cd graphics/native && cargo test --release`.
+//!
+//! This file once carried seven more cases (canvas demo, pixels, rect,
+//! line, triangle, blend, text).  Their examples lived in the loft
+//! monorepo's `lib/graphics/examples/` and were never carried across
+//! when graphics became its own repo, so every one of them took the
+//! "example not present" skip and passed WITHOUT RUNNING — for months,
+//! reporting green.  There is no monorepo copy to run them either:
+//! `lib/graphics/` no longer exists there.  They and their reference
+//! PNGs are gone; a test that cannot run is worse than no test, because
+//! it answers the question "is this covered?" with a yes.
 //!
 //! Locating the loft binary:
 //!   1. `LOFT_BIN` env var — chunk CI sets this to the just-built loft
@@ -230,10 +236,11 @@ fn gold_compare_assets(
     };
     let root = graphics_pkg_root();
     let script = root.join(example);
-    // The gold-image examples live in the monorepo `lib/graphics/examples/`
-    // and are not carried into the extracted chunk repo, so skip (like the
-    // missing-loft / missing-cdylib skips above) rather than fail when the
-    // example script is absent.  The full gold regression runs in the monorepo.
+    // A missing example is a BROKEN test now, not an expected condition: every
+    // case here ships its own example beside the library.  Kept as a skip only
+    // so a partial checkout reports the reason instead of a decode panic — but
+    // if you see this line in CI, the case is not running and wants fixing or
+    // deleting, which is exactly how the seven removed ones went unnoticed.
     if !script.exists() {
         eprintln!(
             "skipping graphics gold test: example not present in this checkout: {}",
@@ -335,76 +342,5 @@ fn text_fixture_matches_gold() {
         "gold-text-fixture.png",
         /* max_abs  */ 1,
         /* mean_abs */ 0.05,
-    );
-}
-
-#[test]
-fn canvas_demo_matches_gold() {
-    gold_compare(
-        "examples/10-2d-canvas.loft",
-        "10-canvas-demo.png",
-        /* max_abs  */ 1,
-        /* mean_abs */ 0.05,
-    );
-}
-
-#[test]
-fn pixel_roundtrip_matches_gold() {
-    gold_compare(
-        "examples/gold-pixels.loft",
-        "gold-pixels.png",
-        0,
-        0.0,
-    );
-}
-
-#[test]
-fn fill_rect_matches_gold() {
-    gold_compare(
-        "examples/gold-rect.loft",
-        "gold-rect.png",
-        0,
-        0.0,
-    );
-}
-
-#[test]
-fn draw_line_matches_gold() {
-    gold_compare(
-        "examples/gold-line.loft",
-        "gold-line.png",
-        0,
-        0.0,
-    );
-}
-
-#[test]
-fn fill_triangle_matches_gold() {
-    gold_compare(
-        "examples/gold-triangle.loft",
-        "gold-triangle.png",
-        0,
-        0.0,
-    );
-}
-
-#[test]
-fn blend_matches_gold() {
-    gold_compare(
-        "examples/gold-blend.loft",
-        "gold-blend.png",
-        0,
-        0.0,
-    );
-}
-
-#[test]
-fn text_matches_gold() {
-    gold_compare_assets(
-        "examples/gold-text.loft",
-        "gold-text.png",
-        &["examples/DejaVuSans-Bold.ttf"],
-        /* max_abs  */ 4,
-        /* mean_abs */ 0.5,
     );
 }
