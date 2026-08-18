@@ -319,6 +319,25 @@ fn tempdir() -> PathBuf {
     dir
 }
 
+/// #255 + rendering guard in one.  The harness runs the example with an
+/// ABSOLUTE script path and cwd set to a tempdir, so `source_dir()` and the cwd
+/// differ — which is the only arrangement that can tell program-relative font
+/// resolution from cwd-relative.  A loft test under `tests/` cannot: the loft
+/// harness runs each test with the cwd already at that test's own directory, so
+/// both resolutions land in the same place and a reverted #255 stays green.
+///
+/// The font is deliberately NOT copied into the tempdir as an asset — copying it
+/// would make the cwd-relative lookup succeed too and destroy the discrimination.
+#[test]
+fn text_fixture_matches_gold() {
+    gold_compare(
+        "examples/gold-text-fixture.loft",
+        "gold-text-fixture.png",
+        /* max_abs  */ 1,
+        /* mean_abs */ 0.05,
+    );
+}
+
 #[test]
 fn canvas_demo_matches_gold() {
     gold_compare(

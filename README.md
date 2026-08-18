@@ -20,7 +20,7 @@ All four are published to the registry and installable today.
 
 | Subdir | Package | Latest |
 |---|---|---|
-| [`graphics/`](graphics/) | `graphics` — drawing primitives, 2D canvas + 3D scene rendering, OpenGL/WebGL bindings | v0.5.4 |
+| [`graphics/`](graphics/) | `graphics` — drawing primitives, 2D canvas + 3D scene rendering, OpenGL/WebGL bindings | v0.5.5 |
 | [`imaging/`](imaging/) | `imaging` — PNG load/save, image manipulation | v0.2.2 |
 | [`shapes/`](shapes/) | `shapes` — 2D collision detection | v0.4.1 |
 | [`gridmesh/`](gridmesh/) | `gridmesh` — chunk-local mesh generation primitives | v0.2.1 |
@@ -46,7 +46,7 @@ packages in this multi-package repo (same as
 
 | Package + version | Git tag |
 |---|---|
-| graphics 0.5.4 | `graphics-v0.5.4` |
+| graphics 0.5.5 | `graphics-v0.5.5` |
 | imaging 0.2.2 | `imaging-v0.2.2` |
 | shapes 0.4.1 | `shapes-v0.4.1` |
 | gridmesh 0.2.1 | `gridmesh-v0.2.1` |

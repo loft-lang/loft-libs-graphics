@@ -1,0 +1,22 @@
+// Gold-image example: text rendered with the bundled fixture font.
+//
+// Driven by `native/tests/gold.rs::text_fixture_matches_gold`, which runs this
+// script with an ABSOLUTE path and the cwd set to a scratch tempdir.
+//
+// `#cwd` is load-bearing here.  By default loft chdir's the process to the
+// program's own directory before running (main.rs "anchor native file I/O at
+// source_dir"), so a raw `std::fs` path inside a native crate resolves next to
+// the SCRIPT — and `save_png` would drop the PNG in examples/ instead of the
+// tempdir the harness reads.  `#cwd` keeps both loft and native I/O anchored at
+// the cwd, so the PNG lands where the harness looks, while `gl_load_font` still
+// finds the font because it joins `source_dir()` explicitly.
+#cwd
+
+use graphics;
+
+fn main() {
+  f = graphics::gl_load_font("LiberationSansNarrow-Bold.ttf");
+  cv = graphics::canvas(64, 32, graphics::rgb(255, 255, 255));
+  cv.draw_text(f, "AV", 18.0, 4, 4, graphics::rgb(0, 0, 0));
+  cv.save_png("gold-text-fixture.png");
+}

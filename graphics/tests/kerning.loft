@@ -5,18 +5,16 @@
 use graphics;
 
 fn test_kerning_pair_narrows_measure() {
-  // #255: path is program-relative (resolved against this test file's dir);
-  // the bundled font lives at the package root's examples/ → "../examples/".
-  f = graphics::gl_load_font("../examples/DejaVuSans-Bold.ttf");
-  // Skip gracefully if the bundled font can't be found in this run dir
-  // (keeps the package suite green where the cwd differs); the assertion
-  // below is the real regression guard.
-  if f >= 0 {
-    av = graphics::gl_measure_text(f, "AV", 40.0);
-    a = graphics::gl_measure_text(f, "A", 40.0);
-    v = graphics::gl_measure_text(f, "V", 40.0);
-    assert(av < a + v, "AV ({av}) should kern narrower than A+V ({a + v})");
-    // sanity: a single glyph is unaffected by kerning
-    assert(a > 0.0, "A has positive width");
-  }
+  // #255: the path is program-relative (resolved against THIS test file's dir),
+  // so the fixture at the package root's examples/ is "../examples/".
+  f = graphics::gl_load_font("../examples/LiberationSansNarrow-Bold.ttf");
+  // NOT a graceful skip — see font_ascent.loft.  A missing font must fail here,
+  // otherwise the kerning guard below silently never runs.
+  assert(f >= 0, "the bundled fixture font must load (handle {f})");
+  av = graphics::gl_measure_text(f, "AV", 40.0);
+  a = graphics::gl_measure_text(f, "A", 40.0);
+  v = graphics::gl_measure_text(f, "V", 40.0);
+  assert(av < a + v, "AV ({av}) should kern narrower than A+V ({a + v})");
+  // sanity: a single glyph is unaffected by kerning
+  assert(a > 0.0, "A has positive width");
 }
