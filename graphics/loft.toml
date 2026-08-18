@@ -1,6 +1,6 @@
 [package]
 name = "graphics"
-version = "0.5.4"
+version = "0.5.5"
 loft = ">=2026.7.2"
 api_compatible_with  = "0.4.2"   # oldest own release this is a drop-in for
 data_compatible_with = "0.4.2"   # oldest own release whose stored data this reads
