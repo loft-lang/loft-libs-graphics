@@ -1,0 +1,155 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN144 P4 — mob animation.  Every expected frame is worked out by hand, and the
+// three cells that matter are the ones that are wrong in most implementations:
+// a loop that returns to 0 EXACTLY, two frame rates agreeing, and a ping-pong that
+// does not stutter at its ends.
+use stage;
+
+fn walker(st: stage::Stage, seq: integer) -> integer {
+  st.node_add(-1, stage::Place { pl_w: 8.0, pl_h: 8.0, pl_seq: seq, pl_cols: 4 })
+}
+
+// A loop's worth of ticks returns to frame 0 exactly — not to 1, and not to the
+// last frame.
+fn test_a_loop_returns_to_frame_zero() {
+  st = stage::stage_new();
+  q = st.add_sequence(0, 4, 10.0, stage::LOOP);   // 4 frames at 10 fps = 0.4 s
+  n = walker(st, q);
+  st.compose();
+  assert(st.frame_of(n) == 0, "starts on 0");
+  st.advance(400000);
+  assert(st.frame_of(n) == 0, "one full loop later, back on 0");
+  st.advance(100000);
+  assert(st.frame_of(n) == 1, "and moving again");
+}
+
+// ⚠ TICKED, NOT JUMPED — and this is the cell that pins integer microseconds.
+// A game reaches 0.8 s by adding 0.1 s eight times, never by asking for 800000 at
+// once, and in FLOAT SECONDS those are different numbers: 0.1 added eight times is
+// 0.7999999999999999, which times 10 fps truncates to frame 7 where 8 is right.
+// So this loop lands on 7 — one short of home — and an eight-frame walk cycle
+// visibly hitches once per stride.  Summing integer microseconds cannot do that,
+// which is the whole reason `advance` takes them.
+//
+// Hand-computed: after tick k the elapsed is exactly k x 100000 us, so the frame
+// is k % 8 — 1 2 3 4 5 6 7 0.
+fn test_ticking_a_whole_loop_lands_exactly_on_zero() {
+  st = stage::stage_new();
+  q = st.add_sequence(0, 8, 10.0, stage::LOOP);   // 8 frames at 10 fps = 0.8 s
+  n = walker(st, q);
+  st.compose();
+  want = [1, 2, 3, 4, 5, 6, 7, 0];
+  for k in 0..8 {
+    st.advance(100000);                            // 0.1 s, one tick at a time
+    assert(st.frame_of(n) == (want[k] ?? -1),
+           "tick {k + 1}: got {st.frame_of(n)}, want {want[k] ?? -1}");
+  }
+}
+
+// ⚠ FRAME-RATE INDEPENDENT.  Stepping at 60 Hz and at 30 Hz must agree at the same
+// elapsed time — the property that makes a recorded input stream replayable, and
+// therefore the property co-op determinism rests on.
+fn test_thirty_and_sixty_hertz_agree() {
+  fast = stage::stage_new();
+  qf = fast.add_sequence(0, 6, 12.0, stage::LOOP);
+  nf = walker(fast, qf);
+  fast.compose();
+  slow = stage::stage_new();
+  qs = slow.add_sequence(0, 6, 12.0, stage::LOOP);
+  ns = walker(slow, qs);
+  slow.compose();
+
+  // ⚠ Two 60 Hz steps SUM EXACTLY to one 30 Hz step in integer microseconds —
+  // 2 x 16667 = 33334 — which is the whole reason the delta is not a float.
+  for i in 0..60 {
+    fast.advance(16667);
+    fast.advance(16667);
+    slow.advance(33334);
+    assert(fast.frame_of(nf) == slow.frame_of(ns),
+           "step {i}: 60 Hz says {fast.frame_of(nf)}, 30 Hz says {slow.frame_of(ns)}");
+  }
+}
+
+// ONCE stops on the last frame and stays there — it does not wrap, and it does not
+// run off the end of the atlas.
+fn test_once_stops_on_the_last_frame() {
+  st = stage::stage_new();
+  q = st.add_sequence(10, 3, 10.0, stage::ONCE);   // cells 10, 11, 12
+  n = walker(st, q);
+  st.compose();
+  assert(st.frame_of(n) == 10, "starts at the sequence's first cell");
+  st.advance(250000);
+  assert(st.frame_of(n) == 12, "reaches the last");
+  st.advance(50000000);
+  assert(st.frame_of(n) == 12, "and stays there rather than wrapping");
+}
+
+// ⚠ PING-PONG DOES NOT REPEAT ITS END FRAMES.  For four frames the cycle is
+// 0 1 2 3 2 1 — period SIX, not eight.  A period of 2n shows frame 3 twice and
+// frame 0 twice, which reads as a limp at both ends and is the classic off-by-one.
+fn test_pingpong_reverses_without_stuttering() {
+  st = stage::stage_new();
+  q = st.add_sequence(0, 4, 10.0, stage::PINGPONG);
+  n = walker(st, q);
+  st.compose();
+  want = [0, 1, 2, 3, 2, 1, 0, 1, 2, 3, 2, 1];
+  for i in 0..12 {
+    got = st.frame_of(n);
+    assert(got == (want[i] ?? -1), "tick {i}: got {got}, want {want[i] ?? -1}");
+    st.advance(100000);
+  }
+}
+
+// A single-frame sequence is legal and still: no modulo by zero, no flicker.
+fn test_a_one_frame_sequence_is_still() {
+  st = stage::stage_new();
+  q = st.add_sequence(7, 1, 30.0, stage::PINGPONG);
+  n = walker(st, q);
+  st.compose();
+  for _i in 0..10 {
+    assert(st.frame_of(n) == 7, "a one-frame sequence never leaves its cell");
+    st.advance(50000);
+  }
+}
+
+// A still sprite ignores the clock entirely — the degenerate case proved.
+fn test_a_still_sprite_never_animates() {
+  st = stage::stage_new();
+  n = st.node_add(-1, stage::Place { pl_w: 8.0, pl_h: 8.0 });
+  st.compose();
+  st.advance(100000000);
+  assert(st.frame_of(n) == 0, "no sequence, no motion");
+}
+
+// ⚠ THE FRAME REACHES THE INSTANCE BUFFER as ONE float, and the rest of the
+// instance is untouched by a step — four floats per animating sprite is what this
+// design exists to avoid.
+fn test_a_step_dirties_exactly_one_float_per_sprite() {
+  st = stage::stage_new();
+  q = st.add_sequence(0, 8, 10.0, stage::LOOP);
+  _ = walker(st, q);
+  _ = walker(st, q);
+  st.compose();
+  before = st.pack_instances();
+  st.advance(100000);
+  after = st.pack_instances();
+  changed = 0;
+  for i in 0..len(before) { if before[i] != after[i] { changed = changed + 1; } }
+  assert(changed == 2, "two sprites, one float each — got {changed}");
+  assert(before[stage::OFF_CELL] != after[stage::OFF_CELL], "and it is the frame index");
+}
+
+// `restart` puts a sequence back to its beginning, which is what a state change
+// (idle -> walk) needs.
+fn test_restart_returns_to_the_first_frame() {
+  st = stage::stage_new();
+  q = st.add_sequence(0, 4, 10.0, stage::LOOP);
+  n = walker(st, q);
+  st.compose();
+  st.advance(250000);
+  assert(st.frame_of(n) != 0, "somewhere in the middle");
+  st.restart(n);
+  assert(st.frame_of(n) == 0, "and back to the start");
+}

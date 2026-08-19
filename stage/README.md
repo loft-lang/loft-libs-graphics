@@ -24,8 +24,10 @@ loft install stage
 - `render_stage(canvas)` — the stage's own path, honouring per-node alpha
 - `pick(x, y)` · `hits(idx, x, y)` · `to_local(idx, x, y)` · `press` / `release` /
   `released_on` / `capture` · `add_mask(w, h, alpha)`
+- `add_sequence(first, count, fps, mode) -> integer` · `advance(dt_us)` ·
+  `frame_of(idx)` · `restart(idx)` · `LOOP` / `ONCE` / `PINGPONG`
 - `batches() -> vector<Batch>` · `pack_instances() -> vector<single>` ·
-  `INSTANCE_STRIDE` / `OFF_AFFINE` / `OFF_UV` / `OFF_RGBA`
+  `INSTANCE_STRIDE` / `OFF_AFFINE` / `OFF_CELL` / `OFF_RGBA` / `OFF_SWAY`
 
 ## The two things to know
 
@@ -91,6 +93,33 @@ buffer uploaded once plus a uniform. There is a test that 100 ticks over 500 spr
 ⚠ **Sway is visual only.** It displaces what is drawn and never the footprint, so a swaying
 tree keeps its depth, its bounds and its hit area — one that re-sorted as it swayed would
 flicker past its neighbours.
+
+## Animation
+
+A sequence is a run of atlas cells played at a rate — `add_sequence(first, count, fps,
+mode)` — and a node points at one through `pl_seq`.  `advance(dt_us)` steps every animated
+node; `frame_of(idx)` says which cell it shows; `restart(idx)` puts it back to the
+beginning, which is what an idle → walk change needs.
+
+`LOOP` wraps.  `ONCE` stops on the last frame and stays there rather than running off the
+end of the atlas.  `PINGPONG` reverses at both ends with a period of **2n−2**, not 2n — the
+two end frames are each shown once per cycle, so four frames run `0 1 2 3 2 1`.  A period
+of 2n shows each end twice and reads as a limp; it is the classic off-by-one and it has its
+own test.
+
+⚠ **`advance` takes the simulation's own delta, in integer MICROSECONDS.**  It reads no
+clock, so a cycle is identical at any frame rate and replayable under a recorded input
+stream — the property co-op determinism rests on.  The units are integer because a game
+reaches 0.8 s by adding 0.1 s eight times, and in floating-point seconds that sum is
+`0.7999999999999999`, which truncates to frame 7 where 8 is right: an eight-frame walk
+cycle hitches once per stride.  Summing integer microseconds cannot do that, and there is a
+test that ticks exactly that case.
+
+⚠ **The instance attribute is a FRAME INDEX, not a uv rect.**  An animating sprite dirties
+**one** float per frame instead of four, which is what keeps *upload only what changed*
+meaningful with a screen full of walking mobs — the packed grid (`cols`, `rows`) is static
+and uploads once.  Deriving the uv from that grid is the shader's job; today the GL path
+draws untextured quads, so the attribute is packed and bound but not yet read.
 
 ## The camera
 

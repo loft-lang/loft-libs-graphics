@@ -96,7 +96,11 @@ fn test_instance_layout_is_exact() {
   assert(near(f[stage::OFF_AFFINE + 3], 4.0), "d = sy * h");
   assert(near(f[stage::OFF_AFFINE + 4], 10.0), "tx is the origin x");
   assert(near(f[stage::OFF_AFFINE + 5], 20.0), "ty is the origin y");
-  assert(near(f[stage::OFF_UV + 0], 0.0) and near(f[stage::OFF_UV + 3], 1.0), "uv defaults");
+  // ⚠ This slot carries a FRAME INDEX and the atlas grid, not a uv rect — an
+  // animating sprite must dirty one float per frame, never four.
+  assert(near(f[stage::OFF_CELL + 0], 0.0), "a still sprite is on frame 0");
+  assert(near(f[stage::OFF_CELL + 1], 1.0) and near(f[stage::OFF_CELL + 2], 1.0),
+         "and a 1x1 grid by default");
   assert(near(f[stage::OFF_RGBA + 0], 1.0), "r");
   assert(near(f[stage::OFF_RGBA + 1], 128.0 / 255.0), "g");
   assert(near(f[stage::OFF_RGBA + 2], 64.0 / 255.0), "b");

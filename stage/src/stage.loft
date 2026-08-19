@@ -64,6 +64,10 @@ pub struct StageNode {
     nd_cy0: float,
     nd_cx1: float,
     nd_cy1: float,
+    nd_seq: integer,         // index into `st_seqs`, or -1 for a still sprite
+    nd_elapsed: integer,     // MICROSECONDS into the sequence — see `advance`
+    nd_cols: integer,        // the atlas grid this node's cells live in
+    nd_rows: integer,
     nd_sway: float,          // ambient sway amplitude in pixels; 0 is still
     nd_phase: float,         // derived from POSITION, so neighbours are out of step
     nd_cue: float,           // derived: 0 at the near plane, 1 at the far one
@@ -94,7 +98,22 @@ pub struct Stage {
     st_uploads: integer,         // instance-buffer uploads — the gate reads this
     st_dirty: boolean,           // does the instance buffer need rewriting?
     st_time: float,              // ambient clock — a uniform, never a rewrite
+    st_seqs: vector<Sequence>,   // animation sequences, referenced by index
 }
+
+// LOOP wraps, ONCE stops on the last frame, PINGPONG reverses at both ends.
+pub const LOOP: integer = 0;
+pub const ONCE: integer = 1;
+pub const PINGPONG: integer = 2;
+
+// A run of atlas cells played at a rate.
+pub struct Sequence {
+    q_first: integer,        // first cell in the atlas
+    q_count: integer,
+    q_fps: float,
+    q_mode: integer,
+}
+
 
 // An alpha mask: per-texel coverage, row-major, 0..255.
 //
@@ -130,6 +149,9 @@ pub struct Place {
     pl_alpha: float = 1.0,
     pl_mask: integer = -1,   // index from `add_mask`, or -1 for solid
     pl_clips: boolean = false,  // clip this node's subtree to its own bounds
+    pl_seq: integer = -1,       // from `add_sequence`; -1 is a still sprite
+    pl_cols: integer = 1,       // the atlas grid the cells are packed in
+    pl_rows: integer = 1,
     pl_sway: float = 0.0,       // ambient sway amplitude, in pixels
     pl_layer: integer = 0,      // background / world / UI are BANDS, not numbers
     pl_depth: float = 0.0,      // distance INTO the screen: LARGER draws first, so
@@ -165,7 +187,7 @@ pub fn stage_new() -> Stage {
             st_cue: false, st_cue_near: 0.0, st_cue_far: 1.0,
             st_cue_scale: 1.0, st_cue_haze: 0.0, st_haze_colour: 0x000000,
             st_cam_x: 0.0, st_cam_y: 0.0, st_par: [], st_uploads: 0, st_dirty: true,
-            st_time: 0.0 }
+            st_time: 0.0, st_seqs: [] }
 }
 
 pub fn node_count(self: const Stage) -> integer {
@@ -189,6 +211,7 @@ pub fn node_add(self: Stage, parent: integer, p: const Place) -> integer {
         nd_w: p.pl_w, nd_h: p.pl_h, nd_colour: p.pl_colour, nd_visible: p.pl_visible,
         nd_atlas: p.pl_atlas, nd_u0: p.pl_u0, nd_v0: p.pl_v0, nd_u1: p.pl_u1,
         nd_v1: p.pl_v1, nd_alpha: p.pl_alpha, nd_mask: p.pl_mask,
+        nd_seq: p.pl_seq, nd_elapsed: 0, nd_cols: p.pl_cols, nd_rows: p.pl_rows,
         nd_sway: p.pl_sway, nd_phase: 0.0,
         nd_cue: 0.0, nd_layer: p.pl_layer, nd_depth: p.pl_depth,
         nd_clips: p.pl_clips, nd_clipped: false,
@@ -548,7 +571,12 @@ pub const INSTANCE_STRIDE: integer = 16;
 
 // Offsets within one instance, for the same reason.
 pub const OFF_AFFINE: integer = 0;   // a, b, c, d, tx, ty
-pub const OFF_UV: integer = 6;       // u0, v0, u1, v1
+pub const OFF_CELL: integer = 6;     // frame, cols, rows, spare
+//
+// ⚠ A FRAME INDEX, NOT A UV RECT.  An animating sprite then dirties ONE float per
+// frame instead of four, and the shader derives the uv from the grid — which is
+// what keeps `A3`'s *upload only what changed* meaningful with a screen full of
+// walking mobs.  The grid is per-node and static, so it uploads once.
 pub const OFF_RGBA: integer = 10;    // r, g, b, a
 pub const OFF_SWAY: integer = 14;    // amplitude, phase — static, so the clock is a uniform
 
@@ -603,10 +631,10 @@ pub fn pack_instances(self: const Stage) -> vector<single> {
         o = world_point(self, i, 0.0, 0.0);
         out += [o.p_x as single];
         out += [o.p_y as single];
-        out += [n.nd_u0 as single];
-        out += [n.nd_v0 as single];
-        out += [n.nd_u1 as single];
-        out += [n.nd_v1 as single];
+        out += [frame_of(self, i) as single];
+        out += [n.nd_cols as single];
+        out += [n.nd_rows as single];
+        out += [0.0f];
         // ⚠ PREMULTIPLIED.  Straight alpha under linear filtering darkens every
         // anti-aliased edge, and this stack draws overlapping soft-edged sprites
         // all day; the GL blend below is `(ONE, ONE_MINUS_SRC_ALPHA)` to match.
@@ -631,7 +659,7 @@ VERT_2D = `
 layout (location = 0) in vec3 aQuad;    // the unit quad, 0..1
 layout (location = 1) in vec4 iAffine;  // a, b, c, d — size already folded in
 layout (location = 2) in vec2 iTrans;   // tx, ty — the node's origin, in pixels
-layout (location = 3) in vec4 iUV;
+layout (location = 3) in vec4 iCell;   // frame, cols, rows, spare
 layout (location = 4) in vec4 iRGBA;
 layout (location = 5) in vec2 iSway;
 uniform vec2 uScreen;
@@ -707,7 +735,7 @@ pub fn gl_render(self: Stage, p: Painter, screen_w: float, screen_h: float) -> i
         base = b.b_first * INSTANCE_STRIDE;
         graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 1, 4, INSTANCE_STRIDE, base + OFF_AFFINE);
         graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 2, 2, INSTANCE_STRIDE, base + OFF_AFFINE + 4);
-        graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 3, 4, INSTANCE_STRIDE, base + OFF_UV);
+        graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 3, 4, INSTANCE_STRIDE, base + OFF_CELL);
         graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 4, 4, INSTANCE_STRIDE, base + OFF_RGBA);
         graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 5, 2, INSTANCE_STRIDE, base + OFF_SWAY);
         if b.b_clipped {
@@ -991,4 +1019,87 @@ pub fn sway_of(self: const Stage, idx: integer) -> float {
     n = self.st_nodes[idx];
     if n.nd_sway == 0.0 { return 0.0; }
     n.nd_sway * sin(self.st_time + n.nd_phase)
+}
+
+
+// ── P4: animation ────────────────────────────────────────────────────────────
+//
+// ⚠ ADVANCED FROM A STEP, NEVER FROM WALL TIME.  `advance` takes the simulation's
+// own delta, so a cycle is identical at any frame rate and replayable under a
+// recorded input stream — the property co-op determinism rests on.  A clock read
+// inside the library would quietly break both.
+//
+// ⚠ AND THE DELTA IS INTEGER MICROSECONDS, not seconds.  Accumulating a float
+// drifts: `0.1` added eight times is `0.7999…`, which truncates to frame 7 where 8
+// is right, and two 1/60 steps do not equal one 1/30 step. Both failures showed up
+// the first time this was gated. Integer units are what `fixstep` speaks and what
+// makes "the same total elapsed gives the same frame" true rather than nearly true.
+
+// Register a sequence and answer its index, for `Place.pl_seq`.
+pub fn add_sequence(self: Stage, first: integer, count: integer, fps: float,
+                    mode: integer) -> integer {
+    self.st_seqs += [Sequence { q_first: first,
+                                q_count: if count < 1 { 1 } else { count },
+                                q_fps: fps, q_mode: mode }];
+    len(self.st_seqs) - 1
+}
+
+// Step every animated node by `dt_us` MICROSECONDS — the simulation's own delta,
+// not a clock this library reads.
+//
+// ⚠ Dirties the instance buffer, unlike the camera and the ambient clock — an
+// animated sprite genuinely changes one number per frame.  That number is a FRAME
+// INDEX and not a uv rect, so it is one float and not four.
+pub fn advance(self: Stage, dt_us: integer) {
+    moved = false;
+    for i in 0..len(self.st_nodes) {
+        if self.st_nodes[i].nd_seq >= 0 {
+            self.st_nodes[i].nd_elapsed = self.st_nodes[i].nd_elapsed + dt_us;
+            moved = true;
+        }
+    }
+    if moved { self.st_dirty = true; }
+}
+
+// Which cell node `idx` shows right now.
+pub fn frame_of(self: const Stage, idx: integer) -> integer {
+    if idx < 0 or idx >= len(self.st_nodes) { return 0; }
+    n = self.st_nodes[idx];
+    if n.nd_seq < 0 or n.nd_seq >= len(self.st_seqs) { return 0; }
+    // ⚠ Indexed, not scanned.  `pack_instances` asks this once per node per
+    // frame, so searching the sequence table would put the number of SEQUENCES
+    // inside the loop over SPRITES — the per-frame cost this phase's design call
+    // exists to hold at one number per sprite.  The bounds test above is what
+    // makes the fallback unreachable.
+    // ⚠ The fallback is a LITERAL, not a call.  A call in this position leaks the
+    // record it returns on an index miss (loft#1013, both backends), and the
+    // compiler's refusal of a struct-valued constant prescribes exactly that
+    // leaking form.  A literal is the shape that does not.  It stays unreachable:
+    // the bounds test above is what decides that, not this line.
+    q = self.st_seqs[n.nd_seq] ?? Sequence { q_first: 0, q_count: 1, q_fps: 0.0,
+                                             q_mode: LOOP };
+    raw = ((n.nd_elapsed as float) * q.q_fps / 1000000.0) as integer;
+    if raw < 0 { raw = 0; }
+    if q.q_count <= 1 { return q.q_first; }
+    if q.q_mode == ONCE {
+        if raw > q.q_count - 1 { raw = q.q_count - 1; }
+        return q.q_first + raw;
+    }
+    if q.q_mode == PINGPONG {
+        // ⚠ The period is 2n-2, NOT 2n: the two END frames are each shown once
+        // per cycle, not twice.  A period of 2n stutters at both ends, which is
+        // the classic off-by-one in a ping-pong and reads as a limp.
+        period = q.q_count * 2 - 2;
+        pp = raw % period ?? 0;
+        if pp < q.q_count { return q.q_first + pp; }
+        return q.q_first + period - pp;
+    }
+    q.q_first + (raw % q.q_count ?? 0)
+}
+
+// Reset a node to the start of its sequence.
+pub fn restart(self: Stage, idx: integer) {
+    if idx < 0 or idx >= len(self.st_nodes) { return; }
+    self.st_nodes[idx].nd_elapsed = 0;
+    self.st_dirty = true;
 }
