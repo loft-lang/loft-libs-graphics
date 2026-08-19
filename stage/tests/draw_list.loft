@@ -1,0 +1,114 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN144 A2 — the stage draws what a hand-written immediate-mode pass draws.
+//
+// This is a PARALLEL RUN, which is the point: the old way and the new way both
+// exist and are compared exactly, pixel for pixel, rather than one being swapped
+// in and eyeballed.  A software `Canvas` is the comparison surface because it is
+// headless and deterministic — no window, no driver, no timing.
+use stage;
+use graphics;
+
+fn canvas_equal(a: const graphics::Canvas, b: const graphics::Canvas) -> boolean {
+  if a.width != b.width or a.height != b.height { return false; }
+  for i in 0..len(a.data) {
+    if a.data[i] != b.data[i] { return false; }
+  }
+  true
+}
+
+fn differing(a: const graphics::Canvas, b: const graphics::Canvas) -> integer {
+  n = 0;
+  for i in 0..len(a.data) { if a.data[i] != b.data[i] { n = n + 1; } }
+  n
+}
+
+// THE GATE: a scene rendered through the stage is byte-identical to the same
+// rectangles drawn by hand.
+fn test_stage_matches_a_hand_written_pass() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_x: 10.0, pl_y: 12.0, pl_w: 30.0, pl_h: 20.0,
+                                     pl_colour: 0xc03030 });
+  _ = st.node_add(-1, stage::Place { pl_x: 50.0, pl_y: 40.0, pl_w: 12.0, pl_h: 44.0,
+                                     pl_colour: 0x2080c0 });
+  st.compose();
+
+  by_stage = graphics::canvas(128, 96, 0xff000000);
+  stage::render(st.draw_list(), by_stage);
+
+  by_hand = graphics::canvas(128, 96, 0xff000000);
+  by_hand.fill_rect(10, 12, 30, 20, 0xffc03030);
+  by_hand.fill_rect(50, 40, 12, 44, 0xff2080c0);
+
+  assert(canvas_equal(by_stage, by_hand),
+         "stage output differs from the hand-written pass in {differing(by_stage, by_hand)} pixels");
+}
+
+// A CHILD inherits its parent's transform, and the hand-written equivalent has to
+// do that arithmetic itself — which is the ergonomic difference the arc exists for.
+fn test_a_child_is_placed_through_its_parent() {
+  st = stage::stage_new();
+  p = st.node_add(-1, stage::Place { pl_x: 20.0, pl_y: 30.0, pl_sx: 2.0, pl_sy: 2.0 });
+  _ = st.node_add(p, stage::Place { pl_x: 5.0, pl_y: 5.0, pl_w: 10.0, pl_h: 10.0,
+                                    pl_colour: 0x40a040 });
+  st.compose();
+
+  by_stage = graphics::canvas(96, 96, 0xff000000);
+  stage::render(st.draw_list(), by_stage);
+
+  // by hand: the child sits at parent (20,30) + 2 x (5,5) = (30,40), sized 2 x 10.
+  by_hand = graphics::canvas(96, 96, 0xff000000);
+  by_hand.fill_rect(30, 40, 20, 20, 0xff40a040);
+
+  assert(canvas_equal(by_stage, by_hand),
+         "child placement differs in {differing(by_stage, by_hand)} pixels");
+}
+
+// The alpha seam.  A `DrawRect` carries 0xRRGGBB and `Canvas` reads 0xAARRGGBB,
+// where a missing top byte means FULLY TRANSPARENT — graphics' own @GFX-001 trap.
+// Without `opaque` at the boundary the stage paints nothing at all, and the canvas
+// stays exactly the colour it was cleared to.
+fn test_the_alpha_byte_is_added_at_the_boundary() {
+  assert(stage::opaque(0xc03030) == 0xffc03030, "0xRRGGBB gains an opaque alpha");
+  assert(stage::opaque(0x80112233) == 0x80112233, "an explicit alpha is left alone");
+
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_x: 0.0, pl_y: 0.0, pl_w: 4.0, pl_h: 4.0,
+                                     pl_colour: 0xc03030 });
+  st.compose();
+  cv = graphics::canvas(8, 8, 0xff000000);
+  stage::render(st.draw_list(), cv);
+  assert(cv.get_pixel(1, 1) == 0xffc03030, "a 0xRRGGBB node paints, rather than vanishing");
+}
+
+// Scaffolding emits nothing: a parent that exists only to hold a transform has no
+// size, and a zero-sized node must not reach the list at all.
+fn test_a_sizeless_node_emits_nothing() {
+  st = stage::stage_new();
+  p = st.node_add(-1, stage::Place { pl_x: 10.0, pl_y: 10.0 });
+  _ = st.node_add(p, stage::Place { pl_w: 5.0, pl_h: 5.0, pl_colour: 0x111111 });
+  hidden = st.node_add(-1, stage::Place { pl_w: 5.0, pl_h: 5.0, pl_visible: false });
+  st.compose();
+  assert(len(st.draw_list()) == 1, "only the sized, visible node emits");
+  assert(hidden == 2, "an invisible node still occupies its index");
+}
+
+// A list shaped exactly as `lavition_ui`'s `panel_draw_list` produces renders
+// UNMODIFIED — no shim, no field rename.  The field names here are copied from
+// that package; if this ever needs adapting, the command shape has drifted.
+fn test_a_panel_shaped_list_renders_unmodified() {
+  panel: vector<stage::DrawRect> = [
+    stage::DrawRect { dr_rect: stage::UiRect { r_x: 2, r_y: 2, r_w: 40, r_h: 12 },
+                      dr_colour: 0x303038 },
+    stage::DrawRect { dr_rect: stage::UiRect { r_x: 4, r_y: 4, r_w: 12, r_h: 8 },
+                      dr_colour: 0x5060a0 },
+  ];
+  by_list = graphics::canvas(64, 32, 0xff000000);
+  stage::render(panel, by_list);
+
+  by_hand = graphics::canvas(64, 32, 0xff000000);
+  by_hand.fill_rect(2, 2, 40, 12, 0xff303038);
+  by_hand.fill_rect(4, 4, 12, 8, 0xff5060a0);
+  assert(canvas_equal(by_list, by_hand), "a panel-shaped list renders through the stage path");
+}

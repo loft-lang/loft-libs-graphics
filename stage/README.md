@@ -20,6 +20,7 @@ loft install stage
   already exist
 - `compose()` — derive every world transform in one forward pass
 - `world_point(idx, lx, ly)` / `world_origin(idx)` — where a local point landed
+- `draw_list() -> vector<DrawRect>` · `render(list, canvas)` · `opaque(colour)`
 
 ## The two things to know
 
@@ -34,6 +35,17 @@ a child points back is a dependency cycle in loft's ownership model, and the fla
 is also the instance buffer a batched renderer wants. `node_add` refuses a forward
 reference rather than trusting the caller, because `compose` is a single forward pass
 and would otherwise read an unwritten parent and answer *plausibly*.
+
+## The draw list
+
+`UiRect` / `DrawRect` / `DrawText` copy their field names and types **exactly** from
+`lavition_ui`, which already produces `vector<DrawRect>` from `panel_draw_list`. Matching a
+proven command shape rather than minting a rival one is deliberate: a game's UI and an
+editor's UI have to reach the GPU by one path, or the batcher sees two.
+
+⚠ `DrawRect` carries **0xRRGGBB** while `graphics::Canvas` reads **0xAARRGGBB**, where a
+missing top byte means *fully transparent* — the `@GFX-001` trap. `render` adds the alpha at
+the boundary, which is why a 0xRRGGBB colour paints instead of vanishing.
 
 ## Worked examples
 

@@ -4,7 +4,7 @@
 // stage — a retained 2-D scene: the tree a game mutates instead of a frame loop
 // it draws.  @PLN144 arc A.
 //
-// ⚠ THE TREE IS FLAT.  Nodes live in one `vector<Node>` and a child names its
+// ⚠ THE TREE IS FLAT.  Nodes live in one `vector<StageNode>` and a child names its
 // parent by INDEX, never by reference.  Two reasons, and the second is why it
 // stays that way even though a pointer tree reads more naturally:
 //
@@ -19,13 +19,21 @@
 // world transform before it was written — and produce a *plausible* wrong answer
 // rather than an error.
 
+use graphics;
+
 // A node's local placement, plus the world affine `compose` derives for it.
+//
+// ⚠ NAMED `StageNode` AND NOT `Node`, because a type name is GLOBAL across the
+// dependency graph and `mesh3d` — which `graphics` pulls in — already publishes a
+// `Node` for its 3-D scene.  The compiler refuses the collision outright rather
+// than resolving it silently, which is the good outcome; the cost of finding it
+// after publishing would have been a rename nobody can make.
 //
 // The affine is 2x3 and is applied as
 //     x' = a*lx + c*ly + tx
 //     y' = b*lx + d*ly + ty
 // which is the layout the instanced draw path consumes unchanged.
-pub struct Node {
+pub struct StageNode {
     nd_parent: integer,      // index of the parent, or -1 for a root
     nd_x: float,             // where the ORIGIN lands, in the parent's space
     nd_y: float,
@@ -34,6 +42,10 @@ pub struct Node {
     nd_sy: float,
     nd_ox: float,            // the origin, in the node's own units: put it at the
     nd_oy: float,            // sprite's feet and the sprite stands up from (x, y)
+    nd_w: float,
+    nd_h: float,
+    nd_colour: integer,
+    nd_visible: boolean,
     nd_a: float,             // derived world affine — read after `compose`
     nd_b: float,
     nd_c: float,
@@ -43,7 +55,7 @@ pub struct Node {
 }
 
 pub struct Stage {
-    st_nodes: vector<Node>,
+    st_nodes: vector<StageNode>,
 }
 
 // Where to put a node, and how.  A struct rather than nine parameters because the
@@ -57,6 +69,10 @@ pub struct Stage {
 // been handed a legal answer to a question they did not ask.  That is exactly the
 // case `omitted-field-zero` exists to warn about, answered here at the declaration.
 pub struct Place {
+    pl_w: float = 0.0,       // size in the node's own units; 0 x 0 draws nothing
+    pl_h: float = 0.0,
+    pl_colour: integer = 0,  // packed 0xRRGGBB, as `DrawRect` carries
+    pl_visible: boolean = true,
     pl_x: float = 0.0,
     pl_y: float = 0.0,
     pl_rot: float = 0.0,     // radians; +ve turns +x toward +y
@@ -93,9 +109,10 @@ pub fn node_count(self: const Stage) -> integer {
 pub fn node_add(self: Stage, parent: integer, p: const Place) -> integer {
     idx = len(self.st_nodes);
     if parent >= idx or parent < -1 { return -1; }
-    self.st_nodes += [Node {
+    self.st_nodes += [StageNode {
         nd_parent: parent, nd_x: p.pl_x, nd_y: p.pl_y, nd_rot: p.pl_rot,
         nd_sx: p.pl_sx, nd_sy: p.pl_sy, nd_ox: p.pl_ox, nd_oy: p.pl_oy,
+        nd_w: p.pl_w, nd_h: p.pl_h, nd_colour: p.pl_colour, nd_visible: p.pl_visible,
         nd_a: 1.0, nd_b: 0.0, nd_c: 0.0, nd_d: 1.0, nd_tx: 0.0, nd_ty: 0.0,
     }];
     idx
@@ -160,4 +177,90 @@ pub fn world_origin(self: const Stage, idx: integer) -> P2 {
     if idx < 0 or idx >= len(self.st_nodes) { return P2 { p_x: 0.0, p_y: 0.0 }; }
     n = self.st_nodes[idx];
     world_point(self, idx, n.nd_ox, n.nd_oy)
+}
+
+
+// ── A2: the draw list ────────────────────────────────────────────────────────
+//
+// ⚠ THESE THREE TYPES ARE NOT NEW.  Their field names and types are copied
+// EXACTLY from `lavition_ui`, which produces `vector<DrawRect>` from
+// `panel_draw_list` today and is proven by a 12 k-line editor.  Matching a working
+// command shape rather than minting a rival one is the whole point: a game's UI
+// and an editor's UI have to reach the GPU by one path, or the batcher sees two.
+//
+// ⚠ AND THEY NEED ONE HOME, WHICH THEY DO NOT YET HAVE.  `lavition_ui` is
+// unpublished, so its `DrawRect` and this one are two nominal types with one
+// shape.  Until it is published (@PLN145 `D0`) the types cannot literally be
+// shared, and one of the two must eventually give — see the plan.
+pub struct UiRect {
+    r_x: integer,
+    r_y: integer,
+    r_w: integer,
+    r_h: integer,
+}
+
+// A packed 0xRRGGBB colour, as `lavition_ui` carries it.
+pub struct DrawRect {
+    dr_rect: UiRect,
+    dr_colour: integer,
+}
+
+pub struct DrawText {
+    dt_text: text,
+    dt_x: integer,
+    dt_y: integer,           // TOP of the line, which is what draw-a-texture wants
+    dt_colour: integer,
+}
+
+// Emit the scene as a flat command list, in index order.
+//
+// Index order IS the draw order for now: `A4` gives depth its own key, and doing
+// it here would be a second ordering rule to keep in step with that one.  A node
+// with no area emits nothing — a zero size is how a pure transform parent says it
+// is scaffolding rather than a thing to look at.
+pub fn draw_list(self: const Stage) -> vector<DrawRect> {
+    out: vector<DrawRect> = [];
+    for i in 0..len(self.st_nodes) {
+        n = self.st_nodes[i];
+        if !n.nd_visible { continue; }
+        if n.nd_w <= 0.0 or n.nd_h <= 0.0 { continue; }
+        // The origin is the anchor, so the rect starts there and extends by the
+        // node's size through its own scale — which is what `nd_a`/`nd_d` carry.
+        o = world_point(self, i, n.nd_ox, n.nd_oy);
+        far = world_point(self, i, n.nd_ox + n.nd_w, n.nd_oy + n.nd_h);
+        x0 = o.p_x;
+        y0 = o.p_y;
+        w = far.p_x - x0;
+        h = far.p_y - y0;
+        if w < 0.0 { x0 = far.p_x; w = -w; }
+        if h < 0.0 { y0 = far.p_y; h = -h; }
+        out += [DrawRect {
+            dr_rect: UiRect { r_x: x0 as integer, r_y: y0 as integer,
+                              r_w: w as integer, r_h: h as integer },
+            dr_colour: n.nd_colour,
+        }];
+    }
+    out
+}
+
+// Paint a command list onto a software canvas.
+//
+// ⚠ THE ALPHA BYTE IS ADDED HERE, and it has to be.  A `DrawRect` carries
+// 0xRRGGBB — `lavition_ui` says so, and keeps it a plain integer so it needs no
+// graphics dependency — while `graphics::Canvas` reads 0xAARRGGBB and treats a
+// missing top byte as FULLY TRANSPARENT.  That is `graphics`' own `@GFX-001`
+// trap: the colour looks right in the source and paints nothing.  One `| 0xff000000`
+// at the boundary is the whole fix, and it belongs at the boundary rather than in
+// every caller.
+pub fn render(list: const vector<DrawRect>, cv: graphics::Canvas) {
+    for d in list {
+        cv.fill_rect(d.dr_rect.r_x, d.dr_rect.r_y, d.dr_rect.r_w, d.dr_rect.r_h,
+                     opaque(d.dr_colour));
+    }
+}
+
+// 0xRRGGBB -> 0xAARRGGBB, leaving an already-opaque colour alone.
+pub fn opaque(colour: integer) -> integer {
+    if (colour & 0xff000000) != 0 { return colour; }
+    colour | 0xff000000
 }
