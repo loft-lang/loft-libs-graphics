@@ -1,0 +1,128 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN144 A5 — alpha and tint, composited, with every expected byte worked out by
+// hand.  Premultiplied throughout: `over` is `src + dst*(1-a)` with `src` already
+// multiplied, because straight alpha darkens an anti-aliased edge under linear
+// filtering and this stack is made of overlapping soft-edged sprites.
+use stage;
+use graphics;
+
+// Classify a canvas by EXACT colour, dryopea's RENDERER.md R0 technique: a
+// byte-diff says *different*, a classification says *what*.  `other` must read 0.
+fn count_of(cv: const graphics::Canvas, want: integer) -> integer {
+  n = 0;
+  for v in cv.data { if v == want { n = n + 1; } }
+  n
+}
+fn other_than(cv: const graphics::Canvas, a: integer, b: integer) -> integer {
+  n = 0;
+  for v in cv.data { if v != a and v != b { n = n + 1; } }
+  n
+}
+
+// Alpha 1 is exactly the colour — the degenerate case proved, not assumed.
+fn test_full_alpha_is_the_colour() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_w: 4.0, pl_h: 4.0, pl_colour: 0xc03030 });
+  st.compose();
+  cv = graphics::canvas(8, 8, 0xff000000);
+  st.render_stage(cv);
+  assert(cv.get_pixel(1, 1) == 0xffc03030, "opaque paints the colour exactly");
+  assert(count_of(cv, 0xffc03030) == 16, "a 4x4 rect is 16 pixels");
+  assert(other_than(cv, 0xffc03030, 0xff000000) == 0, "no third colour anywhere");
+}
+
+// Alpha 0 leaves the destination untouched.
+fn test_zero_alpha_paints_nothing() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_w: 4.0, pl_h: 4.0, pl_colour: 0xffffff,
+                                     pl_alpha: 0.0 });
+  st.compose();
+  cv = graphics::canvas(8, 8, 0xff102030);
+  st.render_stage(cv);
+  assert(count_of(cv, 0xff102030) == 64, "every pixel is still the background");
+}
+
+// THE HAND-COMPUTED CELL.  alpha 0.5 -> ia = round(0.5*255) = 128.
+//   premultiplied source red = (255*128 + 127) / 255 = 32767/255 = 128
+//   over(128, 0, 128)        = (128*255 + 0*127 + 127) / 255 = 32767/255 = 128
+// so pure red at half alpha over black is exactly 0xff800000.
+fn test_half_alpha_over_black() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_w: 4.0, pl_h: 4.0, pl_colour: 0xff0000,
+                                     pl_alpha: 0.5 });
+  st.compose();
+  cv = graphics::canvas(8, 8, 0xff000000);
+  st.render_stage(cv);
+  assert(cv.get_pixel(1, 1) == 0xff800000,
+         "half red over black is 0x80, got {cv.get_pixel(1, 1)}");
+  assert(other_than(cv, 0xff800000, 0xff000000) == 0, "no third colour");
+}
+
+// Half alpha over a NON-black destination — the case that catches a composite
+// which ignores what is underneath.
+//   dst = 0x40, src premultiplied = 128
+//   over(128, 64, 128) = (128*255 + 64*127 + 127) / 255 = (32640+8128+127)/255
+//                      = 40895/255 = 160
+fn test_half_alpha_over_a_colour() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_w: 4.0, pl_h: 4.0, pl_colour: 0xff0000,
+                                     pl_alpha: 0.5 });
+  st.compose();
+  cv = graphics::canvas(8, 8, 0xff404040);
+  st.render_stage(cv);
+  got = cv.get_pixel(1, 1);
+  assert(got == 0xffa02020, "half red over 0x40 grey is 0xa02020, got {got}");
+}
+
+// Two translucent nodes stack IN ORDER, and the second sees the first's result.
+//
+// ⚠ Work the channels SEPARATELY — the mistake this comment replaces was carrying
+// red's destination into green and blue.  After node 1 the pixel is (128, 0, 0),
+// not (128, 128, 128).  Node 2 is white at 0.5, so its premultiplied source is
+// (128, 128, 128) and:
+//   R: over(128, 128, 128) = (128*255 + 128*127 + 127)/255 = 49023/255 = 192
+//   G: over(128,   0, 128) = (128*255 +   0*127 + 127)/255 = 32767/255 = 128
+//   B: same as G                                                        = 128
+fn test_two_translucent_nodes_stack_in_order() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_w: 4.0, pl_h: 4.0, pl_colour: 0xff0000,
+                                     pl_alpha: 0.5 });
+  _ = st.node_add(-1, stage::Place { pl_w: 4.0, pl_h: 4.0, pl_colour: 0xffffff,
+                                     pl_alpha: 0.5 });
+  st.compose();
+  cv = graphics::canvas(8, 8, 0xff000000);
+  st.render_stage(cv);
+  got = cv.get_pixel(1, 1);
+  assert(got == 0xffc08080, "red then white, both half — expect 0xc08080, got {got}");
+}
+
+// Tint is the node's own colour: two nodes of the same shape and alpha differ only
+// by it, and the difference survives compositing.
+fn test_tint_reaches_the_composite() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_x: 0.0, pl_w: 2.0, pl_h: 2.0, pl_colour: 0x00ff00 });
+  _ = st.node_add(-1, stage::Place { pl_x: 4.0, pl_w: 2.0, pl_h: 2.0, pl_colour: 0x0000ff });
+  st.compose();
+  cv = graphics::canvas(8, 8, 0xff000000);
+  st.render_stage(cv);
+  assert(cv.get_pixel(1, 1) == 0xff00ff00 and cv.get_pixel(5, 1) == 0xff0000ff,
+         "each node keeps its own tint");
+}
+
+// The two paths agree where alpha is 1 — `render` (a lavition_ui command list) and
+// `render_stage` must not drift into two different pictures.
+fn test_the_two_render_paths_agree_at_full_alpha() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_x: 2.0, pl_y: 3.0, pl_w: 5.0, pl_h: 4.0,
+                                     pl_colour: 0x3060a0 });
+  st.compose();
+  a = graphics::canvas(16, 16, 0xff000000);
+  st.render_stage(a);
+  b = graphics::canvas(16, 16, 0xff000000);
+  stage::render(st.draw_list(), b);
+  same = true;
+  for i in 0..len(a.data) { if a.data[i] != b.data[i] { same = false; } }
+  assert(same, "render_stage and render draw the same opaque picture");
+}

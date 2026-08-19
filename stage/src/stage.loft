@@ -367,9 +367,12 @@ pub fn pack_instances(self: const Stage) -> vector<single> {
         out += [n.nd_v0 as single];
         out += [n.nd_u1 as single];
         out += [n.nd_v1 as single];
-        out += [(((n.nd_colour >> 16) & 255) as float / 255.0) as single];
-        out += [(((n.nd_colour >> 8) & 255) as float / 255.0) as single];
-        out += [((n.nd_colour & 255) as float / 255.0) as single];
+        // ⚠ PREMULTIPLIED.  Straight alpha under linear filtering darkens every
+        // anti-aliased edge, and this stack draws overlapping soft-edged sprites
+        // all day; the GL blend below is `(ONE, ONE_MINUS_SRC_ALPHA)` to match.
+        out += [((((n.nd_colour >> 16) & 255) as float / 255.0) * n.nd_alpha) as single];
+        out += [((((n.nd_colour >> 8) & 255) as float / 255.0) * n.nd_alpha) as single];
+        out += [(((n.nd_colour & 255) as float / 255.0) * n.nd_alpha) as single];
         out += [n.nd_alpha as single];
     }
     out
@@ -437,6 +440,9 @@ pub fn gl_render(self: const Stage, p: Painter, screen_w: float, screen_h: float
     } else {
         graphics::gl_update_buffer(p.pn_ivbo, floats);
     }
+    // Premultiplied compositing, to match `pack_instances` and the software path.
+    graphics::gl_enable(graphics::GL_BLEND);
+    graphics::gl_blend_func(graphics::BLEND_ONE, graphics::BLEND_ONE_MINUS_SRC_ALPHA);
     graphics::gl_use_shader(p.pn_shader);
     graphics::gl_set_uniform_vec2(p.pn_shader, "uScreen", screen_w, screen_h);
     calls = 0;
@@ -562,3 +568,55 @@ pub fn released_on(self: const Stage, idx: integer, sx: float, sy: float) -> boo
 }
 
 pub fn capture(self: const Stage) -> integer { self.st_capture }
+
+
+// ── A5: compositing ──────────────────────────────────────────────────────────
+
+// Composite one premultiplied source over a destination channel.
+//
+// `src` is ALREADY multiplied by `ia`, so this is `src + dst * (1 - a)` in integer
+// arithmetic, rounded to nearest.  Straight alpha would need `src * a` here and
+// would darken an anti-aliased edge under linear filtering — the reason the whole
+// path is premultiplied.
+fn over(src: integer, dst: integer, ia: integer) -> integer {
+    (src * 255 + dst * (255 - ia) + 127) / 255 ?? 0
+}
+
+// Paint the scene onto a software canvas, honouring each node's alpha and tint.
+//
+// `render(list, canvas)` stays the path for a `lavition_ui` command list, which
+// carries 0xRRGGBB and no alpha by design.  This is the stage's own path, where a
+// node has an alpha to respect — and the two must agree wherever alpha is 1.
+pub fn render_stage(self: const Stage, cv: graphics::Canvas) {
+    for i in 0..len(self.st_nodes) {
+        n = self.st_nodes[i];
+        if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { continue; }
+        if n.nd_alpha <= 0.0 { continue; }
+        ia = (n.nd_alpha * 255.0 + 0.5) as integer;
+        if ia > 255 { ia = 255; }
+        if ia < 0 { ia = 0; }
+        sr = (((n.nd_colour >> 16) & 255) * ia + 127) / 255 ?? 0;
+        sg = (((n.nd_colour >> 8) & 255) * ia + 127) / 255 ?? 0;
+        sb = ((n.nd_colour & 255) * ia + 127) / 255 ?? 0;
+        o = world_point(self, i, n.nd_ox, n.nd_oy);
+        far = world_point(self, i, n.nd_ox + n.nd_w, n.nd_oy + n.nd_h);
+        x0 = o.p_x as integer;
+        y0 = o.p_y as integer;
+        x1 = far.p_x as integer;
+        y1 = far.p_y as integer;
+        if x1 < x0 { t = x0; x0 = x1; x1 = t; }
+        if y1 < y0 { t2 = y0; y0 = y1; y1 = t2; }
+        for py in y0..y1 {
+            for px in x0..x1 {
+                d = cv.get_pixel(px, py);
+                dr = (d >> 16) & 255;
+                dg = (d >> 8) & 255;
+                db = d & 255;
+                cv.set_pixel(px, py, 0xff000000
+                    | (over(sr, dr, ia) << 16)
+                    | (over(sg, dg, ia) << 8)
+                    | over(sb, db, ia));
+            }
+        }
+    }
+}

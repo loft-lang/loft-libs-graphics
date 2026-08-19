@@ -21,6 +21,7 @@ loft install stage
 - `compose()` — derive every world transform in one forward pass
 - `world_point(idx, lx, ly)` / `world_origin(idx)` — where a local point landed
 - `draw_list() -> vector<DrawRect>` · `render(list, canvas)` · `opaque(colour)`
+- `render_stage(canvas)` — the stage's own path, honouring per-node alpha
 - `pick(x, y)` · `hits(idx, x, y)` · `to_local(idx, x, y)` · `press` / `release` /
   `released_on` / `capture` · `add_mask(w, h, alpha)`
 - `batches() -> vector<Batch>` · `pack_instances() -> vector<single>` ·
@@ -78,6 +79,17 @@ the tree, so you can click through it. A node with no mask is solid.
 pointer has drifted to; `released_on` is the separate question a button asks. Without that
 split a button fires when you press it and slide away, and fails to fire when you press it and
 drift a pixel.
+
+## Compositing
+
+**Premultiplied throughout.** `pack_instances` multiplies rgb by alpha and `gl_render` blends
+with `(ONE, ONE_MINUS_SRC_ALPHA)`; `render_stage` does the same arithmetic on a software
+canvas. Straight alpha darkens every anti-aliased edge under linear filtering, and this stack
+is made of overlapping soft-edged sprites.
+
+`render(list, canvas)` stays the path for a `lavition_ui` command list, which carries
+0xRRGGBB and no alpha by design. The two agree wherever alpha is 1, and there is a test that
+says so — two render paths drifting into two different pictures is the failure worth guarding.
 
 ## Worked examples
 
