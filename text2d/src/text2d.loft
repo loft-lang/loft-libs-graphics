@@ -164,7 +164,7 @@ pub fn atlas_cell(self: Atlas, code: integer) -> integer {
       * (self.a_cv.height / (face::GLYPH_H * self.a_scale) ?? 1);
   if self.a_next >= cap { return -1; }
   cell = self.a_next;
-  cx = (cell % self.a_cols) * face::GLYPH_W * self.a_scale;
+  cx = (cell % self.a_cols ?? 0) * face::GLYPH_W * self.a_scale;
   cy = (cell / self.a_cols ?? 0) * face::GLYPH_H * self.a_scale;
   blit_glyph(self.a_cv, c, cx, cy, 0xffffffff, self.a_scale);
   self.a_codes += [c];
@@ -193,7 +193,7 @@ pub fn draw_quads(cv: graphics::Canvas, atlas: const Atlas, quads: const vector<
   gh = face::GLYPH_H * atlas.a_scale;
   for q in quads {
     if q.q_cell < 0 { continue; }
-    sx = (q.q_cell % atlas.a_cols) * gw;
+    sx = (q.q_cell % atlas.a_cols ?? 0) * gw;
     sy = (q.q_cell / atlas.a_cols ?? 0) * gh;
     for py in 0..gh {
       for px in 0..gw {
@@ -305,6 +305,11 @@ pub fn fits(self: const Metrics, s: text, px: integer) -> boolean {
 // ".." rather than a single "…": the ellipsis is one code point but several
 // bytes, and a marker whose own width is ambiguous is the wrong thing to measure
 // a truncation with.
+//
+// ⚠ CUTS BY CHARACTERS.  This shipped in B1m as `s[0..keep]`, a BYTE range given
+// a character count — safe, because loft snaps a byte cut outward to a character
+// boundary, but wrong: a non-ASCII label came back shorter than it needed to be.
+// B2's `take_chars` is the cure and the trap is the same one wrapping has.
 pub fn fit_text(self: const Metrics, s: text, px: integer) -> text {
     if self.m_adv64 <= 0 { return s; }
     if width(self, s) <= px { return s; }
@@ -316,7 +321,142 @@ pub fn fit_text(self: const Metrics, s: text, px: integer) -> text {
     if keep <= 0 {
         room = px / adv ?? 0;
         if room <= 0 { return ""; }
-        return s[0..room];
+        return take_chars(s, room);
     }
-    s[0..keep] + ".."
+    take_chars(s, keep) + ".."
+}
+
+
+// ── B2: wrapping and alignment ───────────────────────────────────────────────
+//
+// ⚠ `len(text)` COUNTS CHARACTERS; `s[a..b]` SLICES BYTES.  `"héllo"[0..5]` is
+// `"héll"` — four characters, not five.  loft snaps a byte cut outward to a
+// character boundary, so the failure is not mojibake but something quieter: a
+// break computed as a character count and applied as a byte range fits FEWER
+// characters than it measured, silently, and only in text that is not ASCII.
+// Everything here counts and cuts in characters for that reason.
+
+pub const ALIGN_LEFT: integer = 0;
+pub const ALIGN_CENTRE: integer = 1;
+pub const ALIGN_RIGHT: integer = 2;
+
+// The first `n` CHARACTERS of `s`.  The cure for the trap above, and public
+// because every caller that slices text by a measured count needs it.
+pub fn take_chars(s: text, n: integer) -> text {
+    if n <= 0 { return ""; }
+    out = "";
+    k = 0;
+    for c in s {
+        if k >= n { break; }
+        out += c;
+        k = k + 1;
+    }
+    out
+}
+
+// How many characters of `s` fit in `px`.
+//
+// Computed rather than searched: a width is `ceil(chars * adv64 / 64)`, which is
+// monotonic in the count, so the largest count that fits is a division.  Never
+// answers zero — see `wrap`.
+fn chars_fitting(self: const Metrics, s: text, px: integer) -> integer {
+    if self.m_adv64 <= 0 { return len(s); }
+    k = (px * 64) / self.m_adv64 ?? 0;
+    if k < 1 { k = 1; }
+    if k > len(s) { k = len(s); }
+    k
+}
+
+// Break `s` into lines that each fit `px`, greedily, on measured advances.
+//
+// ⚠ A LINE ALWAYS TAKES AT LEAST ONE CHARACTER.  In a box narrower than the
+// narrowest glyph the alternatives are an infinite loop or dropping the text,
+// and a line that overflows and says so is better than either.
+//
+// ⚠ AND THE RESULTING TABLE IS PER TARGET.  Native measures a real TTF, the
+// browser measures whatever family resolved, so the same string breaks in
+// different places.  The invariant that travels is self-consistency: every line
+// here fits the box THESE metrics measured.
+pub fn wrap(self: const Metrics, s: text, px: integer) -> vector<text> {
+    lines: vector<text> = [];
+    line = "";
+    word = "";
+    for c in s {
+        if c == '\n' {
+            lines += [flush_word(self, line, word, px, lines)];
+            // `flush_word` returns the line it could not place; a hard break
+            // ends the line whatever is left on it.
+            line = "";
+            word = "";
+            continue;
+        }
+        if c == ' ' {
+            line = place(self, line, word, px, lines);
+            word = "";
+            continue;
+        }
+        word += c;
+    }
+    line = place(self, line, word, px, lines);
+    // ⚠ The open line is pushed unless it is empty AND something was already
+    // pushed: a hard break that consumed the whole word leaves nothing open, and
+    // a trailing blank line is a real one to a caller drawing carets or counting
+    // height.  An EMPTY document still gets its single empty line.
+    if line != "" or len(lines) == 0 { lines += [line]; }
+    lines
+}
+
+// Put `word` onto `line`, pushing completed lines into `lines`, and answer the
+// line that is still open.
+fn place(self: const Metrics, line: text, word: text, px: integer,
+         lines: vector<text>) -> text {
+    if word == "" { return line; }
+    cand = if line == "" { word } else { line + " " + word };
+    if width(self, cand) <= px { return cand; }
+    open = line;
+    if open != "" {
+        lines += [open];
+        open = "";
+    }
+    // The word alone, hard-broken if it cannot fit even on an empty line.
+    rest = word;
+    while width(self, rest) > px {
+        k = chars_fitting(self, rest, px);
+        lines += [take_chars(rest, k)];
+        rest = drop_chars(rest, k);
+    }
+    rest
+}
+
+// The line `flush_word` leaves open is always empty — an explicit break ends the
+// line — but the words before it still have to be placed.
+fn flush_word(self: const Metrics, line: text, word: text, px: integer,
+              lines: vector<text>) -> text {
+    place(self, line, word, px, lines)
+}
+
+// Everything after the first `n` CHARACTERS.
+fn drop_chars(s: text, n: integer) -> text {
+    out = "";
+    k = 0;
+    for c in s {
+        if k >= n { out += c; }
+        k = k + 1;
+    }
+    out
+}
+
+// Where to start drawing `line` inside a box at `bx` of width `bw`.
+//
+// ⚠ A LINE WIDER THAN ITS BOX STARTS AT THE BOX.  Centring or right-aligning it
+// arithmetically would push its beginning off the left edge, where it cannot be
+// clipped back into view — overflow to the right is recoverable, overflow to the
+// left loses the start of the text.
+pub fn align_x(self: const Metrics, line: text, bx: integer, bw: integer,
+               align: integer) -> integer {
+    slack = bw - width(self, line);
+    if slack <= 0 { return bx; }
+    if align == ALIGN_CENTRE { return bx + (slack / 2 ?? 0); }
+    if align == ALIGN_RIGHT { return bx + slack; }
+    bx
 }

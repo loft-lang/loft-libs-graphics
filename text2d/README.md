@@ -29,6 +29,8 @@ A face baked in as data needs none of the three.
 - `metrics_measured(wide_run, narrow_run, n, line_h)` · `metrics_builtin(scale)` ·
   `Metrics.width(s)` / `.fits(s, px)` / `.fit_text(s, px)` / `.advance()` /
   `.advance64()` / `.height()` / `.is_mono()`
+- `Metrics.wrap(s, px) -> vector<text>` · `Metrics.align_x(line, bx, bw, align)` ·
+  `ALIGN_LEFT` / `ALIGN_CENTRE` / `ALIGN_RIGHT` · `take_chars(s, n)`
 
 ⚠ `write_text`, not `draw_text`: `graphics` has a `draw_text` **method** on `Canvas`, and a
 method spelling outranks a library's free function of the same name (loft#940). A distinct
@@ -70,6 +72,38 @@ gap the ink extent leaves off, and answer different questions.
 from "never measured" by looking for the marker. The marker is `".."` and not a single `…`:
 the ellipsis is one code point but several bytes, and a marker whose own width is ambiguous
 is the wrong thing to measure a truncation with.
+
+## Wrapping and alignment
+
+`wrap(s, px)` breaks greedily on measured advances; `align_x` places a line in a box.
+
+⚠ **`len(text)` counts CHARACTERS; `s[a..b]` slices BYTES.** `"héllo"[0..5]` is `"héll"` —
+four characters, not five. loft snaps a byte cut outward to a character boundary, so the
+failure is not mojibake but something quieter: a break computed as a character count and
+applied as a byte range **fits fewer characters than it measured**, silently, and only in
+text that is not ASCII. Everything here counts and cuts in characters, and `take_chars(s, n)`
+is public because every caller that slices text by a measured count needs it.
+
+⚠ **A line always takes at least one character**, so wrapping terminates even in a box
+narrower than the narrowest glyph. The alternatives are an infinite loop or dropping the
+text, and a line that overflows and says so is better than either.
+
+A word wider than the box is broken by characters rather than left to overflow. An explicit
+`\n` breaks a line that would otherwise have fitted — it is the author's break, not a
+suggestion. An empty string wraps to **one empty line**, because an empty document still has
+a line to put a caret on.
+
+⚠ **A line wider than its box starts at the box**, under every alignment. Centring or
+right-aligning it arithmetically would push its beginning off the left edge, where it cannot
+be clipped back into view; overflow to the right is recoverable, overflow to the left loses
+the start of the text.
+
+**The break table is per target and there is no shared one to assert.** Native measures a
+real TTF and the browser measures whatever family resolved, so the same string breaks in
+different places. What is cross-target is **self-consistency**: every line fits the box
+*those* metrics measured. The hand-computed table is written against the built-in face — the
+one target whose measurement is knowable without a font — and the property is gated over a
+fixed-pitch face, a fractional-advance one and a proportional one.
 
 ## The glyph atlas
 

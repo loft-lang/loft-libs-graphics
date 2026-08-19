@@ -1,0 +1,174 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN145 B2 — wrapping and alignment.
+//
+// ⚠ THE BREAK TABLE IS PER TARGET, so there is no shared one to assert.  Native
+// measures a real TTF and the browser measures whatever family resolved, so the
+// same string breaks in different places.  What IS cross-target is
+// SELF-CONSISTENCY: the text a target draws fits the box that same target
+// measured.  The hand-computed table below therefore uses the BUILT-IN face —
+// the one target whose measurement is knowable here — and the property gate
+// runs the same invariant over several different metrics.
+use text2d;
+
+fn joined(v: const vector<text>) -> text {
+  out = "";
+  for s in v { out += "[" + s + "]"; }
+  out
+}
+
+// ── the hand-computed table, on the one face whose metrics are knowable ─────
+
+// `metrics_builtin(1)` advances 6 px per character, so a width in pixels is a
+// character count times six and every expectation below is arithmetic.
+fn test_the_break_table_is_exact_on_the_builtin_face() {
+  m = text2d::metrics_builtin(1);
+  s = "aaa bbb ccc ddd";
+  assert(joined(m.wrap(s, 18)) == "[aaa][bbb][ccc][ddd]",
+         "3 characters wide: {joined(m.wrap(s, 18))}");
+  assert(joined(m.wrap(s, 42)) == "[aaa bbb][ccc ddd]",
+         "7 characters wide: {joined(m.wrap(s, 42))}");
+  assert(joined(m.wrap(s, 66)) == "[aaa bbb ccc][ddd]",
+         "11 characters wide: {joined(m.wrap(s, 66))}");
+  assert(joined(m.wrap(s, 90)) == "[aaa bbb ccc ddd]",
+         "the whole string fits: {joined(m.wrap(s, 90))}");
+}
+
+// A word longer than the box is broken by CHARACTERS rather than left to
+// overflow — a box proved to fit must actually contain what is drawn in it.
+fn test_a_word_wider_than_the_box_is_broken() {
+  m = text2d::metrics_builtin(1);
+  assert(joined(m.wrap("aaaaaaaaa", 30)) == "[aaaaa][aaaa]",
+         "9 characters at 5 per line: {joined(m.wrap(\"aaaaaaaaa\", 30))}");
+}
+
+// ── the character-vs-byte trap ──────────────────────────────────────────────
+
+// ⚠ THE LIVE TRAP, AND IT IS NOT THEORETICAL.  `len(text)` counts CHARACTERS
+// while `s[a..b]` slices BYTES: `"héllo"[0..5]` is `"héll"`, four characters,
+// not five.  A wrapper that breaks with a byte slice therefore fits fewer
+// characters than it measured — silently, and only for text that is not ASCII.
+//
+// Nine o-umlauts are nine characters and eighteen bytes.  At five characters per
+// line the answer is 5 then 4.  A byte-sliced break gives 3 on the first line,
+// which is why this cell is here and why it uses a word that must be broken.
+fn test_multi_byte_text_breaks_by_characters_not_bytes() {
+  m = text2d::metrics_builtin(1);
+  s = "ööööööööö";
+  assert(len(s) == 9 and size(s) == 18, "nine characters, eighteen bytes");
+  got = m.wrap(s, 30);
+  assert(joined(got) == "[ööööö][öööö]", "5 then 4 characters: {joined(got)}");
+  assert(len(got[0] ?? "") == 5, "the first line holds five CHARACTERS");
+}
+
+// Nothing is dropped and nothing is invented, whatever the text is made of.
+fn test_wrapping_preserves_every_character() {
+  m = text2d::metrics_builtin(1);
+  for s in ["aaa bbb ccc ddd", "héllo wörld", "ööööööööö", "a", ""] {
+    total = 0;
+    for line in m.wrap(s, 30) { total += len(line); }
+    spaces = 0;
+    for c in s { if c == ' ' { spaces = spaces + 1; } }
+    // A break consumes the space it broke at, so the characters that survive are
+    // everything but the separators that became line ends.
+    assert(total <= len(s) and total >= len(s) - spaces,
+           "{s}: kept {total} of {len(s)} characters");
+  }
+}
+
+// ── the cross-target invariant ──────────────────────────────────────────────
+
+// ⚠ SELF-CONSISTENCY IS THE GATE THAT TRAVELS.  A break table cannot: the same
+// string breaks in different places on every target.  This one holds on all of
+// them — every line a target produces fits the box that target measured.  It is
+// run over a fixed-pitch face, a fractional-advance face (9.6 px, where the
+// rounding lives) and a proportional one, because a rule proved on one metric is
+// a rule proved on one metric.
+fn test_every_line_fits_the_box_it_was_wrapped_to() {
+  ms = [text2d::metrics_builtin(1),
+        text2d::metrics_builtin(3),
+        text2d::metrics_measured(96.0, 96.0, 10, 19),    // 9.6 px, fractional
+        text2d::metrics_measured(120.0, 61.0, 10, 19)];  // proportional
+  for mi in 0..len(ms) {
+    m = ms[mi];
+    for s in ["aaa bbb ccc ddd", "héllo wörld", "supercalifragilistic", "a b c"] {
+      for px in [20, 30, 48, 90, 200] {
+        for line in m.wrap(s, px) {
+          // The one exception is a box too narrow for a single character: a line
+          // always takes at least one, because dropping text or looping forever
+          // are both worse answers than one that overflows and says so.
+          if len(line) > 1 {
+            assert(m.fits(line, px),
+                   "metric {mi}, box {px}: '{line}' measures {m.width(line)}");
+          }
+        }
+      }
+    }
+  }
+}
+
+// ⚠ A LINE ALWAYS TAKES AT LEAST ONE CHARACTER, so wrapping terminates even in a
+// box narrower than the narrowest glyph.  The alternatives are an infinite loop
+// or silently dropping the text, and both are worse than a line that overflows.
+fn test_a_box_too_narrow_for_one_character_still_terminates() {
+  m = text2d::metrics_builtin(1);              // 6 px per character
+  got = m.wrap("abc", 3);
+  assert(joined(got) == "[a][b][c]", "one character per line: {joined(got)}");
+}
+
+// ── explicit breaks ─────────────────────────────────────────────────────────
+
+// A newline is a break the author asked for, so it is honoured even where the
+// line would have fitted.  A wrapper that swallowed them would silently reflow
+// every deliberately laid-out block.
+fn test_an_explicit_newline_breaks_a_line_that_would_fit() {
+  m = text2d::metrics_builtin(1);
+  assert(joined(m.wrap("ab\ncd", 600)) == "[ab][cd]",
+         "the box is huge, the break is the author's: {joined(m.wrap(\"ab\\ncd\", 600))}");
+}
+
+// ── the degenerate cases ────────────────────────────────────────────────────
+
+fn test_an_empty_string_is_one_empty_line() {
+  m = text2d::metrics_builtin(1);
+  got = m.wrap("", 60);
+  assert(len(got) == 1 and (got[0] ?? "x") == "",
+         "an empty document still has a line to put a caret on");
+}
+
+// ── alignment ───────────────────────────────────────────────────────────────
+
+// Hand-computed in a box at x = 100, 60 px wide, with "abc" measuring 18 px:
+// left 100, centred 100 + (60-18)/2 = 121, right 100 + 60 - 18 = 142.
+fn test_the_three_alignments_are_hand_computed() {
+  m = text2d::metrics_builtin(1);
+  assert(m.align_x("abc", 100, 60, text2d::ALIGN_LEFT) == 100, "left");
+  assert(m.align_x("abc", 100, 60, text2d::ALIGN_CENTRE) == 121, "centred");
+  assert(m.align_x("abc", 100, 60, text2d::ALIGN_RIGHT) == 142, "right");
+}
+
+// A line wider than its box starts at the box, never outside it — the text
+// overflows to the right, where it can be clipped, rather than off the left edge
+// where the beginning of it is lost.
+fn test_an_overlong_line_is_not_pushed_off_the_left() {
+  m = text2d::metrics_builtin(1);
+  for a in [text2d::ALIGN_LEFT, text2d::ALIGN_CENTRE, text2d::ALIGN_RIGHT] {
+    assert(m.align_x("aaaaaaaaaa", 100, 12, a) == 100,
+           "alignment {a} keeps the start of the line visible");
+  }
+}
+
+// ── the shipped truncation learns the same lesson ───────────────────────────
+
+// ⚠ `fit_text` SHIPPED IN B1m CUTTING A BYTE RANGE WITH A CHARACTER COUNT.  It
+// under-filled rather than corrupting — loft snaps a byte cut outward to a
+// character boundary — so it was safe and wrong: a label that fits came back
+// shorter than it needed to be, and only ever in non-ASCII text.
+fn test_fit_text_cuts_by_characters() {
+  m = text2d::metrics_builtin(1);              // 6 px per character
+  // 8 characters of room; two go to the marker, so six survive.
+  assert(m.fit_text("öööööööööö", 48) == "öööööö..",
+         "six characters then the marker: {m.fit_text(\"öööööööööö\", 48)}");
+  assert(m.fit_text("aaaaaaaaaa", 48) == "aaaaaa..", "and ASCII is unchanged");
+}
