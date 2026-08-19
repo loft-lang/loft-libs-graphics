@@ -21,6 +21,8 @@ loft install stage
 - `compose()` — derive every world transform in one forward pass
 - `world_point(idx, lx, ly)` / `world_origin(idx)` — where a local point landed
 - `draw_list() -> vector<DrawRect>` · `render(list, canvas)` · `opaque(colour)`
+- `batches() -> vector<Batch>` · `pack_instances() -> vector<single>` ·
+  `INSTANCE_STRIDE` / `OFF_AFFINE` / `OFF_UV` / `OFF_RGBA`
 
 ## The two things to know
 
@@ -47,10 +49,23 @@ editor's UI have to reach the GPU by one path, or the batcher sees two.
 missing top byte means *fully transparent* — the `@GFX-001` trap. `render` adds the alpha at
 the boundary, which is why a 0xRRGGBB colour paints instead of vanishing.
 
+## Batching
+
+`batches()` splits the scene into runs of **consecutive** nodes sharing an atlas, and
+`pack_instances()` packs every visible node into one float buffer at `INSTANCE_STRIDE`
+(a 2×3 affine, a uv rect, an rgba). A batch's `b_first`/`b_count` index that buffer directly.
+
+⚠ **It merges adjacent runs and never sorts.** Gathering every command of one atlas together
+would be faster and would draw the wrong picture, because overlapping translucent draws must
+composite in call order. The cost is that interleaving two atlases sprite-by-sprite gives one
+instance per run — a **packing** problem, cured upstream by putting sprites that draw near
+each other on one page.
+
 ## Worked examples
 
 `@STG-001` the origin is the anchor · `@STG-002` a parent must already exist ·
-`@STG-003` `compose` is the caller's to run — [tests/worked-examples.loft](tests/worked-examples.loft).
+`@STG-003` `compose` is the caller's to run ·
+`@STG-004` the batcher never reorders — [tests/worked-examples.loft](tests/worked-examples.loft).
 
 ## Provenance
 

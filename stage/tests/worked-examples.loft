@@ -66,3 +66,33 @@ fn test_compose_is_the_callers_to_run() {
   after = st.world_origin(n);
   assert(close(after.p_x, 10.0) and close(after.p_y, 20.0), "compose derives it");
 }
+
+// @STG-004 — the batcher merges ADJACENT runs and never sorts, and the cost of
+// that is real.  2-D correctness is painter's algebra: overlapping translucent
+// draws must composite in call order, so gathering every command of one atlas
+// together would be faster and would draw the wrong picture.  The consequence a
+// caller must plan for is that interleaving two atlases sprite-by-sprite gives
+// ONE INSTANCE PER RUN — four sprites, four draws.  That is a PACKING problem and
+// the cure is upstream: sprites that draw near each other must share a page.
+// Batching cannot fix it without reordering, and reordering is the one thing it
+// may not do.
+fn test_the_batcher_never_reorders() {
+  st = stage::stage_new();
+  a = stage::Place { pl_w: 4.0, pl_h: 4.0, pl_atlas: 1 };
+  b = stage::Place { pl_w: 4.0, pl_h: 4.0, pl_atlas: 2 };
+  _ = st.node_add(-1, a);
+  _ = st.node_add(-1, b);
+  _ = st.node_add(-1, a);
+  _ = st.node_add(-1, b);
+  st.compose();
+  assert(len(st.batches()) == 4,
+         "interleaved atlases stay four runs — gathering them would reorder the frame");
+
+  grouped = stage::stage_new();
+  _ = grouped.node_add(-1, a);
+  _ = grouped.node_add(-1, a);
+  _ = grouped.node_add(-1, b);
+  _ = grouped.node_add(-1, b);
+  grouped.compose();
+  assert(len(grouped.batches()) == 2, "the same four sprites, packed well, are two runs");
+}

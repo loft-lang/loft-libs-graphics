@@ -46,6 +46,12 @@ pub struct StageNode {
     nd_h: float,
     nd_colour: integer,
     nd_visible: boolean,
+    nd_atlas: integer,
+    nd_u0: float,
+    nd_v0: float,
+    nd_u1: float,
+    nd_v1: float,
+    nd_alpha: float,
     nd_a: float,             // derived world affine — read after `compose`
     nd_b: float,
     nd_c: float,
@@ -73,6 +79,12 @@ pub struct Place {
     pl_h: float = 0.0,
     pl_colour: integer = 0,  // packed 0xRRGGBB, as `DrawRect` carries
     pl_visible: boolean = true,
+    pl_atlas: integer = 0,   // which texture page; a run may only merge within one
+    pl_u0: float = 0.0,      // the sprite's rect within that page
+    pl_v0: float = 0.0,
+    pl_u1: float = 1.0,
+    pl_v1: float = 1.0,
+    pl_alpha: float = 1.0,
     pl_x: float = 0.0,
     pl_y: float = 0.0,
     pl_rot: float = 0.0,     // radians; +ve turns +x toward +y
@@ -113,6 +125,8 @@ pub fn node_add(self: Stage, parent: integer, p: const Place) -> integer {
         nd_parent: parent, nd_x: p.pl_x, nd_y: p.pl_y, nd_rot: p.pl_rot,
         nd_sx: p.pl_sx, nd_sy: p.pl_sy, nd_ox: p.pl_ox, nd_oy: p.pl_oy,
         nd_w: p.pl_w, nd_h: p.pl_h, nd_colour: p.pl_colour, nd_visible: p.pl_visible,
+        nd_atlas: p.pl_atlas, nd_u0: p.pl_u0, nd_v0: p.pl_v0, nd_u1: p.pl_u1,
+        nd_v1: p.pl_v1, nd_alpha: p.pl_alpha,
         nd_a: 1.0, nd_b: 0.0, nd_c: 0.0, nd_d: 1.0, nd_tx: 0.0, nd_ty: 0.0,
     }];
     idx
@@ -263,4 +277,85 @@ pub fn render(list: const vector<DrawRect>, cv: graphics::Canvas) {
 pub fn opaque(colour: integer) -> integer {
     if (colour & 0xff000000) != 0 { return colour; }
     colour | 0xff000000
+}
+
+
+// ── A3a: the batcher ─────────────────────────────────────────────────────────
+//
+// ⚠ MERGE ADJACENT RUNS ONLY — NEVER SORT.  2-D correctness is painter's algebra:
+// overlapping translucent draws must composite in call order, so a batcher may
+// merge *consecutive* commands that share state and must break on a change.  It
+// may not gather every command of one atlas together, however much cheaper that
+// would be, because that reorders the picture.
+//
+// The honest cost, and it is not small: a scene that interleaves two atlases
+// sprite-by-sprite degenerates to one instance per run.  That is a PACKING
+// problem, answered where the atlas is built — sprites that draw near each other
+// must share a page — and not something the batcher may fix by reordering.
+
+// One run of consecutive instances that share an atlas.
+pub struct Batch {
+    b_atlas: integer,
+    b_first: integer,        // index of the first instance in the packed buffer
+    b_count: integer,
+}
+
+// Floats per instance in the packed buffer: a 2x3 affine, the sprite's uv rect,
+// and a premultiplied-ready rgba.  The stride is public because a caller wiring
+// `gl_instance_attrib` needs it, and a wrong one fails as garbage geometry rather
+// than as an error.
+pub const INSTANCE_STRIDE: integer = 14;
+
+// Offsets within one instance, for the same reason.
+pub const OFF_AFFINE: integer = 0;   // a, b, c, d, tx, ty
+pub const OFF_UV: integer = 6;       // u0, v0, u1, v1
+pub const OFF_RGBA: integer = 10;    // r, g, b, a
+
+// Split the visible nodes into runs, in scene order.
+// Example: @STG-004 — adjacent runs only, never sorted, and what the interleave
+// costs: four sprites across two atlases are four draws, cured by packing.
+pub fn batches(self: const Stage) -> vector<Batch> {
+    out: vector<Batch> = [];
+    idx = 0;
+    for i in 0..len(self.st_nodes) {
+        n = self.st_nodes[i];
+        if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { continue; }
+        last = len(out) - 1;
+        if last >= 0 and out[last].b_atlas == n.nd_atlas {
+            out[last].b_count = out[last].b_count + 1;
+        } else {
+            out += [Batch { b_atlas: n.nd_atlas, b_first: idx, b_count: 1 }];
+        }
+        idx = idx + 1;
+    }
+    out
+}
+
+// Pack every visible node into one instance buffer, in the same order `batches`
+// counted.  The two walk the scene by the same rule, so a batch's `b_first` and
+// `b_count` index this buffer directly.
+pub fn pack_instances(self: const Stage) -> vector<single> {
+    out: vector<single> = [];
+    for i in 0..len(self.st_nodes) {
+        n = self.st_nodes[i];
+        if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { continue; }
+        // The affine already carries rotation and scale; the node's SIZE folds in
+        // here so the shader can keep drawing a unit quad.
+        out += [(n.nd_a * n.nd_w) as single];
+        out += [(n.nd_b * n.nd_w) as single];
+        out += [(n.nd_c * n.nd_h) as single];
+        out += [(n.nd_d * n.nd_h) as single];
+        o = world_point(self, i, n.nd_ox, n.nd_oy);
+        out += [o.p_x as single];
+        out += [o.p_y as single];
+        out += [n.nd_u0 as single];
+        out += [n.nd_v0 as single];
+        out += [n.nd_u1 as single];
+        out += [n.nd_v1 as single];
+        out += [(((n.nd_colour >> 16) & 255) as float / 255.0) as single];
+        out += [(((n.nd_colour >> 8) & 255) as float / 255.0) as single];
+        out += [((n.nd_colour & 255) as float / 255.0) as single];
+        out += [n.nd_alpha as single];
+    }
+    out
 }
