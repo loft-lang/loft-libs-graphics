@@ -131,6 +131,8 @@ pub struct Stage {
     st_haze_colour: integer,     // what distance fades toward
     st_lights: vector<StageLight>,    // L1: sampled per sprite, folded into the tint
     st_ambient: float,           // 1.0 is fully lit, which is the unlit default
+    st_light_map: boolean,       // L2: light per PIXEL instead of per sprite
+    st_hud_layer: integer,       // layers at or above this draw AFTER, unlit
     st_views: vector<View>,      // at least one; view 0 is the unsplit camera
     st_par: vector<float>,       // parallax factor per layer; missing means 1.0
     st_uploads: integer,         // instance-buffer uploads — the gate reads this
@@ -233,7 +235,8 @@ pub fn stage_new() -> Stage {
     Stage { st_nodes: [], st_masks: [], st_capture: -1, st_order: [],
             st_cue: false, st_cue_near: 0.0, st_cue_far: 1.0,
             st_cue_scale: 1.0, st_cue_haze: 0.0, st_haze_colour: 0x000000,
-            st_lights: [], st_ambient: 1.0,
+            st_lights: [], st_ambient: 1.0, st_light_map: false,
+            st_hud_layer: HUD_NONE,
             st_views: [View { vw_cam_x: 0.0, vw_cam_y: 0.0, vw_x: 0, vw_y: 0,
                               vw_w: 0, vw_h: 0 }],
             st_par: [], st_uploads: 0, st_dirty: true,
@@ -735,6 +738,51 @@ void main() {{
 }}
 `;
 
+// The light-map composite: one fullscreen quad multiplying the world pass by the
+// light standing at each pixel.
+//
+// ⚠ THE CURVE AND THE FLOOR ARRIVE AS UNIFORMS, from `LIGHT_FALLOFF` and the
+// stage's ambient — never baked into this text.  A number written here would be
+// a second copy of the curve, and retuning it would silently stop matching what
+// `light_reach` answers on the software path and in every gate.
+VERT_LIGHT = `
+#version 330 core
+layout (location = 0) in vec2 aPos;
+layout (location = 1) in vec2 aUV;
+out vec2 vUV;
+void main() {{
+  vUV = aUV;
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}}
+`;
+
+FRAG_LIGHT = `
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uScene;
+uniform vec2 uScreenL;
+uniform vec2 uCamL;
+uniform float uFloor;
+uniform float uFalloff;
+uniform int uCount;
+uniform vec4 uLights[32];     // x, y, radius, power
+uniform vec3 uLightCol[32];
+void main() {{
+  vec2 w = vUV * uScreenL - uCamL;
+  vec3 acc = vec3(uFloor);
+  for (int i = 0; i < uCount; ++i) {{
+    float r = uLights[i].z;
+    if (r <= 0.0) continue;
+    float a = 1.0 - distance(w, uLights[i].xy) / r;
+    if (a <= 0.0) continue;
+    a = pow(clamp(a, 0.0, 1.0), uFalloff) * uLights[i].w;
+    acc += uLightCol[i] * a;
+  }}
+  FragColor = vec4(texture(uScene, vUV).rgb * clamp(acc, 0.0, 1.0), 1.0);
+}}
+`;
+
 FRAG_2D = `
 #version 330 core
 in vec4 vColor;
@@ -748,6 +796,11 @@ pub struct Painter {
     pn_vao: integer,
     pn_ivbo: integer,
     pn_cap: integer,          // instances the buffer currently holds
+    pn_light: integer,        // L2's composite shader; 0 until first needed
+    pn_fbo: integer,          // the offscreen target the world pass draws into
+    pn_scene: integer,        // its colour attachment
+    pn_fw: integer,           // what size that target was made at
+    pn_fh: integer,
 }
 
 // Compile the shader and upload the unit quad.  Call once, after a window exists.
@@ -757,7 +810,8 @@ pub fn painter_new() -> Painter {
         0.0f, 0.0f, 0.0f,  1.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f];
     sh = graphics::gl_create_shader(VERT_2D, FRAG_2D);
     vao = graphics::gl_upload_vertices(quad, 3);
-    Painter { pn_shader: sh, pn_vao: vao, pn_ivbo: 0, pn_cap: 0 }
+    Painter { pn_shader: sh, pn_vao: vao, pn_ivbo: 0, pn_cap: 0,
+              pn_light: 0, pn_fbo: 0, pn_scene: 0, pn_fw: 0, pn_fh: 0 }
 }
 
 // Draw the scene, one instanced call per run.  Answers the number of draw calls
@@ -783,9 +837,39 @@ pub fn gl_render(self: Stage, p: Painter, screen_w: float, screen_h: float) -> i
     graphics::gl_set_uniform_vec2(p.pn_shader, "uScreen", screen_w, screen_h);
     graphics::gl_set_uniform_float(p.pn_shader, "uTime", self.st_time);
     calls = 0;
+    // ⚠ THE SAME THREE PHASES AS THE SOFTWARE PATH — world, composite, HUD — so
+    // the two can be compared rather than merely believed.  With the map off,
+    // `st_hud_layer` is the no-HUD sentinel and this is one pass over everything.
+    if self.st_light_map {
+        ensure_light_target(self, p, screen_w as integer, screen_h as integer);
+        graphics::gl_bind_framebuffer(p.pn_fbo);
+        graphics::gl_clear(0);
+        calls = calls + gl_draw_band(self, p, screen_w, screen_h, 0 - HUD_NONE,
+                                     self.st_hud_layer);
+        graphics::gl_bind_framebuffer(0);
+        gl_composite(self, p, screen_w, screen_h);
+        calls = calls + 1;
+        graphics::gl_use_shader(p.pn_shader);
+        graphics::gl_set_uniform_vec2(p.pn_shader, "uScreen", screen_w, screen_h);
+        graphics::gl_set_uniform_float(p.pn_shader, "uTime", self.st_time);
+        calls = calls + gl_draw_band(self, p, screen_w, screen_h, self.st_hud_layer,
+                                     HUD_NONE);
+        graphics::gl_disable(graphics::GL_SCISSOR_TEST);
+        return calls;
+    }
+    calls = gl_draw_band(self, p, screen_w, screen_h, 0 - HUD_NONE, HUD_NONE);
+    graphics::gl_disable(graphics::GL_SCISSOR_TEST);
+    calls
+}
+
+// Draw every run whose layer is in `[lo, hi)`, for every view.
+fn gl_draw_band(self: const Stage, p: const Painter, screen_w: float,
+                screen_h: float, lo: integer, hi: integer) -> integer {
+    calls = 0;
     for v in 0..len(self.st_views) {
         vp = view_at(self, v);
         for b in batches(self) {
+            if b.b_layer < lo or b.b_layer >= hi { continue; }
             // ⚠ A RUN STARTS PART-WAY INTO THE BUFFER, and there is no first-instance
             // parameter to say so: `gl_draw_instanced` takes a count and nothing else,
             // and the base-instance form that would (glDrawArraysInstancedBaseInstance)
@@ -825,8 +909,52 @@ pub fn gl_render(self: Stage, p: Painter, screen_w: float, screen_h: float) -> i
             calls = calls + 1;
         }
     }
-    graphics::gl_disable(graphics::GL_SCISSOR_TEST);
     calls
+}
+
+// Make (or remake) the offscreen colour target the world pass draws into.
+fn ensure_light_target(self: const Stage, p: Painter, w: integer, h: integer) {
+    if p.pn_light == 0 {
+        p.pn_light = graphics::gl_create_shader(VERT_LIGHT, FRAG_LIGHT);
+    }
+    if p.pn_fbo != 0 and p.pn_fw == w and p.pn_fh == h { return; }
+    p.pn_scene = graphics::gl_create_color_texture(w, h);
+    if p.pn_fbo == 0 { p.pn_fbo = graphics::gl_create_framebuffer(); }
+    graphics::gl_framebuffer_texture(p.pn_fbo, 0, p.pn_scene);
+    p.pn_fw = w;
+    p.pn_fh = h;
+}
+
+// One fullscreen multiply: the world pass times the light standing at each pixel.
+//
+// ⚠ THE CURVE AND THE FLOOR GO IN AS UNIFORMS, from the same `LIGHT_FALLOFF` and
+// ambient the software path and every gate read.  Nothing about the falloff is
+// written in the shader's text.
+fn gl_composite(self: const Stage, p: const Painter, screen_w: float, screen_h: float) {
+    graphics::gl_disable(graphics::GL_SCISSOR_TEST);
+    graphics::gl_disable(graphics::GL_BLEND);
+    graphics::gl_use_shader(p.pn_light);
+    graphics::gl_bind_texture(p.pn_scene, 0);
+    graphics::gl_set_uniform_int(p.pn_light, "uScene", 0);
+    graphics::gl_set_uniform_vec2(p.pn_light, "uScreenL", screen_w, screen_h);
+    off = view_offset(self, 0, 0);
+    graphics::gl_set_uniform_vec2(p.pn_light, "uCamL", 0.0 - off.p_x, 0.0 - off.p_y);
+    graphics::gl_set_uniform_float(p.pn_light, "uFloor", self.st_ambient);
+    graphics::gl_set_uniform_float(p.pn_light, "uFalloff", LIGHT_FALLOFF);
+    n = len(self.st_lights);
+    if n > 32 { n = 32; }
+    graphics::gl_set_uniform_int(p.pn_light, "uCount", n);
+    for i in 0..n {
+        l = self.st_lights[i];
+        graphics::gl_set_uniform_vec4(p.pn_light, "uLights[{i}]", l.lt_x, l.lt_y,
+                                      l.lt_r, l.lt_power);
+        graphics::gl_set_uniform_vec3(p.pn_light, "uLightCol[{i}]",
+                                      ((l.lt_colour >> 16) & 255) as float / 255.0,
+                                      ((l.lt_colour >> 8) & 255) as float / 255.0,
+                                      (l.lt_colour & 255) as float / 255.0);
+    }
+    graphics::gl_draw_fullscreen_quad();
+    graphics::gl_enable(graphics::GL_BLEND);
 }
 
 // The screen rect a run may paint in: the view's own rect, intersected with the
@@ -991,12 +1119,28 @@ pub fn render_stage(self: const Stage, cv: graphics::Canvas) {
 // rather than where a per-pixel predicate rounds it, and the two cannot disagree
 // about a shared edge.
 pub fn render_view(self: const Stage, view: integer, cv: graphics::Canvas) {
+    // ⚠ THREE PHASES, and the order IS the feature: world, composite, HUD.  With
+    // the map off `st_hud_layer` is the no-HUD sentinel and both passes collapse
+    // into the single walk L1 had, so the unlit game keeps exactly its pixels.
+    if self.st_light_map {
+        render_band(self, view, cv, 0 - HUD_NONE, self.st_hud_layer);
+        composite_light(self, view, cv);
+        render_band(self, view, cv, self.st_hud_layer, HUD_NONE);
+        return;
+    }
+    render_band(self, view, cv, 0 - HUD_NONE, HUD_NONE);
+}
+
+// Paint the nodes whose layer is in `[lo, hi)`.
+fn render_band(self: const Stage, view: integer, cv: graphics::Canvas,
+               lo: integer, hi: integer) {
     vpx = view_at(self, view).vw_x;
     vpy = view_at(self, view).vw_y;
     vpw = view_at(self, view).vw_w;
     vph = view_at(self, view).vw_h;
     for i in self.st_order {
         n = self.st_nodes[i];
+        if n.nd_layer < lo or n.nd_layer >= hi { continue; }
         if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { continue; }
         if n.nd_alpha <= 0.0 { continue; }
         ia = (n.nd_alpha * 255.0 + 0.5) as integer;
@@ -1569,6 +1713,10 @@ pub fn light_reach(l: const StageLight, px: float, py: float) -> float {
     a = 1.0 - (d / l.lt_r ?? 1.0);
     if a <= 0.0 { return 0.0; }
     if a > 1.0 { return 1.0; }
+    // ⚠ ONE HOME FOR THE CURVE.  L2's composite shader takes this same exponent
+    // as a uniform rather than baking a number into its text, so retuning the
+    // falloff is one edit and the per-sprite and per-pixel paths cannot drift.
+    if LIGHT_FALLOFF != 1.0 { a = pow(a, LIGHT_FALLOFF) ?? 0.0; }
     a * l.lt_power
 }
 
@@ -1582,22 +1730,17 @@ pub fn light_reach(l: const StageLight, px: float, py: float) -> float {
 pub fn lit_colour(self: const Stage, idx: integer) -> integer {
     if idx < 0 or idx >= len(self.st_nodes) { return 0; }
     n = self.st_nodes[idx];
+    // ⚠ ONE LIGHTING MODEL AT A TIME.  With the map on, the composite lights
+    // every pixel — so the sprite goes in RAW.  Tinting it here as well would
+    // light it twice, and a torch-lit mob would come out darker than the floor
+    // it stands on.
+    if self.st_light_map { return n.nd_colour; }
     if len(self.st_lights) == 0 and self.st_ambient >= 1.0 { return n.nd_colour; }
     o = world_origin(self, idx);
-    lr = self.st_ambient;
-    lg = self.st_ambient;
-    lb = self.st_ambient;
-    for i in 0..len(self.st_lights) {
-        l = self.st_lights[i];
-        a = light_reach(l, o.p_x, o.p_y);
-        // Skipping zero is work avoided, NOT the guard: `light_reach` is the one
-        // place that decides a light out of range contributes nothing, and it is
-        // gated there.  Two places enforcing one rule is how they drift.
-        if a <= 0.0 { continue; }
-        lr = lr + (((l.lt_colour >> 16) & 255) as float / 255.0) * a;
-        lg = lg + (((l.lt_colour >> 8) & 255) as float / 255.0) * a;
-        lb = lb + ((l.lt_colour & 255) as float / 255.0) * a;
-    }
+    lv = light_rgb_at(self, o.p_x, o.p_y);
+    lr = lv.li_r;
+    lg = lv.li_g;
+    lb = lv.li_b;
     // ⚠ CLAMPED PER CHANNEL.  Unclamped, standing between two torches multiplies
     // past 255 and the byte wraps, so the brightest place in the scene comes out
     // DARK — the classic and the one everybody finds by accident.
@@ -1615,3 +1758,125 @@ fn pack_channel(material: integer, level: float) -> integer {
     if v > 255 { return 255; }
     v
 }
+
+
+// ── L2: the light-map composite pass ─────────────────────────────────────────
+//
+// What L1 cannot do: light that falls ACROSS the scene rather than across the
+// sprites.  The world draws, ONE multiply composite lights every pixel of it —
+// including the gaps no sprite covers, which is why it earns a pass at all — and
+// the HUD draws after, unlit.
+//
+// ⚠ A MULTIPLY AFTER THE SCENE IS ORDER-INDEPENDENT, so this does not fight
+// A3a's *never reorder*: the composite cannot care which sprite was drawn first.
+//
+// ⚠ AND VISIBILITY STAYS THE APP'S.  The light PRESENTS; it does not decide what
+// is seen.  A pixel in the dark is still there, still picked, still in its batch.
+
+// The exponent on `1 - d/r`.  One home, read by `light_reach` and handed to the
+// composite shader as a uniform — never baked into its text, both because a
+// second copy drifts and because loft renders `2.0` as `2`, which GLSL takes as
+// an int and refuses.
+pub const LIGHT_FALLOFF: float = 1.0;
+
+// The sentinel meaning "no HUD band": every layer is world.
+pub const HUD_NONE: integer = 1000000;
+
+// A light level, per channel, 0..1.
+pub struct Lit {
+    li_r: float,
+    li_g: float,
+    li_b: float,
+}
+
+pub fn set_light_map(self: Stage, on: boolean) {
+    self.st_light_map = on;
+    self.st_dirty = true;
+}
+
+pub fn light_map(self: const Stage) -> boolean { self.st_light_map }
+
+// Layers at or above `n` draw AFTER the composite and take no light.
+pub fn set_hud_layer(self: Stage, n: integer) { self.st_hud_layer = n; }
+
+pub fn hud_layer(self: const Stage) -> integer { self.st_hud_layer }
+
+// The light standing at a world point, per channel.
+//
+// ⚠ THE ONE HOME both samplings read: L1 asks it at a sprite's origin, L2 asks
+// it per pixel.  One curve, one floor, one clamp — so the per-sprite and the
+// per-pixel answers cannot disagree about the same point.
+pub fn light_rgb_at(self: const Stage, wx: float, wy: float) -> Lit {
+    lr = self.st_ambient;
+    lg = self.st_ambient;
+    lb = self.st_ambient;
+    for i in 0..len(self.st_lights) {
+        l = self.st_lights[i];
+        a = light_reach(l, wx, wy);
+        // Skipping zero is work avoided, NOT the guard: `light_reach` is the one
+        // place that decides a light out of range contributes nothing, and it is
+        // gated there.  Two places enforcing one rule is how they drift.
+        if a <= 0.0 { continue; }
+        lr = lr + (((l.lt_colour >> 16) & 255) as float / 255.0) * a;
+        lg = lg + (((l.lt_colour >> 8) & 255) as float / 255.0) * a;
+        lb = lb + ((l.lt_colour & 255) as float / 255.0) * a;
+    }
+    Lit { li_r: clamp01(lr), li_g: clamp01(lg), li_b: clamp01(lb) }
+}
+
+// The scalar level at a world point — the green channel of a white light, and
+// the number the monotonic-and-floored invariant is stated about.
+pub fn light_level_at(self: const Stage, wx: float, wy: float) -> float {
+    light_rgb_at(self, wx, wy).li_g
+}
+
+fn clamp01(v: float) -> float {
+    if v < 0.0 { return 0.0; }
+    if v > 1.0 { return 1.0; }
+    v
+}
+
+// Multiply every pixel of the view's rect by the light standing there.
+//
+// ⚠ THE SCREEN IS MAPPED TO THE WORLD THROUGH THE WORLD PLANE — layer 0, the
+// plane lights live on.  A parallaxed background is therefore lit as though it
+// stood on that plane, which is the honest simplification here: per-layer
+// atmosphere is L3's question, not this pass's.
+pub fn composite_light(self: const Stage, view: integer, cv: graphics::Canvas) {
+    if !self.st_light_map { return; }
+    off = view_offset(self, view, 0);
+    vp = view_at(self, view);
+    x0 = 0;
+    y0 = 0;
+    x1 = cv.width;
+    y1 = cv.height;
+    if vp.vw_w > 0 and vp.vw_h > 0 {
+        x0 = vp.vw_x;
+        y0 = vp.vw_y;
+        if vp.vw_x + vp.vw_w < x1 { x1 = vp.vw_x + vp.vw_w; }
+        if vp.vw_y + vp.vw_h < y1 { y1 = vp.vw_y + vp.vw_h; }
+    }
+    if x0 < 0 { x0 = 0; }
+    if y0 < 0 { y0 = 0; }
+    for py in y0..y1 {
+        for px in x0..x1 {
+            lv = light_rgb_at(self, (px as float) - off.p_x, (py as float) - off.p_y);
+            d = cv.get_pixel(px, py);
+            cv.set_pixel(px, py, (d & 0xff000000)
+                | (scale_channel((d >> 16) & 255, lv.li_r) << 16)
+                | (scale_channel((d >> 8) & 255, lv.li_g) << 8)
+                | scale_channel(d & 255, lv.li_b));
+        }
+    }
+}
+
+fn scale_channel(c: integer, level: float) -> integer {
+    v = ((c as float) * level + 0.5) as integer;
+    if v < 0 { return 0; }
+    if v > 255 { return 255; }
+    v
+}
+
+// The composite's fragment shader.  Public so a test can check it reads the
+// falloff and the floor as UNIFORMS rather than carrying its own copy of them.
+pub fn composite_shader_source() -> text { FRAG_LIGHT }

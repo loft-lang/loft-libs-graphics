@@ -26,6 +26,9 @@ loft install stage
   `released_on` / `capture` · `add_mask(w, h, alpha)`
 - `add_sequence(first, count, fps, mode) -> integer` · `advance(dt_us)` ·
   `frame_of(idx)` · `restart(idx)` · `LOOP` / `ONCE` / `PINGPONG`
+- `set_light_map(on)` / `light_map()` · `set_hud_layer(n)` / `hud_layer()` ·
+  `light_rgb_at(x, y)` / `light_level_at(x, y)` · `composite_light(view, canvas)` ·
+  `LIGHT_FALLOFF` / `HUD_NONE` · `composite_shader_source()`
 - `add_light(x, y, radius, colour, power)` / `move_light` / `light_count()` ·
   `set_ambient(level)` / `ambient()` · `lit_colour(idx)` · `light_reach(light, x, y)`
 - `add_view(x, y, w, h)` / `view_count()` / `set_view_rect` / `set_view_camera` ·
@@ -215,6 +218,45 @@ hand-compute is a gate nobody maintains. A light out of range contributes nothin
 ⚠ **Unlike the camera, a light dirties the instance buffer.** It changes what is *in* the
 data rather than how it is looked at, so a moving torch re-packs every frame. Taking that
 cost off the per-sprite path is exactly what a light-map pass is for.
+
+## The light-map pass
+
+`set_light_map(true)` switches from L1's per-sprite tint to light per **pixel**: the world
+draws, one multiply composite lights every pixel of it — **including the gaps no sprite
+covers**, which is why it earns a pass at all — and the HUD draws after, unlit.
+
+```
+st.set_hud_layer(10);      // layers >= 10 draw after the composite, untouched
+st.set_light_map(true);
+```
+
+⚠ **One lighting model at a time.** With the map on, a sprite is packed with its **raw**
+material and the composite does the lighting. Tinting it as well would light it twice, and a
+torch-lit mob would come out darker than the floor it stands on.
+
+⚠ **The HUD's pixels are bit-identical with the light on and off.** *The HUD draws after,
+unlit* is a test here, not a comment — anything less and a dark room quietly dims the health
+bar.
+
+A multiply after the scene is **order-independent**, so this does not fight A3a's *never
+reorder*, and it is gated by rendering one scene with its two sprites inserted both ways
+round. And visibility stays the app's: the light **presents**, it does not decide what is
+seen — a pixel in the dark is still there, still picked, still in its batch.
+
+The invariant is a **property, not a table**: along a ray from a light the level never rises,
+never exceeds 1, and never drops below the floor the ambient sets. Hand-computing a curve per
+pixel is not a gate anyone maintains, so the expectations are **generated from the same
+symbol the renderer uses** — `light_reach`, and `LIGHT_FALLOFF` reaching the composite shader
+as a **uniform** rather than a number baked into its text. Retuning the curve is one edit.
+
+⚠ **The screen maps to the world through the world plane** (layer 0, where lights live), so a
+parallaxed background is lit as though it stood on that plane. Per-layer atmosphere is L3's
+question, not this pass's.
+
+⚠ **The GL half is reviewed, not gated**: these tests have no GL context, so the FBO pass is
+proved only by the arithmetic and layer split it shares with the software path, which is
+gated in full. The shape is the same in both — world band, composite, HUD band — so the two
+can be compared rather than merely believed.
 
 ## Several views over one stage
 
