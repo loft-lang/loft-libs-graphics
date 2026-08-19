@@ -731,11 +731,32 @@ pub unsafe extern "C" fn n_gl_upload_instance_buffer(
     unsafe { upload_instance_vbo(data_ptr, count) as i64 }
 }
 
-/// Native path (raw pointer): upload an instance VBO from a raw f32 pointer.
+/// Raw-pointer path, for a caller that already holds `(ptr, count)`.
+///
+/// ⚠ NOT exported as `loft_gl_upload_instance_buffer`.  That name belongs to the
+/// STORE-AWARE entry point below, because it is the name the loft declaration
+/// carries (`#native "loft_gl_upload_instance_buffer"`) and a library compiled to
+/// a cdylib resolves it as a SYMBOL.  While the raw `(ptr, count)` form owned the
+/// name, every such call arrived with `count = 0`: an empty buffer uploaded, the
+/// instance attributes read nothing, and the draw silently produced no geometry
+/// (loft-libs-graphics#33).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn loft_gl_upload_instance_buffer(data_ptr: *const f32, count: u32) -> i64 {
+pub unsafe extern "C" fn loft_gl_upload_instance_buffer_rawptr(
+    data_ptr: *const f32,
+    count: u32,
+) -> i64 {
     gl_guard!(0);
     unsafe { upload_instance_vbo(data_ptr, count) as i64 }
+}
+
+/// The symbol the loft declaration names — store-aware, matching the ABI the
+/// caller marshals (`LoftStore` + `LoftRef`, never `(ptr, count)`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loft_gl_upload_instance_buffer(
+    store: loft_ffi::LoftStore,
+    data: loft_ffi::LoftRef,
+) -> i64 {
+    unsafe { n_gl_upload_instance_buffer(store, data) }
 }
 
 /// Bind an instance VBO field to vertex attribute `location` with divisor 1.
@@ -813,7 +834,7 @@ pub unsafe extern "C" fn n_gl_update_buffer(
 
 /// Native path (raw pointer): re-upload into an existing VBO.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn loft_gl_update_buffer(vbo: i64, data_ptr: *const f32, count: u32) {
+pub unsafe extern "C" fn loft_gl_update_buffer_rawptr(vbo: i64, data_ptr: *const f32, count: u32) {
     gl_guard!();
     unsafe { update_buffer_data(vbo as u32, data_ptr, count) };
 }
@@ -858,7 +879,7 @@ pub unsafe extern "C" fn n_gl_upload_indices(
 
 /// Native path (raw pointer): upload indices from a raw i64 pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn loft_gl_upload_indices(vao: i64, idx_ptr: *const i64, count: u32) -> i64 {
+pub unsafe extern "C" fn loft_gl_upload_indices_rawptr(vao: i64, idx_ptr: *const i64, count: u32) -> i64 {
     gl_guard!(0);
     unsafe { upload_ebo(vao as u32, idx_ptr, count) as i64 }
 }
@@ -931,7 +952,7 @@ pub unsafe extern "C" fn n_gl_set_mat4(
 /// Upload a vertex buffer from a raw f32 pointer.  Returns VAO handle.
 /// data_ptr/count: elements in the vector<single>; stride: floats per vertex.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn loft_gl_upload_vertices(
+pub unsafe extern "C" fn loft_gl_upload_vertices_rawptr(
     data_ptr: *const f32,
     count: u32,
     stride: i64,
@@ -951,7 +972,7 @@ pub unsafe extern "C" fn loft_gl_upload_vertices(
 /// Set a mat4 uniform from a raw f64 pointer (vector<float> element type).
 /// Converts the 16 f64 values to f32 before passing to OpenGL.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn loft_gl_set_mat4(
+pub unsafe extern "C" fn loft_gl_set_mat4_rawptr(
     program: i64,
     name_ptr: *const u8,
     name_len: usize,
@@ -2538,4 +2559,34 @@ mod input_event_tests {
         assert_eq!(key_index(&home), Some(149));
         assert_eq!(key_index(&pagedown), Some(152));
     }
+}
+
+
+// ── loft-named aliases: the STORE-AWARE entry points own the exported names ──
+//
+// A loft declaration carries `#native "loft_gl_x"`, and a library compiled to a
+// cdylib resolves that as a SYMBOL.  While the raw `(ptr, count)` forms owned those
+// names, every vector argument from such a library arrived EMPTY — an upload of
+// zero floats, attributes reading nothing, and a draw that silently produced no
+// geometry.  The raw forms are still here as `*_rawptr` for a caller that already
+// holds a pointer; they simply no longer shadow (loft-libs-graphics#33).
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loft_gl_upload_vertices(store: loft_ffi::LoftStore, data: loft_ffi::LoftRef, stride: i64) -> i64 {
+    unsafe { n_gl_upload_vertices(store, data, stride) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loft_gl_update_buffer(store: loft_ffi::LoftStore, vbo: i64, data: loft_ffi::LoftRef) {
+    unsafe { n_gl_update_buffer(store, vbo, data) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loft_gl_upload_indices(store: loft_ffi::LoftStore, vao: i64, data: loft_ffi::LoftRef) -> i64 {
+    unsafe { n_gl_upload_indices(store, vao, data) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loft_gl_set_mat4(store: loft_ffi::LoftStore, program: i64, name_ptr: *const u8, name_len: usize, mat: loft_ffi::LoftRef) {
+    unsafe { n_gl_set_mat4(store, program, name_ptr, name_len, mat) }
 }
