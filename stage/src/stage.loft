@@ -40,8 +40,13 @@ pub struct StageNode {
     nd_rot: float,           // radians; +ve turns +x toward +y
     nd_sx: float,
     nd_sy: float,
-    nd_ox: float,            // the origin, in the node's own units: put it at the
-    nd_oy: float,            // sprite's feet and the sprite stands up from (x, y)
+    // ⚠ THE SPRITE OCCUPIES LOCAL [0, w] x [0, h].  The origin is a POINT INSIDE
+    // that box which lands on (x, y) — it is not the box's corner.  Put it at
+    // (w/2, h) and the sprite stands up from its feet, centred on where it was
+    // placed.  The two readings coincide only at (0, 0), which is why every test
+    // written before the depth cue could not tell them apart.
+    nd_ox: float,
+    nd_oy: float,
     nd_w: float,
     nd_h: float,
     nd_colour: integer,
@@ -59,6 +64,9 @@ pub struct StageNode {
     nd_cy0: float,
     nd_cx1: float,
     nd_cy1: float,
+    nd_cue: float,           // derived: 0 at the near plane, 1 at the far one
+    nd_layer: integer,       // ordering BAND — outranks depth entirely
+    nd_depth: float,         // distance INTO the screen; larger draws first
     nd_a: float,             // derived world affine — read after `compose`
     nd_b: float,
     nd_c: float,
@@ -71,6 +79,13 @@ pub struct Stage {
     st_nodes: vector<StageNode>,
     st_masks: vector<Mask>,
     st_capture: integer,      // the node holding the press, or -1
+    st_order: vector<integer>,   // draw order, derived by `compose`
+    st_cue: boolean,             // is the depth cue on?
+    st_cue_near: float,
+    st_cue_far: float,
+    st_cue_scale: float,         // scale at the FAR end; 1.0 at the near end
+    st_cue_haze: float,          // haze at the FAR end, 0..1
+    st_haze_colour: integer,     // what distance fades toward
 }
 
 // An alpha mask: per-texel coverage, row-major, 0..255.
@@ -107,6 +122,11 @@ pub struct Place {
     pl_alpha: float = 1.0,
     pl_mask: integer = -1,   // index from `add_mask`, or -1 for solid
     pl_clips: boolean = false,  // clip this node's subtree to its own bounds
+    pl_layer: integer = 0,      // background / world / UI are BANDS, not numbers
+    pl_depth: float = 0.0,      // distance INTO the screen: LARGER draws first, so
+                                // `depth = -y` puts a lower sprite in front. A 2.5-D
+                                // scene sets it from the footprint — a hex row, or a
+                                // projected height — never from the artwork
     pl_x: float = 0.0,
     pl_y: float = 0.0,
     pl_rot: float = 0.0,     // radians; +ve turns +x toward +y
@@ -132,7 +152,9 @@ pub struct P2 {
 }
 
 pub fn stage_new() -> Stage {
-    Stage { st_nodes: [], st_masks: [], st_capture: -1 }
+    Stage { st_nodes: [], st_masks: [], st_capture: -1, st_order: [],
+            st_cue: false, st_cue_near: 0.0, st_cue_far: 1.0,
+            st_cue_scale: 1.0, st_cue_haze: 0.0, st_haze_colour: 0x000000 }
 }
 
 pub fn node_count(self: const Stage) -> integer {
@@ -156,6 +178,7 @@ pub fn node_add(self: Stage, parent: integer, p: const Place) -> integer {
         nd_w: p.pl_w, nd_h: p.pl_h, nd_colour: p.pl_colour, nd_visible: p.pl_visible,
         nd_atlas: p.pl_atlas, nd_u0: p.pl_u0, nd_v0: p.pl_v0, nd_u1: p.pl_u1,
         nd_v1: p.pl_v1, nd_alpha: p.pl_alpha, nd_mask: p.pl_mask,
+        nd_cue: 0.0, nd_layer: p.pl_layer, nd_depth: p.pl_depth,
         nd_clips: p.pl_clips, nd_clipped: false,
         nd_cx0: 0.0, nd_cy0: 0.0, nd_cx1: 0.0, nd_cy1: 0.0,
         nd_a: 1.0, nd_b: 0.0, nd_c: 0.0, nd_d: 1.0, nd_tx: 0.0, nd_ty: 0.0,
@@ -176,11 +199,19 @@ pub fn compose(self: Stage) {
         n = self.st_nodes[i];
         cs = cos(n.nd_rot);
         sn = sin(n.nd_rot);
-        // R . S — scale first, then rotate.
-        la = cs * n.nd_sx;
-        lb = sn * n.nd_sx;
-        lc = -sn * n.nd_sy;
-        ld = cs * n.nd_sy;
+        // The DEPTH CUE, if it is on: a node further away is drawn smaller.
+        //
+        // ⚠ It scales about the ORIGIN, which is why the feet stay planted while the
+        // sprite shrinks — a cue that moved the anchor would slide a mob off the tile
+        // it is standing on.  That falls out of the origin being the anchor rather
+        // than being arranged for.
+        cue = cue_of(self, n.nd_depth);
+        self.st_nodes[i].nd_cue = cue;
+        k = 1.0 + (self.st_cue_scale - 1.0) * cue;
+        la = cs * n.nd_sx * k;
+        lb = sn * n.nd_sx * k;
+        lc = -sn * n.nd_sy * k;
+        ld = cs * n.nd_sy * k;
         // ... then place the ORIGIN at (x, y): t = (x, y) - A . (ox, oy).
         ltx = n.nd_x - (la * n.nd_ox + lc * n.nd_oy);
         lty = n.nd_y - (lb * n.nd_ox + ld * n.nd_oy);
@@ -239,7 +270,104 @@ pub fn compose(self: Stage) {
         self.st_nodes[i].nd_cx1 = cx1;
         self.st_nodes[i].nd_cy1 = cy1;
     }
+    order_nodes(self);
 }
+
+// Turn the depth cue on.  `near` and `far` are depths; a node at `far` is drawn at
+// `far_scale` of its size and hazed `far_haze` toward `haze_colour`, and one at
+// `near` is untouched.  Off by default, and off means an identical picture.
+//
+// This is the 2.5-D FEEL: distance reads as smaller and less distinct, which is
+// what separates a mob standing behind a wall from one standing in front of it
+// even when neither overlaps the other.  Real blur belongs to the per-layer pass;
+// a haze toward the fog colour costs one lerp and carries most of the effect.
+pub fn depth_cue(self: Stage, near: float, far: float, far_scale: float,
+                 far_haze: float, haze_colour: integer) {
+    self.st_cue = true;
+    self.st_cue_near = near;
+    self.st_cue_far = far;
+    self.st_cue_scale = far_scale;
+    self.st_cue_haze = far_haze;
+    self.st_haze_colour = haze_colour;
+}
+
+// How far through the cue a depth sits: 0 at the near plane, 1 at the far one,
+// clamped outside them so a stray depth cannot invert the effect.
+pub fn cue_of(self: const Stage, depth: float) -> float {
+    if !self.st_cue { return 0.0; }
+    span = self.st_cue_far - self.st_cue_near;
+    if span > -0.000001 and span < 0.000001 { return 0.0; }
+    t = (depth - self.st_cue_near) / span ?? 0.0;
+    if t < 0.0 { return 0.0; }
+    if t > 1.0 { return 1.0; }
+    t
+}
+
+// How hazed node `idx` is, 0..1 — what a renderer fades toward the haze colour.
+pub fn haze_of(self: const Stage, idx: integer) -> float {
+    if idx < 0 or idx >= len(self.st_nodes) { return 0.0; }
+    self.st_nodes[idx].nd_cue * self.st_cue_haze
+}
+
+// Derive the draw order: by LAYER first, then depth, then insertion.
+//
+// ⚠ STABLE, and that is the whole contract of the third key.  Two sprites on the
+// same footprint — a worker standing where another worker stands — must not swap
+// places from frame to frame, and a sort that broke ties arbitrarily would flicker
+// exactly there.  Bottom-up merge, because it is stable by construction rather
+// than by care.
+fn order_nodes(self: Stage) {
+    n = len(self.st_nodes);
+    src: vector<integer> = [];
+    for i in 0..n { src += [i]; }
+    width = 1;
+    while width < n {
+        dst: vector<integer> = [];
+        lo = 0;
+        while lo < n {
+            mid = lo + width;
+            hi = mid + width;
+            if mid > n { mid = n; }
+            if hi > n { hi = n; }
+            a = lo;
+            b = mid;
+            while a < mid or b < hi {
+                take_a = true;
+                if a >= mid { take_a = false; }
+                else if b < hi {
+                    ia = src[a] ?? 0;
+                    ib = src[b] ?? 0;
+                    take_a = !after(self, ia, ib);
+                }
+                if take_a { dst += [src[a] ?? 0]; a = a + 1; }
+                else { dst += [src[b] ?? 0]; b = b + 1; }
+            }
+            lo = hi;
+        }
+        src = dst;
+        width = width * 2;
+    }
+    self.st_order = src;
+}
+
+// Does node `x` sort AFTER node `y` — that is, draw on top of it?
+//
+// Layer ascending, then depth DESCENDING, then insertion.  ⚠ The direction of the
+// middle key is the one thing here that is easy to get backwards, and I did:
+// `depth` is distance INTO the screen, so a LARGER depth is further away and draws
+// FIRST.  That is what makes `depth = -y` work — a sprite lower on the screen has a
+// smaller depth, so it draws later and stands in front — and it is GameMaker's
+// convention, which is the vocabulary this model borrows throughout.
+fn after(self: const Stage, x: integer, y: integer) -> boolean {
+    a = self.st_nodes[x];
+    b = self.st_nodes[y];
+    if a.nd_layer != b.nd_layer { return a.nd_layer > b.nd_layer; }
+    if a.nd_depth != b.nd_depth { return a.nd_depth < b.nd_depth; }
+    x > y
+}
+
+// The draw order, derived by `compose`: indices, back to front.
+pub fn order(self: const Stage) -> vector<integer> { self.st_order }
 
 // A node's axis-aligned bounds in world space.
 // Example: @STG-007 — a clip inherits, intersects, and is axis-aligned.
@@ -250,10 +378,10 @@ pub fn compose(self: Stage) {
 // does not have.  Stated rather than discovered.
 pub fn bounds_of(self: const Stage, idx: integer) -> Bounds {
     n = self.st_nodes[idx];
-    p0 = world_point(self, idx, n.nd_ox, n.nd_oy);
-    p1 = world_point(self, idx, n.nd_ox + n.nd_w, n.nd_oy);
-    p2 = world_point(self, idx, n.nd_ox, n.nd_oy + n.nd_h);
-    p3 = world_point(self, idx, n.nd_ox + n.nd_w, n.nd_oy + n.nd_h);
+    p0 = world_point(self, idx, 0.0, 0.0);
+    p1 = world_point(self, idx, n.nd_w, 0.0);
+    p2 = world_point(self, idx, 0.0, n.nd_h);
+    p3 = world_point(self, idx, n.nd_w, n.nd_h);
     x0 = p0.p_x; x1 = p0.p_x; y0 = p0.p_y; y1 = p0.p_y;
     if p1.p_x < x0 { x0 = p1.p_x; }  if p1.p_x > x1 { x1 = p1.p_x; }
     if p2.p_x < x0 { x0 = p2.p_x; }  if p2.p_x > x1 { x1 = p2.p_x; }
@@ -323,14 +451,14 @@ pub struct DrawText {
 // is scaffolding rather than a thing to look at.
 pub fn draw_list(self: const Stage) -> vector<DrawRect> {
     out: vector<DrawRect> = [];
-    for i in 0..len(self.st_nodes) {
+    for i in self.st_order {
         n = self.st_nodes[i];
         if !n.nd_visible { continue; }
         if n.nd_w <= 0.0 or n.nd_h <= 0.0 { continue; }
         // The origin is the anchor, so the rect starts there and extends by the
         // node's size through its own scale — which is what `nd_a`/`nd_d` carry.
-        o = world_point(self, i, n.nd_ox, n.nd_oy);
-        far = world_point(self, i, n.nd_ox + n.nd_w, n.nd_oy + n.nd_h);
+        o = world_point(self, i, 0.0, 0.0);
+        far = world_point(self, i, n.nd_w, n.nd_h);
         x0 = o.p_x;
         y0 = o.p_y;
         w = far.p_x - x0;
@@ -411,7 +539,7 @@ pub const OFF_RGBA: integer = 10;    // r, g, b, a
 pub fn batches(self: const Stage) -> vector<Batch> {
     out: vector<Batch> = [];
     idx = 0;
-    for i in 0..len(self.st_nodes) {
+    for i in self.st_order {
         n = self.st_nodes[i];
         if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { continue; }
         // ⚠ A RUN IS (ATLAS, CLIP), not atlas alone.  A scissor change is a state
@@ -443,7 +571,7 @@ pub fn batches(self: const Stage) -> vector<Batch> {
 // `b_count` index this buffer directly.
 pub fn pack_instances(self: const Stage) -> vector<single> {
     out: vector<single> = [];
-    for i in 0..len(self.st_nodes) {
+    for i in self.st_order {
         n = self.st_nodes[i];
         if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { continue; }
         // The affine already carries rotation and scale; the node's SIZE folds in
@@ -452,7 +580,7 @@ pub fn pack_instances(self: const Stage) -> vector<single> {
         out += [(n.nd_b * n.nd_w) as single];
         out += [(n.nd_c * n.nd_h) as single];
         out += [(n.nd_d * n.nd_h) as single];
-        o = world_point(self, i, n.nd_ox, n.nd_oy);
+        o = world_point(self, i, 0.0, 0.0);
         out += [o.p_x as single];
         out += [o.p_y as single];
         out += [n.nd_u0 as single];
@@ -601,8 +729,8 @@ pub fn hits(self: const Stage, idx: integer, sx: float, sy: float) -> boolean {
     n = self.st_nodes[idx];
     if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { return false; }
     l = to_local(self, idx, sx, sy);
-    u = l.p_x - n.nd_ox;
-    v = l.p_y - n.nd_oy;
+    u = l.p_x;
+    v = l.p_y;
     if u < 0.0 or v < 0.0 or u >= n.nd_w or v >= n.nd_h { return false; }
     if n.nd_mask < 0 or n.nd_mask >= len(self.st_masks) { return true; }
     // ⚠ Reached through a BOUNDED loop rather than `st_masks[n.nd_mask]`.  A
@@ -635,10 +763,11 @@ pub fn hits(self: const Stage, idx: integer, sx: float, sy: float) -> boolean {
 // drawing.  One order, two consumers: a pick that disagreed with the picture
 // would be worse than no pick at all.
 pub fn pick(self: const Stage, sx: float, sy: float) -> integer {
-    i = len(self.st_nodes) - 1;
-    while i >= 0 {
+    k = len(self.st_order) - 1;
+    while k >= 0 {
+        i = self.st_order[k] ?? -1;
         if hits(self, i, sx, sy) { return i; }
-        i = i - 1;
+        k = k - 1;
     }
     -1
 }
@@ -681,6 +810,11 @@ pub fn capture(self: const Stage) -> integer { self.st_capture }
 // arithmetic, rounded to nearest.  Straight alpha would need `src * a` here and
 // would darken an anti-aliased edge under linear filtering — the reason the whole
 // path is premultiplied.
+// Linear blend of two channels, `t` in 0..255.
+fn mix(a: integer, b: integer, t: integer) -> integer {
+    (a * (255 - t) + b * t + 127) / 255 ?? 0
+}
+
 fn over(src: integer, dst: integer, ia: integer) -> integer {
     (src * 255 + dst * (255 - ia) + 127) / 255 ?? 0
 }
@@ -691,18 +825,26 @@ fn over(src: integer, dst: integer, ia: integer) -> integer {
 // carries 0xRRGGBB and no alpha by design.  This is the stage's own path, where a
 // node has an alpha to respect — and the two must agree wherever alpha is 1.
 pub fn render_stage(self: const Stage, cv: graphics::Canvas) {
-    for i in 0..len(self.st_nodes) {
+    for i in self.st_order {
         n = self.st_nodes[i];
         if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { continue; }
         if n.nd_alpha <= 0.0 { continue; }
         ia = (n.nd_alpha * 255.0 + 0.5) as integer;
         if ia > 255 { ia = 255; }
         if ia < 0 { ia = 0; }
-        sr = (((n.nd_colour >> 16) & 255) * ia + 127) / 255 ?? 0;
-        sg = (((n.nd_colour >> 8) & 255) * ia + 127) / 255 ?? 0;
-        sb = ((n.nd_colour & 255) * ia + 127) / 255 ?? 0;
-        o = world_point(self, i, n.nd_ox, n.nd_oy);
-        far = world_point(self, i, n.nd_ox + n.nd_w, n.nd_oy + n.nd_h);
+        // Fade toward the haze colour before compositing, so distance reads as less
+        // distinct as well as smaller.
+        hz = (n.nd_cue * self.st_cue_haze * 255.0 + 0.5) as integer;
+        if hz < 0 { hz = 0; }
+        if hz > 255 { hz = 255; }
+        cr = mix((n.nd_colour >> 16) & 255, (self.st_haze_colour >> 16) & 255, hz);
+        cg = mix((n.nd_colour >> 8) & 255, (self.st_haze_colour >> 8) & 255, hz);
+        cb = mix(n.nd_colour & 255, self.st_haze_colour & 255, hz);
+        sr = (cr * ia + 127) / 255 ?? 0;
+        sg = (cg * ia + 127) / 255 ?? 0;
+        sb = (cb * ia + 127) / 255 ?? 0;
+        o = world_point(self, i, 0.0, 0.0);
+        far = world_point(self, i, n.nd_w, n.nd_h);
         x0 = o.p_x as integer;
         y0 = o.p_y as integer;
         x1 = far.p_x as integer;

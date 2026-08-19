@@ -1,0 +1,184 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN144 P1 — layer and depth: how a 2-D scene presents a 3-D world.
+//
+// The case these exist for: buildings authored in 3-D and projected to a
+// footprint, with mobs, workers and a player as sprites that must sort correctly
+// against them.  A sprite standing in front of a wall covers it; one standing
+// behind it does not; and neither may flicker between frames.
+use stage;
+use graphics;
+
+fn at(depth: float, layer: integer, colour: integer) -> stage::Place {
+  stage::Place { pl_w: 8.0, pl_h: 8.0, pl_depth: depth, pl_layer: layer,
+                 pl_colour: colour }
+}
+
+fn seq(st: const stage::Stage) -> text {
+  out = "";
+  for i in st.order() { out += "{i},"; }
+  out
+}
+
+// Depth decides, whatever the insertion order was.
+fn test_depth_orders_the_draw() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, at(10.0, 0, 0x111111));   // 0 — far (large depth)
+  _ = st.node_add(-1, at(-5.0, 0, 0x222222));   // 1 — near
+  _ = st.node_add(-1, at(0.0, 0, 0x333333));    // 2 — middle
+  st.compose();
+  // Depth is distance INTO the screen, so the far one draws first.
+  assert(seq(st) == "0,2,1,", "far to near, got {seq(st)}");
+}
+
+// ⚠ LAYER OUTRANKS DEPTH ENTIRELY.  A UI element at a huge depth still draws over
+// a world sprite at a tiny one — that is what makes background / world / UI bands
+// rather than a single number every node has to get right.
+fn test_layer_outranks_depth() {
+  st = stage::stage_new();
+  // ⚠ The depths are chosen so layer-first and depth-first DISAGREE.  With the UI
+  // element the FURTHER of the two, a sort that consulted depth first would draw it
+  // underneath — and an earlier version of this test used depths that gave the same
+  // answer either way, so it could not tell them apart.
+  _ = st.node_add(-1, at(1000.0, 1, 0x111111));   // 0 — UI band, very "far"
+  _ = st.node_add(-1, at(-1000.0, 0, 0x222222));  // 1 — world band, very "near"
+  st.compose();
+  assert(seq(st) == "1,0,", "the world band draws first however near it is");
+}
+
+// ⚠ THE SORT IS STABLE, and that is the third key's whole job.  Two sprites on the
+// same footprint — a worker standing where another stands — must not swap from
+// frame to frame.
+fn test_equal_depth_keeps_insertion_order() {
+  st = stage::stage_new();
+  // Six equal depths, deliberately more than the merge width so the tie-break is
+  // exercised at every level of the merge rather than only in one pass.
+  for _i in 0..6 { _ = st.node_add(-1, at(3.0, 0, 0x111111)); }
+  st.compose();
+  assert(seq(st) == "0,1,2,3,4,5,", "ties keep insertion order, got {seq(st)}");
+  st.compose();
+  assert(seq(st) == "0,1,2,3,4,5,", "and composing again does not reshuffle them");
+}
+
+// The 2.5-D idiom, end to end: `depth = -y` makes a sprite lower on the screen
+// draw in front.  A worker at y=40 covers a wall at y=20.
+fn test_depth_from_minus_y_puts_the_lower_sprite_in_front() {
+  st = stage::stage_new();
+  wall = st.node_add(-1, stage::Place { pl_x: 0.0, pl_y: 20.0, pl_w: 16.0, pl_h: 16.0,
+                                        pl_depth: -20.0, pl_colour: 0x808080 });
+  worker = st.node_add(-1, stage::Place { pl_x: 4.0, pl_y: 28.0, pl_w: 8.0, pl_h: 8.0,
+                                          pl_depth: -28.0, pl_colour: 0x00ff00 });
+  st.compose();
+  assert(st.order()[1] == worker, "the lower sprite draws last");
+  cv = graphics::canvas(32, 48, 0xff000000);
+  st.render_stage(cv);
+  assert(cv.get_pixel(6, 30) == 0xff00ff00, "and it covers the wall where they overlap");
+  assert(cv.get_pixel(6, 22) == 0xff808080, "the wall still shows above it");
+  assert(wall == 0, "insertion order is unchanged by sorting");
+}
+
+// Picking follows the same order, so what you click is what you see on top.
+fn test_picking_follows_the_draw_order() {
+  st = stage::stage_new();
+  // ⚠ The NEAR node is added FIRST, so the drawn order (far, near) is the reverse
+  // of the index order.  A pick that walked indices instead of the order would
+  // answer `far` here and would have agreed with this test when the two coincided.
+  near = st.node_add(-1, stage::Place { pl_w: 20.0, pl_h: 20.0, pl_depth: -5.0 });
+  far = st.node_add(-1, stage::Place { pl_w: 20.0, pl_h: 20.0, pl_depth: 5.0 });
+  st.compose();
+  assert(near == 0 and far == 1, "indices are insertion order");
+  assert(seq(st) == "1,0,", "but the drawn order is far then near");
+  assert(st.pick(10.0, 10.0) == near, "and the pick follows the DRAWN order");
+}
+
+// A run still breaks on a state change, now measured along the SORTED order — the
+// batcher sees the scene in the order it is drawn, never the order it was built.
+fn test_batches_follow_the_sorted_order() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_w: 4.0, pl_h: 4.0, pl_atlas: 1, pl_depth: 2.0 });
+  _ = st.node_add(-1, stage::Place { pl_w: 4.0, pl_h: 4.0, pl_atlas: 2, pl_depth: 1.0 });
+  _ = st.node_add(-1, stage::Place { pl_w: 4.0, pl_h: 4.0, pl_atlas: 1, pl_depth: 0.0 });
+  st.compose();
+  bs = st.batches();
+  // sorted: atlas 1 (depth 0), atlas 2 (depth 1), atlas 1 (depth 2) -> three runs
+  assert(len(bs) == 3, "three runs along the drawn order, got {len(bs)}");
+  assert(bs[0].b_atlas == 1 and bs[1].b_atlas == 2 and bs[2].b_atlas == 1,
+         "and in the drawn sequence");
+}
+
+// ── the 2.5-D depth cue ──────────────────────────────────────────────────────
+
+// Off by default, and off means an IDENTICAL picture — the degenerate case proved
+// rather than assumed, as with the camera's factor 1.0 and fog's density 0.
+fn test_the_cue_is_off_by_default() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_x: 4.0, pl_y: 4.0, pl_w: 8.0, pl_h: 8.0,
+                                     pl_depth: 100.0, pl_colour: 0x00ff00 });
+  st.compose();
+  cv = graphics::canvas(32, 32, 0xff000000);
+  st.render_stage(cv);
+  n = 0;
+  for v in cv.data { if v == 0xff00ff00 { n = n + 1; } }
+  assert(n == 64, "8x8 undisturbed, got {n}");
+  assert(st.haze_of(0) == 0.0, "and no haze");
+}
+
+// ⚠ THE PROPERTY THAT MATTERS: a distant node is drawn SMALLER but its ORIGIN
+// DOES NOT MOVE.  A cue that shrank about the centre would slide a mob off the
+// tile it is standing on, which is precisely the bug 2.5-D art shows worst.
+fn test_distance_shrinks_a_sprite_without_moving_its_feet() {
+  st = stage::stage_new();
+  // origin at the sprite's feet: bottom-centre of a 10x10 body.
+  far = st.node_add(-1, stage::Place { pl_x: 20.0, pl_y: 20.0, pl_w: 10.0, pl_h: 10.0,
+                                       pl_ox: 5.0, pl_oy: 10.0, pl_depth: 100.0 });
+  st.depth_cue(0.0, 100.0, 0.5, 0.0, 0x000000);
+  st.compose();
+  o = st.world_origin(far);
+  assert(o.p_x > 19.99 and o.p_x < 20.01 and o.p_y > 19.99 and o.p_y < 20.01,
+         "the feet stay at (20,20), got ({o.p_x}, {o.p_y})");
+  b = st.bounds_of(far);
+  assert(b.b_x1 - b.b_x0 > 4.99 and b.b_x1 - b.b_x0 < 5.01,
+         "and the body is half as wide: {b.b_x1 - b.b_x0}");
+  assert(b.b_y1 > 19.99 and b.b_y1 < 20.01, "its base still rests on the same line");
+}
+
+// The near plane is untouched, so only DISTANCE costs size.
+fn test_the_near_plane_is_untouched() {
+  st = stage::stage_new();
+  near = st.node_add(-1, stage::Place { pl_w: 10.0, pl_h: 10.0, pl_depth: 0.0 });
+  st.depth_cue(0.0, 100.0, 0.25, 1.0, 0x000000);
+  st.compose();
+  b = st.bounds_of(near);
+  assert(b.b_x1 - b.b_x0 > 9.99, "full size at the near plane");
+  assert(st.haze_of(near) == 0.0, "and no haze");
+}
+
+// Haze interpolates, and is CLAMPED outside the planes so a stray depth cannot
+// invert the effect.
+fn test_haze_interpolates_and_clamps() {
+  st = stage::stage_new();
+  a = st.node_add(-1, stage::Place { pl_w: 2.0, pl_h: 2.0, pl_depth: 50.0 });
+  b = st.node_add(-1, stage::Place { pl_w: 2.0, pl_h: 2.0, pl_depth: 500.0 });
+  c = st.node_add(-1, stage::Place { pl_w: 2.0, pl_h: 2.0, pl_depth: -500.0 });
+  st.depth_cue(0.0, 100.0, 1.0, 0.8, 0x000000);
+  st.compose();
+  h = st.haze_of(a);
+  assert(h > 0.39 and h < 0.41, "half way is 0.4 of 0.8, got {h}");
+  assert(st.haze_of(b) > 0.79 and st.haze_of(b) < 0.81, "beyond the far plane clamps");
+  assert(st.haze_of(c) == 0.0, "nearer than the near plane clamps");
+}
+
+// A hazed node is painted toward the haze colour.  Fully hazed toward white, a
+// pure red node paints white.
+fn test_haze_fades_the_paint() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_w: 4.0, pl_h: 4.0, pl_colour: 0xff0000,
+                                     pl_depth: 100.0 });
+  st.depth_cue(0.0, 100.0, 1.0, 1.0, 0xffffff);
+  st.compose();
+  cv = graphics::canvas(8, 8, 0xff000000);
+  st.render_stage(cv);
+  assert(cv.get_pixel(1, 1) == 0xffffffff,
+         "fully hazed toward white, got {cv.get_pixel(1, 1)}");
+}

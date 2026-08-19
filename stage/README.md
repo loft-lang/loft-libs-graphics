@@ -64,6 +64,22 @@ composite in call order. The cost is that interleaving two atlases sprite-by-spr
 instance per run — a **packing** problem, cured upstream by putting sprites that draw near
 each other on one page.
 
+## Depth, layers and the 2.5-D cue
+
+A node carries a **`layer`** (an ordering band) and a **`depth`** (distance *into* the screen —
+**larger draws first**, so `depth = -y` puts a lower sprite in front). Layer outranks depth
+entirely, so background / world / UI are bands rather than one number every node must get
+right. Ties break by insertion order and the sort is **stable**, so two sprites on one
+footprint never swap between frames.
+
+`depth_cue(near, far, far_scale, far_haze, haze_colour)` makes distance read as **smaller and
+less distinct** — and it scales about the **origin**, so a mob's feet stay planted on its tile
+while its body shrinks. Off by default, and off is an identical picture.
+
+⚠ **The sprite occupies local `[0,w] × [0,h]`, and the origin is a point inside it** — not the
+box's corner. Put it at `(w/2, h)` and the sprite stands up from its feet, centred on where it
+was placed.
+
 ## Picking
 
 `pick` walks the draw order **backwards**, so the node drawn last is tested first and
