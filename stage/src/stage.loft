@@ -64,6 +64,10 @@ pub struct StageNode {
     nd_cy0: float,
     nd_cx1: float,
     nd_cy1: float,
+    nd_key: text,            // the mob kind, e.g. "orc" — resolution starts here
+    nd_action: text,         // what it is doing, e.g. "walk"
+    nd_facing: float,        // where it points, in radians; kept in BOTH models
+    nd_mirror: boolean,      // side-on: is it drawn flipped side to side?
     nd_seq: integer,         // index into `st_seqs`, or -1 for a still sprite
     nd_elapsed: integer,     // MICROSECONDS into the sequence — see `advance`
     nd_cols: integer,        // the atlas grid this node's cells live in
@@ -99,6 +103,7 @@ pub struct Stage {
     st_dirty: boolean,           // does the instance buffer need rewriting?
     st_time: float,              // ambient clock — a uniform, never a rewrite
     st_seqs: vector<Sequence>,   // animation sequences, referenced by index
+    st_proj: integer,            // TOP_DOWN or SIDE_ON — it picks the facing model
 }
 
 // LOOP wraps, ONCE stops on the last frame, PINGPONG reverses at both ends.
@@ -107,11 +112,18 @@ pub const ONCE: integer = 1;
 pub const PINGPONG: integer = 2;
 
 // A run of atlas cells played at a rate.
+//
+// ⚠ THE NAME LIVES HERE, not in a list beside `st_seqs`.  A parallel vector that
+// only the naming registrar appended to drifted the moment a caller mixed
+// `add_sequence` with `add_named_sequence`, and every later name then pointed at
+// somebody else's cells — silently, because both lists were individually
+// well-formed.  One home per fact; the test that caught it is kept.
 pub struct Sequence {
     q_first: integer,        // first cell in the atlas
     q_count: integer,
     q_fps: float,
     q_mode: integer,
+    q_name: text,            // "" for an unnamed sequence
 }
 
 
@@ -149,6 +161,7 @@ pub struct Place {
     pl_alpha: float = 1.0,
     pl_mask: integer = -1,   // index from `add_mask`, or -1 for solid
     pl_clips: boolean = false,  // clip this node's subtree to its own bounds
+    pl_key: text = "",          // the mob kind; "" opts out of by-name resolution
     pl_seq: integer = -1,       // from `add_sequence`; -1 is a still sprite
     pl_cols: integer = 1,       // the atlas grid the cells are packed in
     pl_rows: integer = 1,
@@ -187,7 +200,7 @@ pub fn stage_new() -> Stage {
             st_cue: false, st_cue_near: 0.0, st_cue_far: 1.0,
             st_cue_scale: 1.0, st_cue_haze: 0.0, st_haze_colour: 0x000000,
             st_cam_x: 0.0, st_cam_y: 0.0, st_par: [], st_uploads: 0, st_dirty: true,
-            st_time: 0.0, st_seqs: [] }
+            st_time: 0.0, st_seqs: [], st_proj: TOP_DOWN }
 }
 
 pub fn node_count(self: const Stage) -> integer {
@@ -211,6 +224,7 @@ pub fn node_add(self: Stage, parent: integer, p: const Place) -> integer {
         nd_w: p.pl_w, nd_h: p.pl_h, nd_colour: p.pl_colour, nd_visible: p.pl_visible,
         nd_atlas: p.pl_atlas, nd_u0: p.pl_u0, nd_v0: p.pl_v0, nd_u1: p.pl_u1,
         nd_v1: p.pl_v1, nd_alpha: p.pl_alpha, nd_mask: p.pl_mask,
+        nd_key: p.pl_key, nd_action: "", nd_facing: 0.0, nd_mirror: false,
         nd_seq: p.pl_seq, nd_elapsed: 0, nd_cols: p.pl_cols, nd_rows: p.pl_rows,
         nd_sway: p.pl_sway, nd_phase: 0.0,
         nd_cue: 0.0, nd_layer: p.pl_layer, nd_depth: p.pl_depth,
@@ -247,8 +261,14 @@ pub fn compose(self: Stage) {
         cue = cue_of(self, n.nd_depth);
         self.st_nodes[i].nd_cue = cue;
         k = 1.0 + (self.st_cue_scale - 1.0) * cue;
-        la = cs * n.nd_sx * k;
-        lb = sn * n.nd_sx * k;
+        // ⚠ MIRRORING IS A NEGATED X SCALE, and it rides the transform that already
+        // exists rather than adding a pass.  Because the origin is the anchor, a
+        // flip about it leaves the footprint and the origin exactly where they
+        // were — verified, not assumed: P5's gate compares both against the
+        // unmirrored bounds.
+        mx = if n.nd_mirror { -1.0 } else { 1.0 };
+        la = cs * n.nd_sx * k * mx;
+        lb = sn * n.nd_sx * k * mx;
         lc = -sn * n.nd_sy * k;
         ld = cs * n.nd_sy * k;
         // ... then place the ORIGIN at (x, y): t = (x, y) - A . (ox, oy).
@@ -1038,9 +1058,16 @@ pub fn sway_of(self: const Stage, idx: integer) -> float {
 // Register a sequence and answer its index, for `Place.pl_seq`.
 pub fn add_sequence(self: Stage, first: integer, count: integer, fps: float,
                     mode: integer) -> integer {
+    push_sequence(self, "", first, count, fps, mode)
+}
+
+// The one place a `Sequence` is built, so its name arrives with the rest of it
+// and cannot be attached — or forgotten — afterwards.
+fn push_sequence(self: Stage, name: text, first: integer, count: integer,
+                 fps: float, mode: integer) -> integer {
     self.st_seqs += [Sequence { q_first: first,
                                 q_count: if count < 1 { 1 } else { count },
-                                q_fps: fps, q_mode: mode }];
+                                q_fps: fps, q_mode: mode, q_name: name }];
     len(self.st_seqs) - 1
 }
 
@@ -1077,7 +1104,7 @@ pub fn frame_of(self: const Stage, idx: integer) -> integer {
     // leaking form.  A literal is the shape that does not.  It stays unreachable:
     // the bounds test above is what decides that, not this line.
     q = self.st_seqs[n.nd_seq] ?? Sequence { q_first: 0, q_count: 1, q_fps: 0.0,
-                                             q_mode: LOOP };
+                                             q_mode: LOOP, q_name: "" };
     raw = ((n.nd_elapsed as float) * q.q_fps / 1000000.0) as integer;
     if raw < 0 { raw = 0; }
     if q.q_count <= 1 { return q.q_first; }
@@ -1102,4 +1129,151 @@ pub fn restart(self: Stage, idx: integer) {
     if idx < 0 or idx >= len(self.st_nodes) { return; }
     self.st_nodes[idx].nd_elapsed = 0;
     self.st_dirty = true;
+}
+
+
+// ── P5: facings, and the two models the projection picks between ─────────────
+//
+// ⚠ THE PROJECTION PICKS THE MODEL, NOT THE AUTHOR.  An author writes one call —
+// `face(node, angle)`, "this thing points that way" — and the stage decides what
+// that costs.  A top-down world turns one sprite continuously; a side-on one
+// cannot turn a standing sprite at all, so it picks from an (action, facing)
+// table and mirrors at most.  Putting the choice in the projection is what lets
+// the same mob code serve both views, which is the claim the 2.5-D vehicle rests
+// on.
+
+// One sprite authored in a locked orientation, rotated continuously to the
+// facing.  Pre-rotated frames never exist, so 15-degree steps cost no cells.
+pub const TOP_DOWN: integer = 0;
+// A standing sprite cannot be rotated into another facing — at most mirrored —
+// so the facing selects a sequence and the other side is a flip.
+pub const SIDE_ON: integer = 1;
+
+pub fn set_projection(self: Stage, mode: integer) { self.st_proj = mode; }
+
+pub fn projection(self: const Stage) -> integer { self.st_proj }
+
+pub fn sequence_count(self: const Stage) -> integer { len(self.st_seqs) }
+
+// Register a sequence under a NAME, so `face` and `set_action` can resolve it.
+// The convention is `<key>`, `<key>_<action>`, `<key>_<action>_<facing>`, and
+// resolution walks it most-specific first.
+pub fn add_named_sequence(self: Stage, name: text, first: integer, count: integer,
+                          fps: float, mode: integer) -> integer {
+    push_sequence(self, name, first, count, fps, mode)
+}
+
+// The sequence registered under `name`, or -1.  Names are resolved when a facing
+// or an action CHANGES, never per frame, which is what keeps a scan honest here.
+fn seq_named(self: const Stage, name: text) -> integer {
+    if name == "" { return -1; }
+    found = -1;
+    for i in 0..len(self.st_seqs) {
+        qi = self.st_seqs[i];
+        if qi.q_name == name { found = i; }
+    }
+    found
+}
+
+// Which of the four compass facings an angle points at.
+//
+// ⚠ SCREEN SPACE, Y DOWN: angle 0 is +x (east) and +pi/2 is +y (south), matching
+// `pl_rot` and the shader.  The edges are HALF-OPEN, as A4's picking rects are —
+// 45 degrees belongs to south — so no angle is claimed by two facings.
+pub fn facing_name(angle: float) -> text {
+    turn = PI * 2.0;
+    norm = angle - floor(angle / turn ?? 0.0) * turn;
+    b = ((norm + PI / 4.0) / (PI / 2.0) ?? 0.0) as integer;
+    q = b % 4 ?? 0;
+    if q == 0 { return "e"; }
+    if q == 1 { return "s"; }
+    if q == 2 { return "w"; }
+    "n"
+}
+
+// The facing a flip would show instead, or "" where a flip shows nothing new —
+// a front view mirrored is still a front view, so north and south have no partner.
+fn opposite_facing(f: text) -> text {
+    if f == "e" { return "w"; }
+    if f == "w" { return "e"; }
+    ""
+}
+
+// Resolve a node's sequence from its key, action and facing, and say whether the
+// answer has to be mirrored to face the right way.
+//
+// ⚠ FALL BACK, NEVER FAIL.  A missing sprite leaves the mob drawn with what it
+// already had — the rule crawler's `<key>.png` loader keeps, and the reason a
+// half-authored mob is a visibly wrong sprite rather than a blank or a stop.
+fn resolve_facing(self: Stage, idx: integer) {
+    n = self.st_nodes[idx];
+    if n.nd_key == "" { return; }
+    f = facing_name(n.nd_facing);
+    mirror = false;
+    q = -1;
+    if n.nd_action != "" {
+        q = seq_named(self, "{n.nd_key}_{n.nd_action}_{f}");
+        if q < 0 {
+            // At most mirrored: borrow the other side rather than turning.
+            opp = opposite_facing(f);
+            if opp != "" {
+                q = seq_named(self, "{n.nd_key}_{n.nd_action}_{opp}");
+                if q >= 0 { mirror = true; }
+            }
+        }
+        if q < 0 { q = seq_named(self, "{n.nd_key}_{n.nd_action}"); }
+    }
+    if q < 0 { q = seq_named(self, "{n.nd_key}_{f}"); }
+    if q < 0 { q = seq_named(self, n.nd_key); }
+    if q < 0 { return; }               // nothing matched: keep what it had
+    // ⚠ THE PHASE CARRIES OVER — `nd_elapsed` is deliberately not touched.  A mob
+    // turning a corner mid-stride must keep walking from where its legs were; a
+    // reset here is a visible stutter at the exact moment a player is watching.
+    // `restart` stays the one way to go back to frame 0.
+    self.st_nodes[idx].nd_seq = q;
+    self.st_nodes[idx].nd_mirror = mirror;
+    self.st_dirty = true;
+}
+
+// Point a node at `angle` radians.  Top-down turns it; side-on picks and flips.
+pub fn face(self: Stage, idx: integer, angle: float) {
+    if idx < 0 or idx >= len(self.st_nodes) { return; }
+    self.st_nodes[idx].nd_facing = angle;
+    if self.st_proj == TOP_DOWN {
+        // Continuous, off the 2x3 affine A1 already composes — so a finer step
+        // costs arithmetic and never an atlas entry.
+        self.st_nodes[idx].nd_rot = angle;
+        self.st_nodes[idx].nd_mirror = false;
+        self.st_dirty = true;
+        return;
+    }
+    resolve_facing(self, idx);
+}
+
+// What a node is doing — "idle", "walk", "attack".  Re-resolves, phase intact.
+pub fn set_action(self: Stage, idx: integer, action: text) {
+    if idx < 0 or idx >= len(self.st_nodes) { return; }
+    self.st_nodes[idx].nd_action = action;
+    if self.st_proj == SIDE_ON { resolve_facing(self, idx); }
+}
+
+pub fn facing_of(self: const Stage, idx: integer) -> float {
+    if idx < 0 or idx >= len(self.st_nodes) { return 0.0; }
+    self.st_nodes[idx].nd_facing
+}
+
+pub fn action_of(self: const Stage, idx: integer) -> text {
+    if idx < 0 or idx >= len(self.st_nodes) { return ""; }
+    self.st_nodes[idx].nd_action
+}
+
+// The sprite's own rotation, which side-on leaves alone.
+pub fn rotation_of(self: const Stage, idx: integer) -> float {
+    if idx < 0 or idx >= len(self.st_nodes) { return 0.0; }
+    self.st_nodes[idx].nd_rot
+}
+
+pub fn mirrored(self: const Stage, idx: integer) -> boolean {
+    if idx < 0 or idx >= len(self.st_nodes) { return false; }
+    self.st_nodes[idx].nd_mirror
 }

@@ -26,6 +26,9 @@ loft install stage
   `released_on` / `capture` · `add_mask(w, h, alpha)`
 - `add_sequence(first, count, fps, mode) -> integer` · `advance(dt_us)` ·
   `frame_of(idx)` · `restart(idx)` · `LOOP` / `ONCE` / `PINGPONG`
+- `set_projection(mode)` / `projection()` · `TOP_DOWN` / `SIDE_ON` ·
+  `add_named_sequence(name, …)` · `face(idx, angle)` · `set_action(idx, action)` ·
+  `facing_of` / `action_of` / `rotation_of` / `mirrored` · `facing_name(angle)`
 - `batches() -> vector<Batch>` · `pack_instances() -> vector<single>` ·
   `INSTANCE_STRIDE` / `OFF_AFFINE` / `OFF_CELL` / `OFF_RGBA` / `OFF_SWAY`
 
@@ -120,6 +123,48 @@ test that ticks exactly that case.
 meaningful with a screen full of walking mobs — the packed grid (`cols`, `rows`) is static
 and uploads once.  Deriving the uv from that grid is the shader's job; today the GL path
 draws untextured quads, so the attribute is packed and bound but not yet read.
+
+## Facings — the projection picks the model
+
+An author writes one call — `face(node, angle)`, *this thing points that way* — and
+**the stage decides what that costs**.  That is the whole point: the same mob code serves
+a top-down view and a side-on one.
+
+**`TOP_DOWN`** (the default) turns one sprite continuously off the 2×3 affine that already
+exists.  A sprite authored in a locked orientation — crawler's *front = up* — is what makes
+that legal, and it means **15° steps cost no atlas entries**: 24 facings are one cell turned
+24 ways, not 24 cells.  Pre-rotated frames never exist.
+
+**`SIDE_ON`** cannot turn a standing sprite into another facing — turn it by π and it lies
+on its head — so the facing picks a sequence from an `(action, facing)` table and **mirrors
+at most**.  Mirroring is a negated x scale, and because the origin is the anchor it leaves
+the footprint and the origin exactly where they were; there is a test comparing both against
+the unmirrored bounds.  North and south have no mirror partner — a front view flipped is
+still a front view — so they fall back instead of borrowing.
+
+⚠ **A facing change mid-walk keeps the frame phase.**  Switching sequences carries the
+elapsed over, or a mob turning a corner snaps its legs back to frame 0 and stutters at
+exactly the moment a player is watching it.  `restart` stays the one way to go back.
+
+The compass is four facings in screen space, y down: angle 0 is east, `+π/2` is south.  The
+edges are **half-open** like the picking rects — 45° belongs to south — so no angle is
+claimed by two facings.
+
+### Resolution is by name, and it falls back rather than failing
+
+`add_named_sequence` registers under a name; a node carries `pl_key`.  Resolution walks
+**most specific first**:
+
+`{key}_{action}_{facing}` → the opposite facing, **mirrored** → `{key}_{action}` →
+`{key}_{facing}` → `{key}` → *keep what it had*.
+
+A missing sprite leaves the mob drawn with what it already has — the rule crawler's
+`<key>.png` loader keeps — so a half-authored mob is a visibly wrong sprite rather than a
+blank or a stopped frame.  Names resolve when a facing or an action **changes**, never per
+frame.
+
+The projection belongs at setup.  It may move later — a mob that faces each frame lands in
+the new model by itself — but nothing re-derives on the switch.
 
 ## The camera
 

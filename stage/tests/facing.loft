@@ -1,0 +1,296 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN144 P5 — facings, and the two models the PROJECTION picks between.
+//
+// The claim under test is that an author writes ONE call — "this thing points
+// that way" — and the stage decides whether that is a rotation or a sequence
+// plus a mirror.  Top-down rotates one sprite continuously and must never cost
+// an atlas cell for doing it; side-on cannot rotate a standing sprite into
+// another facing, so it picks from an (action, facing) table and mirrors at
+// most, and a facing change mid-walk must not snap the legs back to frame 0.
+use stage;
+
+EPS = 0.000001;
+fn near(a: float, b: float) -> boolean { a - b < EPS and b - a < EPS }
+fn nears(a: single, b: float) -> boolean {
+  d = (a as float) - b;
+  d < EPS and -d < EPS
+}
+
+// A mob: 10 wide, 20 tall, origin at the FEET (bottom-centre), stood at (100,200).
+fn mob(st: stage::Stage, key: text) -> integer {
+  st.node_add(-1, stage::Place { pl_w: 10.0, pl_h: 20.0, pl_ox: 5.0, pl_oy: 20.0,
+                                 pl_x: 100.0, pl_y: 200.0, pl_key: key })
+}
+
+// ── the quantiser ────────────────────────────────────────────────────────────
+//
+// Screen space, y DOWN: angle 0 is +x (east), +pi/2 is +y (south).  Hand-computed
+// at every boundary, and the edges are HALF-OPEN like A4's picking — 45 degrees
+// belongs to south, not to east, so two facings never both claim one angle.
+fn test_the_compass_is_half_open_at_its_boundaries() {
+  cases = [0.0, 44.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0, 359.0,
+           -45.0, -46.0, -90.0];
+  want  = ["e", "e", "s", "s",   "w",   "w",   "n",   "n",   "e",   "e",
+           "e",   "n",   "n"];
+  for i in 0..len(cases) {
+    d = cases[i] ?? 0.0;
+    got = stage::facing_name(d * PI / 180.0);
+    assert(got == (want[i] ?? ""), "{d} degrees: got '{got}', want '{want[i] ?? ""}'");
+  }
+}
+
+// ── TOP-DOWN: continuous rotation, and no atlas cost for it ──────────────────
+
+// ⚠ 15-DEGREE STEPS COST NO ATLAS ENTRIES.  Pre-rotated frames are exactly what
+// this model avoids, so 24 facings must be ONE cell turned 24 ways — not 24
+// cells.  A sprite authored in a locked orientation (crawler's "front = up") is
+// what makes that legal.
+fn test_fifteen_degree_steps_cost_no_atlas_entries() {
+  st = stage::stage_new();
+  st.set_projection(stage::TOP_DOWN);
+  q = st.add_named_sequence("orc", 3, 1, 0.0, stage::LOOP);
+  ns: vector<integer> = [];
+  for i in 0..24 {
+    n = st.node_add(-1, stage::Place { pl_w: 1.0, pl_h: 1.0, pl_seq: q });
+    st.face(n, (i as float) * 15.0 * PI / 180.0);
+    ns += [n];
+  }
+  st.compose();
+  assert(st.sequence_count() == 1, "24 facings, one sequence — got {st.sequence_count()}");
+  f = st.pack_instances();
+  // Every instance names the SAME cell and the same atlas...
+  for i in 0..24 {
+    base = i * stage::INSTANCE_STRIDE;
+    assert(nears(f[base + stage::OFF_CELL] ?? 0.0f, 3.0),
+           "facing {i}: cell moved to {f[base + stage::OFF_CELL] ?? 0.0f}");
+  }
+  // ...and the affines are 24 DISTINCT rotations.  Hand-computed at 15 degrees:
+  // cos = 0.9659258, sin = 0.2588190.
+  assert(nears(f[stage::INSTANCE_STRIDE + stage::OFF_AFFINE] ?? 0.0f, 0.9659258),
+         "a at 15 degrees");
+  assert(nears(f[stage::INSTANCE_STRIDE + stage::OFF_AFFINE + 1] ?? 0.0f, 0.2588190),
+         "b at 15 degrees");
+  seen = 0;
+  for i in 0..24 {
+    ai = f[i * stage::INSTANCE_STRIDE + stage::OFF_AFFINE] ?? 0.0f;
+    bi = f[i * stage::INSTANCE_STRIDE + stage::OFF_AFFINE + 1] ?? 0.0f;
+    dup = false;
+    for j in 0..i {
+      aj = f[j * stage::INSTANCE_STRIDE + stage::OFF_AFFINE] ?? 0.0f;
+      bj = f[j * stage::INSTANCE_STRIDE + stage::OFF_AFFINE + 1] ?? 0.0f;
+      if nears(ai, aj as float) and nears(bi, bj as float) { dup = true; }
+    }
+    if !dup { seen = seen + 1; }
+  }
+  assert(seen == 24, "24 facings must give 24 distinct affines — got {seen}");
+}
+
+// Top-down keeps the angle exactly: it is a rotation, not a bucket.
+fn test_top_down_rotation_is_continuous() {
+  st = stage::stage_new();
+  st.set_projection(stage::TOP_DOWN);
+  n = mob(st, "orc");
+  st.face(n, 0.3);
+  st.compose();
+  assert(near(st.facing_of(n), 0.3), "the facing is kept exactly");
+  assert(near(st.rotation_of(n), 0.3), "and top-down turns the sprite by it");
+  st.face(n, 0.31);
+  st.compose();
+  assert(near(st.rotation_of(n), 0.31), "a hundredth of a radian still moves it");
+}
+
+// ── SIDE-ON: an (action, facing) table, mirrored at most ─────────────────────
+
+// ⚠ A FACING CHANGE MID-WALK KEEPS THE PHASE.  Switching sequences must carry the
+// elapsed over, or a mob turning a corner snaps its legs back to frame 0 and
+// visibly stutters at exactly the moment the player is watching it.
+fn test_turning_mid_walk_keeps_the_frame_phase() {
+  st = stage::stage_new();
+  st.set_projection(stage::SIDE_ON);
+  _ = st.add_named_sequence("orc_walk_e", 100, 6, 10.0, stage::LOOP);
+  _ = st.add_named_sequence("orc_walk_n", 200, 6, 10.0, stage::LOOP);
+  n = mob(st, "orc");
+  st.set_action(n, "walk");
+  st.face(n, 0.0);                       // east
+  st.compose();
+  st.advance(250000);                    // 0.25 s at 10 fps -> offset 2
+  assert(st.frame_of(n) == 102, "walking east, on the third cell");
+  st.face(n, -PI / 2.0);                 // turn north, mid-stride
+  assert(st.frame_of(n) == 202,
+         "the phase carries over — got {st.frame_of(n)}, want 202 (not 200)");
+  st.advance(100000);
+  assert(st.frame_of(n) == 203, "and it keeps walking from there");
+}
+
+// ⚠ WEST IS EAST MIRRORED, NOT EAST ROTATED.  A standing sprite turned by pi
+// lies on its head; the only legal transform between the two sides is a flip.
+// Hand-computed for w=10 h=20 ox=5 oy=20 at (100,200): east packs a=+10, tx=95;
+// west packs a=-10, tx=105 — and BOTH span x 95..105 with the origin at
+// (100,200).  The footprint does not move, exactly as P3's sway does not.
+fn test_west_is_east_mirrored_and_the_footprint_does_not_move() {
+  st = stage::stage_new();
+  st.set_projection(stage::SIDE_ON);
+  _ = st.add_named_sequence("orc_walk_e", 100, 6, 10.0, stage::LOOP);
+  n = mob(st, "orc");
+  st.set_action(n, "walk");
+
+  st.face(n, 0.0);                       // east
+  st.compose();
+  be = st.bounds_of(n);
+  oe = st.world_origin(n);
+  fe = st.pack_instances();
+  assert(nears(fe[stage::OFF_AFFINE] ?? 0.0f, 10.0), "east: a = +w");
+  assert(!st.mirrored(n), "east is not mirrored");
+
+  st.face(n, PI);                        // west
+  st.compose();
+  bw = st.bounds_of(n);
+  ow = st.world_origin(n);
+  fw = st.pack_instances();
+  assert(st.mirrored(n), "west mirrors");
+  assert(near(st.rotation_of(n), 0.0),
+         "and it does NOT rotate — a standing sprite stays upright");
+  assert(nears(fw[stage::OFF_AFFINE] ?? 0.0f, -10.0), "west: a = -w, the flip");
+  assert(nears(fw[stage::OFF_AFFINE + 3] ?? 0.0f, 20.0),
+         "while d is untouched — flipped side to side, never top to bottom");
+  assert(st.frame_of(n) == 100, "west reuses the EAST cells, mirrored");
+  assert(near(bw.b_x0, be.b_x0) and near(bw.b_x1, be.b_x1),
+         "the footprint does not move: {bw.b_x0}..{bw.b_x1} vs {be.b_x0}..{be.b_x1}");
+  assert(near(bw.b_y0, be.b_y0) and near(bw.b_y1, be.b_y1), "nor vertically");
+  assert(near(ow.p_x, oe.p_x) and near(ow.p_y, oe.p_y),
+         "and the origin is still where the mob stands");
+}
+
+// North and south have no mirror partner — a front view flipped is still a front
+// view — so they fall back rather than borrowing the other one.
+fn test_north_and_south_do_not_mirror() {
+  st = stage::stage_new();
+  st.set_projection(stage::SIDE_ON);
+  _ = st.add_named_sequence("orc_walk", 50, 4, 10.0, stage::LOOP);
+  _ = st.add_named_sequence("orc_walk_e", 100, 4, 10.0, stage::LOOP);
+  n = mob(st, "orc");
+  st.set_action(n, "walk");
+  st.face(n, -PI / 2.0);                 // north
+  assert(st.frame_of(n) == 50, "north falls back to the actionful sequence");
+  assert(!st.mirrored(n), "and does not borrow east");
+}
+
+// ── the projection picks, not the author ─────────────────────────────────────
+
+// ⚠ THE SAME CALL, TWO MODELS.  This is the phase's whole claim: `face` means
+// "point that way", and what that costs is the projection's decision.
+fn test_one_call_two_models() {
+  top = stage::stage_new();
+  top.set_projection(stage::TOP_DOWN);
+  _ = top.add_named_sequence("orc_walk_e", 100, 4, 10.0, stage::LOOP);
+  tn = mob(top, "orc");
+  top.set_action(tn, "walk");
+  top.face(tn, PI);
+  top.compose();
+
+  side = stage::stage_new();
+  side.set_projection(stage::SIDE_ON);
+  _ = side.add_named_sequence("orc_walk_e", 100, 4, 10.0, stage::LOOP);
+  sn = mob(side, "orc");
+  side.set_action(sn, "walk");
+  side.face(sn, PI);
+  side.compose();
+
+  assert(near(top.rotation_of(tn), PI), "top-down turns the sprite");
+  assert(!top.mirrored(tn), "and never mirrors it");
+  assert(near(side.rotation_of(sn), 0.0), "side-on leaves it upright");
+  assert(side.mirrored(sn), "and flips it instead");
+}
+
+// ── by-name resolution: fall back, never fail ────────────────────────────────
+
+// Most specific wins, and each rung is reached only when the one above is absent.
+fn test_resolution_prefers_the_most_specific_name() {
+  st = stage::stage_new();
+  st.set_projection(stage::SIDE_ON);
+  n = mob(st, "orc");
+  st.set_action(n, "walk");
+
+  _ = st.add_named_sequence("orc", 10, 1, 0.0, stage::LOOP);
+  st.face(n, -PI / 2.0);                 // north
+  assert(st.frame_of(n) == 10, "only the bare key exists, so it is used");
+
+  _ = st.add_named_sequence("orc_walk", 20, 1, 0.0, stage::LOOP);
+  st.face(n, -PI / 2.0);
+  assert(st.frame_of(n) == 20, "the action variant outranks the bare key");
+
+  _ = st.add_named_sequence("orc_walk_n", 30, 1, 0.0, stage::LOOP);
+  st.face(n, -PI / 2.0);
+  assert(st.frame_of(n) == 30, "and the facing variant outranks that");
+}
+
+// ⚠ A MISS FALLS BACK, IT DOES NOT FAIL.  A missing sprite must leave a mob
+// drawn with what it had rather than blanking it or stopping the frame — the
+// same rule crawler's `<key>.png` loader keeps.
+fn test_an_unknown_key_falls_back_rather_than_failing() {
+  st = stage::stage_new();
+  st.set_projection(stage::SIDE_ON);
+  _ = st.add_named_sequence("orc_walk_e", 100, 4, 10.0, stage::LOOP);
+  n = mob(st, "orc");
+  st.set_action(n, "walk");
+  st.face(n, 0.0);
+  assert(st.frame_of(n) == 100, "resolved east");
+  st.set_action(n, "cast_a_spell_nobody_drew");
+  assert(st.frame_of(n) == 100, "an unknown action keeps what it had");
+  st.compose();
+  assert(len(st.pack_instances()) == stage::INSTANCE_STRIDE, "and still draws");
+}
+
+// ── the degenerate case ──────────────────────────────────────────────────────
+
+// A flat 2-D game never calls any of this, and nothing above may reach it.
+fn test_a_flat_scene_is_untouched() {
+  st = stage::stage_new();
+  n = st.node_add(-1, stage::Place { pl_w: 10.0, pl_h: 20.0, pl_x: 3.0, pl_y: 4.0 });
+  st.compose();
+  before = st.pack_instances();
+  assert(st.projection() == stage::TOP_DOWN, "top-down is the default");
+  assert(!st.mirrored(n), "nothing is mirrored");
+  assert(near(st.facing_of(n), 0.0), "and nothing is facing anywhere");
+  after = st.pack_instances();
+  assert(len(before) == len(after), "reading it changed nothing");
+  for i in 0..len(before) {
+    assert((before[i] ?? 0.0f) == (after[i] ?? 0.0f), "float {i} moved");
+  }
+}
+
+// ⚠ A NAME BELONGS TO ITS OWN SEQUENCE.  This was a real defect: the name lived
+// in a vector beside `st_seqs` that only the naming registrar appended to, so
+// mixing `add_sequence` with `add_named_sequence` shifted every name onto
+// somebody else's cells — silently, because both lists stayed individually
+// well-formed.  "orc" resolved to cell 900.
+fn test_mixing_registrars_keeps_names_on_their_own_sequence() {
+  st = stage::stage_new();
+  st.set_projection(stage::SIDE_ON);
+  _ = st.add_sequence(900, 1, 0.0, stage::LOOP);             // unnamed, index 0
+  _ = st.add_named_sequence("orc", 42, 1, 0.0, stage::LOOP);  // named,   index 1
+  n = mob(st, "orc");
+  st.face(n, 0.0);
+  assert(st.frame_of(n) == 42, "'orc' must name cell 42 — got {st.frame_of(n)}");
+  assert(st.sequence_count() == 2, "both registrars add exactly one sequence");
+}
+
+// Changing the projection changes what the NEXT `face` means — the model is the
+// stage's, so a mob that keeps facing each frame lands in the new one by itself.
+// (The projection belongs at setup; this is what happens if it moves anyway.)
+fn test_the_projection_decides_the_next_face() {
+  st = stage::stage_new();
+  _ = st.add_named_sequence("orc_walk_e", 100, 4, 10.0, stage::LOOP);
+  n = mob(st, "orc");
+  st.set_action(n, "walk");
+  st.face(n, PI);                        // top-down by default: turns
+  assert(near(st.rotation_of(n), PI), "top-down turned it");
+  assert(!st.mirrored(n), "and did not flip it");
+
+  st.set_projection(stage::SIDE_ON);
+  st.face(n, PI);                        // the same call, now the other model
+  assert(st.mirrored(n), "side-on flips it instead");
+  assert(st.frame_of(n) == 100, "onto the east cells, mirrored");
+}

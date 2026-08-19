@@ -1,6 +1,6 @@
 [package]
 name = "stage"
-version = "0.10.0"
+version = "0.11.0"
 loft = ">=2026.8.0"
 repository = "loft-libs-graphics"
 
