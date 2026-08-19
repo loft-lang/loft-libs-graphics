@@ -786,6 +786,15 @@ pub fn gl_cull_face(face: integer);
 pub fn gl_depth_mask(write: boolean);
 #native "loft_gl_depth_mask"
 
+// Block until every GL command issued so far has completed.
+//
+// The call that makes a read-back trustworthy: `gl_screenshot` and any other
+// framebuffer read otherwise race the driver, so the same program can produce a
+// complete frame or an empty one from run to run.  Costs a stall by definition —
+// use it in a test or a screenshot path, never in a frame loop.
+pub fn gl_finish();
+#native "loft_gl_finish"
+
 // Set the viewport rectangle (used for FBO render passes).
 pub fn gl_viewport(x: integer, y: integer, w: integer, h: integer);
 #native "loft_gl_viewport"

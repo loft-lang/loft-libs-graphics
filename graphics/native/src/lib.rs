@@ -1152,6 +1152,25 @@ pub extern "C" fn loft_gl_depth_mask(write: bool) {
     }
 }
 
+/// Block until every GL command issued so far has completed.
+///
+/// The one call that makes a read-back trustworthy.  `gl_screenshot` and any other
+/// framebuffer read are otherwise racing the driver: the frame is sometimes
+/// complete and sometimes empty, and nothing in the rest of this surface forces
+/// the point.  @PLN144 `A3b` could not gate on pixels without it — the same
+/// binary on the same source passed about one run in five.
+///
+/// Costs a stall by definition, so it belongs in a test or a screenshot path and
+/// not in a frame loop.
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_finish() {
+    gl_guard!();
+    unsafe {
+        gl::Finish();
+    }
+}
+
 #[loft_native]
 #[unsafe(no_mangle)]
 pub extern "C" fn loft_gl_viewport(x: i64, y: i64, w: i64, h: i64) {
@@ -2172,6 +2191,7 @@ loft_ffi::loft_register! {
     loft_gl_blend_func,
     loft_gl_cull_face,
     loft_gl_depth_mask,
+    loft_gl_finish,
     loft_gl_viewport,
     loft_gl_scissor,
     // Framebuffer objects
@@ -2269,6 +2289,7 @@ loft_ffi::loft_register_bridges! {
     "loft_gl_blend_func" => loft_gl_blend_func__loft_bridge,
     "loft_gl_cull_face" => loft_gl_cull_face__loft_bridge,
     "loft_gl_depth_mask" => loft_gl_depth_mask__loft_bridge,
+    "loft_gl_finish" => loft_gl_finish__loft_bridge,
     "loft_gl_viewport" => loft_gl_viewport__loft_bridge,
     "loft_gl_scissor" => loft_gl_scissor__loft_bridge,
     "loft_gl_create_framebuffer" => loft_gl_create_framebuffer__loft_bridge,
