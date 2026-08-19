@@ -1,0 +1,119 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN144 A6 — clipping: inherited, intersected, and breaking a batch.
+//
+// Every count below is hand-computed from the rectangles, and the classification
+// checks the `other` bucket is 0 — a pixel of a third colour would mean the clip
+// half-applied, which a total count alone would hide.
+use stage;
+use graphics;
+
+fn count_of(cv: const graphics::Canvas, want: integer) -> integer {
+  n = 0;
+  for v in cv.data { if v == want { n = n + 1; } }
+  n
+}
+
+// A clipping parent cuts its child at the exact boundary.
+// Parent clips to (0,0)-(10,10); the child covers (5,5)-(25,25); the visible part
+// is (5,5)-(10,10) = 5 x 5 = 25 pixels.
+fn test_a_child_is_cut_at_the_parent_boundary() {
+  st = stage::stage_new();
+  p = st.node_add(-1, stage::Place { pl_w: 10.0, pl_h: 10.0, pl_clips: true });
+  _ = st.node_add(p, stage::Place { pl_x: 5.0, pl_y: 5.0, pl_w: 20.0, pl_h: 20.0,
+                                    pl_colour: 0x00ff00 });
+  st.compose();
+  cv = graphics::canvas(32, 32, 0xff000000);
+  st.render_stage(cv);
+  assert(count_of(cv, 0xff00ff00) == 25,
+         "5x5 survives the clip, got {count_of(cv, 0xff00ff00)}");
+}
+
+// Nested two deep: the inner clip is the INTERSECTION, never the innermost alone.
+// Outer clips to (0,0)-(20,20); inner clips to (10,10)-(40,40); the intersection is
+// (10,10)-(20,20).  A child covering everything therefore shows 10 x 10 = 100.
+fn test_nested_clips_intersect() {
+  st = stage::stage_new();
+  outer = st.node_add(-1, stage::Place { pl_w: 20.0, pl_h: 20.0, pl_clips: true });
+  inner = st.node_add(outer, stage::Place { pl_x: 10.0, pl_y: 10.0, pl_w: 30.0,
+                                            pl_h: 30.0, pl_clips: true });
+  _ = st.node_add(inner, stage::Place { pl_x: -10.0, pl_y: -10.0, pl_w: 60.0,
+                                        pl_h: 60.0, pl_colour: 0x00ff00 });
+  st.compose();
+  cv = graphics::canvas(48, 48, 0xff000000);
+  st.render_stage(cv);
+  assert(count_of(cv, 0xff00ff00) == 100,
+         "the intersection is 10x10, got {count_of(cv, 0xff00ff00)}");
+}
+
+// Clips that do not overlap show nothing at all — the empty intersection.
+fn test_disjoint_clips_show_nothing() {
+  st = stage::stage_new();
+  outer = st.node_add(-1, stage::Place { pl_w: 10.0, pl_h: 10.0, pl_clips: true });
+  inner = st.node_add(outer, stage::Place { pl_x: 20.0, pl_y: 20.0, pl_w: 10.0,
+                                            pl_h: 10.0, pl_clips: true });
+  _ = st.node_add(inner, stage::Place { pl_w: 40.0, pl_h: 40.0, pl_colour: 0x00ff00 });
+  st.compose();
+  cv = graphics::canvas(48, 48, 0xff000000);
+  st.render_stage(cv);
+  assert(count_of(cv, 0xff00ff00) == 0, "disjoint clips leave nothing visible");
+}
+
+// A clipper does not clip its SIBLINGS, only its own subtree.
+fn test_a_clip_reaches_only_its_own_subtree() {
+  st = stage::stage_new();
+  clipper = st.node_add(-1, stage::Place { pl_w: 8.0, pl_h: 8.0, pl_clips: true });
+  _ = st.node_add(clipper, stage::Place { pl_w: 40.0, pl_h: 40.0, pl_colour: 0x00ff00 });
+  _ = st.node_add(-1, stage::Place { pl_x: 20.0, pl_y: 0.0, pl_w: 10.0, pl_h: 10.0,
+                                     pl_colour: 0x0000ff });
+  st.compose();
+  cv = graphics::canvas(48, 48, 0xff000000);
+  st.render_stage(cv);
+  assert(count_of(cv, 0xff00ff00) == 64, "the clipped child is 8x8");
+  assert(count_of(cv, 0xff0000ff) == 100, "the sibling is untouched at 10x10");
+}
+
+// The degenerate case, proved rather than assumed: no clip anywhere is the same
+// picture as before clipping existed.
+fn test_an_unclipped_scene_is_unchanged() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_x: 3.0, pl_y: 4.0, pl_w: 6.0, pl_h: 5.0,
+                                     pl_colour: 0x00ff00 });
+  st.compose();
+  cv = graphics::canvas(16, 16, 0xff000000);
+  st.render_stage(cv);
+  assert(count_of(cv, 0xff00ff00) == 30, "6x5 = 30 pixels, all of them");
+}
+
+// ⚠ A CLIP CHANGE BREAKS A BATCH.  Two nodes on the SAME atlas under DIFFERENT
+// clips are two runs — a scissor is state, exactly like a texture. Grouping by
+// atlas alone would draw the second under the first's scissor.
+fn test_a_clip_change_breaks_a_run() {
+  st = stage::stage_new();
+  // ⚠ A clip region is SIZED so it has a rect, and INVISIBLE so it is not itself
+  // drawn — the idiom for scaffolding that shapes its subtree without painting.
+  a = st.node_add(-1, stage::Place { pl_w: 10.0, pl_h: 10.0, pl_clips: true,
+                                     pl_visible: false });
+  _ = st.node_add(a, stage::Place { pl_w: 4.0, pl_h: 4.0, pl_atlas: 1 });
+  b = st.node_add(-1, stage::Place { pl_x: 20.0, pl_w: 10.0, pl_h: 10.0, pl_clips: true,
+                                     pl_visible: false });
+  _ = st.node_add(b, stage::Place { pl_w: 4.0, pl_h: 4.0, pl_atlas: 1 });
+  st.compose();
+  bs = st.batches();
+  // Only the two children reach the list — same atlas, different scissor.
+  assert(len(bs) == 2, "one atlas but two clips is two runs, got {len(bs)}");
+  assert(bs[0].b_clipped and bs[1].b_clipped, "both runs carry a scissor");
+  assert(bs[0].b_cx0 != bs[1].b_cx0, "and the scissors differ");
+}
+
+// Two nodes under the SAME clip stay one run — the break is a change, not a clip.
+fn test_one_clip_is_still_one_run() {
+  st = stage::stage_new();
+  c = st.node_add(-1, stage::Place { pl_w: 20.0, pl_h: 20.0, pl_clips: true,
+                                     pl_visible: false });
+  _ = st.node_add(c, stage::Place { pl_w: 4.0, pl_h: 4.0, pl_atlas: 1 });
+  _ = st.node_add(c, stage::Place { pl_x: 6.0, pl_w: 4.0, pl_h: 4.0, pl_atlas: 1 });
+  st.compose();
+  assert(len(st.batches()) == 1, "same atlas, same clip, one run");
+}

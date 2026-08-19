@@ -91,12 +91,27 @@ is made of overlapping soft-edged sprites.
 0xRRGGBB and no alpha by design. The two agree wherever alpha is 1, and there is a test that
 says so — two render paths drifting into two different pictures is the failure worth guarding.
 
+## Clipping
+
+A node with `pl_clips` bounds its whole subtree. Clips **inherit and intersect**, so nesting
+two gives their overlap and never the inner one alone — which is what makes a panel inside a
+scrolling list composable. The idiom for a clip region is sized plus `pl_visible: false`: it
+needs a rectangle to define the bound and no paint of its own.
+
+⚠ The bound is **axis-aligned**. A rotated clipper clips to its bounding box, because a
+hardware scissor is axis-aligned and there is no honest way to pretend otherwise.
+
+⚠ **A clip change breaks a batch.** A run is `(atlas, clip)`, not atlas alone — a scissor is
+state exactly as a texture is, and grouping by atlas would draw the second clip's content
+under the first's scissor.
+
 ## Worked examples
 
 `@STG-001` the origin is the anchor · `@STG-002` a parent must already exist ·
 `@STG-003` `compose` is the caller's to run ·
 `@STG-004` the batcher never reorders ·
-`@STG-005` a release belongs to the press · `@STG-006` a click falls through a hole — [tests/worked-examples.loft](tests/worked-examples.loft).
+`@STG-005` a release belongs to the press · `@STG-006` a click falls through a hole ·
+`@STG-007` a clip inherits and intersects — [tests/worked-examples.loft](tests/worked-examples.loft).
 
 ## Provenance
 

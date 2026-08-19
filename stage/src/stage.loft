@@ -53,6 +53,12 @@ pub struct StageNode {
     nd_v1: float,
     nd_alpha: float,
     nd_mask: integer,        // index into `st_masks`, or -1 for solid
+    nd_clips: boolean,       // does this node clip its own subtree?
+    nd_clipped: boolean,     // derived: is anything clipping it?
+    nd_cx0: float,           // derived: the effective clip, world axis-aligned
+    nd_cy0: float,
+    nd_cx1: float,
+    nd_cy1: float,
     nd_a: float,             // derived world affine — read after `compose`
     nd_b: float,
     nd_c: float,
@@ -100,6 +106,7 @@ pub struct Place {
     pl_v1: float = 1.0,
     pl_alpha: float = 1.0,
     pl_mask: integer = -1,   // index from `add_mask`, or -1 for solid
+    pl_clips: boolean = false,  // clip this node's subtree to its own bounds
     pl_x: float = 0.0,
     pl_y: float = 0.0,
     pl_rot: float = 0.0,     // radians; +ve turns +x toward +y
@@ -112,6 +119,13 @@ pub struct Place {
 // A point, so a caller can ask where something ended up without unpacking six
 // floats.  `world_point` is the only honest way to check a transform: a matrix
 // means nothing except through what it does to a point.
+pub struct Bounds {
+    b_x0: float,
+    b_y0: float,
+    b_x1: float,
+    b_y1: float,
+}
+
 pub struct P2 {
     p_x: float,
     p_y: float,
@@ -142,6 +156,8 @@ pub fn node_add(self: Stage, parent: integer, p: const Place) -> integer {
         nd_w: p.pl_w, nd_h: p.pl_h, nd_colour: p.pl_colour, nd_visible: p.pl_visible,
         nd_atlas: p.pl_atlas, nd_u0: p.pl_u0, nd_v0: p.pl_v0, nd_u1: p.pl_u1,
         nd_v1: p.pl_v1, nd_alpha: p.pl_alpha, nd_mask: p.pl_mask,
+        nd_clips: p.pl_clips, nd_clipped: false,
+        nd_cx0: 0.0, nd_cy0: 0.0, nd_cx1: 0.0, nd_cy1: 0.0,
         nd_a: 1.0, nd_b: 0.0, nd_c: 0.0, nd_d: 1.0, nd_tx: 0.0, nd_ty: 0.0,
     }];
     idx
@@ -187,7 +203,65 @@ pub fn compose(self: Stage) {
             self.st_nodes[i].nd_tx = p.nd_a * ltx + p.nd_c * lty + p.nd_tx;
             self.st_nodes[i].nd_ty = p.nd_b * ltx + p.nd_d * lty + p.nd_ty;
         }
+
+        // The effective clip: what the parent already imposes, INTERSECTED with
+        // this node's own bounds when it clips.  Parents come first, so the
+        // parent's is written before a child reads it — the same invariant the
+        // transform pass rests on, doing a second job.
+        cl = false;
+        cx0 = 0.0;
+        cy0 = 0.0;
+        cx1 = 0.0;
+        cy1 = 0.0;
+        if n.nd_parent >= 0 {
+            pp = self.st_nodes[n.nd_parent];
+            cl = pp.nd_clipped;
+            cx0 = pp.nd_cx0;
+            cy0 = pp.nd_cy0;
+            cx1 = pp.nd_cx1;
+            cy1 = pp.nd_cy1;
+        }
+        if n.nd_clips {
+            b = bounds_of(self, i);
+            if !cl {
+                cl = true;
+                cx0 = b.b_x0; cy0 = b.b_y0; cx1 = b.b_x1; cy1 = b.b_y1;
+            } else {
+                if b.b_x0 > cx0 { cx0 = b.b_x0; }
+                if b.b_y0 > cy0 { cy0 = b.b_y0; }
+                if b.b_x1 < cx1 { cx1 = b.b_x1; }
+                if b.b_y1 < cy1 { cy1 = b.b_y1; }
+            }
+        }
+        self.st_nodes[i].nd_clipped = cl;
+        self.st_nodes[i].nd_cx0 = cx0;
+        self.st_nodes[i].nd_cy0 = cy0;
+        self.st_nodes[i].nd_cx1 = cx1;
+        self.st_nodes[i].nd_cy1 = cy1;
     }
+}
+
+// A node's axis-aligned bounds in world space.
+// Example: @STG-007 — a clip inherits, intersects, and is axis-aligned.
+//
+// ⚠ AXIS-ALIGNED, so a ROTATED clipper clips to its bounding box rather than to
+// its turned rectangle.  A scissor is axis-aligned in hardware and there is no
+// honest way to make it otherwise; a rotated clip needs a stencil, which this arc
+// does not have.  Stated rather than discovered.
+pub fn bounds_of(self: const Stage, idx: integer) -> Bounds {
+    n = self.st_nodes[idx];
+    p0 = world_point(self, idx, n.nd_ox, n.nd_oy);
+    p1 = world_point(self, idx, n.nd_ox + n.nd_w, n.nd_oy);
+    p2 = world_point(self, idx, n.nd_ox, n.nd_oy + n.nd_h);
+    p3 = world_point(self, idx, n.nd_ox + n.nd_w, n.nd_oy + n.nd_h);
+    x0 = p0.p_x; x1 = p0.p_x; y0 = p0.p_y; y1 = p0.p_y;
+    if p1.p_x < x0 { x0 = p1.p_x; }  if p1.p_x > x1 { x1 = p1.p_x; }
+    if p2.p_x < x0 { x0 = p2.p_x; }  if p2.p_x > x1 { x1 = p2.p_x; }
+    if p3.p_x < x0 { x0 = p3.p_x; }  if p3.p_x > x1 { x1 = p3.p_x; }
+    if p1.p_y < y0 { y0 = p1.p_y; }  if p1.p_y > y1 { y1 = p1.p_y; }
+    if p2.p_y < y0 { y0 = p2.p_y; }  if p2.p_y > y1 { y1 = p2.p_y; }
+    if p3.p_y < y0 { y0 = p3.p_y; }  if p3.p_y > y1 { y1 = p3.p_y; }
+    Bounds { b_x0: x0, b_y0: y0, b_x1: x1, b_y1: y1 }
 }
 
 // Where a point in node `idx`'s own space lands in world space.  Valid after
@@ -313,6 +387,11 @@ pub struct Batch {
     b_atlas: integer,
     b_first: integer,        // index of the first instance in the packed buffer
     b_count: integer,
+    b_clipped: boolean,      // the scissor this run needs, if any
+    b_cx0: float,
+    b_cy0: float,
+    b_cx1: float,
+    b_cy1: float,
 }
 
 // Floats per instance in the packed buffer: a 2x3 affine, the sprite's uv rect,
@@ -335,11 +414,24 @@ pub fn batches(self: const Stage) -> vector<Batch> {
     for i in 0..len(self.st_nodes) {
         n = self.st_nodes[i];
         if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { continue; }
+        // ⚠ A RUN IS (ATLAS, CLIP), not atlas alone.  A scissor change is a state
+        // change, so it breaks a batch exactly as a texture change does — grouping
+        // by atlas only would draw the second clip's content under the first's
+        // scissor.
         last = len(out) - 1;
-        if last >= 0 and out[last].b_atlas == n.nd_atlas {
+        same = false;
+        if last >= 0 {
+            b = out[last];
+            same = b.b_atlas == n.nd_atlas and b.b_clipped == n.nd_clipped
+                   and b.b_cx0 == n.nd_cx0 and b.b_cy0 == n.nd_cy0
+                   and b.b_cx1 == n.nd_cx1 and b.b_cy1 == n.nd_cy1;
+        }
+        if same {
             out[last].b_count = out[last].b_count + 1;
         } else {
-            out += [Batch { b_atlas: n.nd_atlas, b_first: idx, b_count: 1 }];
+            out += [Batch { b_atlas: n.nd_atlas, b_first: idx, b_count: 1,
+                            b_clipped: n.nd_clipped, b_cx0: n.nd_cx0,
+                            b_cy0: n.nd_cy0, b_cx1: n.nd_cx1, b_cy1: n.nd_cy1 }];
         }
         idx = idx + 1;
     }
@@ -458,9 +550,20 @@ pub fn gl_render(self: const Stage, p: Painter, screen_w: float, screen_h: float
         graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 2, 2, INSTANCE_STRIDE, base + OFF_AFFINE + 4);
         graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 3, 4, INSTANCE_STRIDE, base + OFF_UV);
         graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 4, 4, INSTANCE_STRIDE, base + OFF_RGBA);
+        if b.b_clipped {
+            graphics::gl_enable(graphics::GL_SCISSOR_TEST);
+            // Scissor is measured from the BOTTOM, the screen from the top.
+            sy = screen_h - b.b_cy1;
+            graphics::gl_scissor(b.b_cx0 as integer, sy as integer,
+                                 (b.b_cx1 - b.b_cx0) as integer,
+                                 (b.b_cy1 - b.b_cy0) as integer);
+        } else {
+            graphics::gl_disable(graphics::GL_SCISSOR_TEST);
+        }
         graphics::gl_draw_instanced(p.pn_vao, 6, b.b_count);
         calls = calls + 1;
     }
+    graphics::gl_disable(graphics::GL_SCISSOR_TEST);
     calls
 }
 
@@ -606,6 +709,19 @@ pub fn render_stage(self: const Stage, cv: graphics::Canvas) {
         y1 = far.p_y as integer;
         if x1 < x0 { t = x0; x0 = x1; x1 = t; }
         if y1 < y0 { t2 = y0; y0 = y1; y1 = t2; }
+        // The clip is applied by NARROWING THE SPAN, not by testing each pixel:
+        // the boundary then falls where the arithmetic puts it rather than where a
+        // per-pixel predicate rounds it.
+        if n.nd_clipped {
+            k0 = n.nd_cx0 as integer;
+            k1 = n.nd_cx1 as integer;
+            l0 = n.nd_cy0 as integer;
+            l1 = n.nd_cy1 as integer;
+            if k0 > x0 { x0 = k0; }
+            if l0 > y0 { y0 = l0; }
+            if k1 < x1 { x1 = k1; }
+            if l1 < y1 { y1 = l1; }
+        }
         for py in y0..y1 {
             for px in x0..x1 {
                 d = cv.get_pixel(px, py);

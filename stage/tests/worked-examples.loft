@@ -12,6 +12,7 @@
 // tree is an ordered array rather than a graph, and that reading a world
 // transform before composing answers a stale one rather than an error.
 use stage;
+use graphics;
 
 EPS = 0.0001;
 fn close(a: float, b: float) -> boolean { a - b < EPS and b - a < EPS }
@@ -127,4 +128,28 @@ fn test_a_click_falls_through_a_hole() {
   st.compose();
   assert(st.pick(5.0, 5.0) == front, "the opaque quadrant is the front node");
   assert(st.pick(35.0, 35.0) == behind, "the hole reaches what is behind");
+}
+
+// @STG-007 — a clip INHERITS and INTERSECTS, and a clip region is sized but
+// invisible.  Nesting two clippers gives the overlap of the two, never the inner
+// one alone: a panel inside a scrolling list is bounded by both, which is what
+// makes a scroll view composable.  The idiom for the region itself is `pl_clips`
+// with a size and `pl_visible: false` — it needs a rectangle to define the bound
+// and no paint of its own.  ⚠ The bound is AXIS-ALIGNED: a rotated clipper clips
+// to its bounding box, because a hardware scissor is axis-aligned and there is no
+// honest way to pretend otherwise.
+fn test_a_clip_inherits_and_intersects() {
+  st = stage::stage_new();
+  outer = st.node_add(-1, stage::Place { pl_w: 20.0, pl_h: 20.0, pl_clips: true,
+                                         pl_visible: false });
+  inner = st.node_add(outer, stage::Place { pl_x: 10.0, pl_y: 10.0, pl_w: 30.0,
+                                            pl_h: 30.0, pl_clips: true,
+                                            pl_visible: false });
+  _ = st.node_add(inner, stage::Place { pl_w: 60.0, pl_h: 60.0, pl_colour: 0x00ff00 });
+  st.compose();
+  cv = graphics::canvas(48, 48, 0xff000000);
+  st.render_stage(cv);
+  n = 0;
+  for v in cv.data { if v == 0xff00ff00 { n = n + 1; } }
+  assert(n == 100, "the overlap of (0,0)-(20,20) and (10,10)-(40,40) is 10x10");
 }
