@@ -34,6 +34,28 @@ fn glyph_at(code: integer) -> integer {
   -1
 }
 
+// Blit one codepoint's glyph with its top-left at (x, y).  Shared by the direct
+// blitter and by the atlas, so the bit-walk has ONE home and the two can never
+// disagree about what a glyph looks like.
+pub fn blit_glyph(cv: graphics::Canvas, code: integer, x: integer, y: integer,
+                  colour: integer, scale: integer) {
+  at = glyph_at(code);
+  if at < 0 { return; }
+  rows = face::face_rows();
+  for ry in 0..face::GLYPH_H {
+    bits = rows[at + ry] ?? 0;
+    for rx in 0..face::GLYPH_W {
+      if (bits & (1 << (face::GLYPH_W - 1 - rx))) != 0 {
+        for sy in 0..scale {
+          for sx in 0..scale {
+            cv.set_pixel(x + rx * scale + sx, y + ry * scale + sy, colour);
+          }
+        }
+      }
+    }
+  }
+}
+
 // Width in pixels of `s` at scale 1, INCLUDING the single-pixel gap after every
 // glyph but the last.  Exact — the caller can centre with it and be right.
 pub fn text_width(s: text, scale: integer) -> integer {
@@ -66,21 +88,7 @@ pub fn write_text(cv: graphics::Canvas, s: text, x: integer, y: integer,
   rows = face::face_rows();
   pen = x;
   for ch in s {
-    at = glyph_at(ch as integer);
-    if at >= 0 {
-      for ry in 0..face::GLYPH_H {
-        bits = rows[at + ry] ?? 0;
-        for rx in 0..face::GLYPH_W {
-          if (bits & (1 << (face::GLYPH_W - 1 - rx))) != 0 {
-            for sy in 0..sc {
-              for sx in 0..sc {
-                cv.set_pixel(pen + rx * sc + sx, y + ry * sc + sy, colour);
-              }
-            }
-          }
-        }
-      }
-    }
+    blit_glyph(cv, ch as integer, pen, y, colour, sc);
     pen = pen + (face::GLYPH_W + 1) * sc;
   }
   pen - x - sc
@@ -93,4 +101,106 @@ pub fn write_centred(cv: graphics::Canvas, s: text, bx: integer, by: integer,
   w = text_width(s, scale);
   h = line_height(scale);
   write_text(cv, s, bx + (bw - w) / 2 ?? 0, by + (bh - h) / 2 ?? 0, colour, scale)
+}
+
+// ── B1: the glyph atlas ──────────────────────────────────────────────────────
+//
+// The point of an atlas here is not speed at the blit — it is that changing what a
+// label SAYS costs nothing.  `create_text_texture` bakes one GPU texture per string
+// per size per colour, so a score that ticks uploads a texture every frame, and
+// Brick Buster pre-baked digits 0-9 and one texture per level numeral to avoid it.
+// A glyph sheet is written once; a new string only re-lays-out quads over it.
+
+pub struct Atlas {
+  a_cv: graphics::Canvas,
+  a_codes: vector<integer>,   // codepoint held in each cell, in cell order
+  a_scale: integer,
+  a_cols: integer,
+  a_next: integer,            // the next free cell
+  a_writes: integer,          // how many times the SHEET changed — the gate reads this
+}
+
+// One glyph placed on a line: where it goes, and which cell it comes from.
+pub struct Quad {
+  q_x: integer,
+  q_y: integer,
+  q_cell: integer,
+}
+
+// A sheet with room for `capacity` glyphs at `scale`.  Shelf-packed in a grid,
+// which is enough for a fixed-width face — a proportional one would want a real
+// packer, and would still not change what the caller sees.
+pub fn atlas_new(scale: integer, capacity: integer) -> Atlas {
+  sc = if scale < 1 { 1 } else { scale };
+  cap = if capacity < 1 { 1 } else { capacity };
+  // ⚠ The sheet holds exactly `capacity`, not the next multiple of a row width.
+  // Rounding up would have made `atlas_new(1, 2)` hold sixteen — a caller asking
+  // for a small sheet and silently getting a large one is the kind of generosity
+  // that hides a full-sheet path until a consumer meets it.
+  cols = if cap < 16 { cap } else { 16 };
+  rows = (cap + cols - 1) / cols ?? 1;
+  if rows < 1 { rows = 1; }
+  Atlas {
+    a_cv: graphics::canvas(cols * face::GLYPH_W * sc, rows * face::GLYPH_H * sc, 0),
+    a_codes: [], a_scale: sc, a_cols: cols, a_next: 0, a_writes: 0,
+  }
+}
+
+pub fn atlas_glyph_count(self: const Atlas) -> integer { self.a_next }
+
+// How many times the sheet has been WRITTEN.  A GL consumer uploads on exactly
+// these, so a caller can assert that a changing label costs no upload — which is
+// the property the whole arc exists for.
+pub fn atlas_writes(self: const Atlas) -> integer { self.a_writes }
+
+// The cell holding `code`, rasterising it on first use.  -1 when the sheet is full.
+pub fn atlas_cell(self: Atlas, code: integer) -> integer {
+  c = code;
+  if c >= 97 and c <= 122 { c = c - 32; }
+  for i in 0..len(self.a_codes) {
+    if (self.a_codes[i] ?? -1) == c { return i; }
+  }
+  cap = (self.a_cv.width / (face::GLYPH_W * self.a_scale) ?? 1)
+      * (self.a_cv.height / (face::GLYPH_H * self.a_scale) ?? 1);
+  if self.a_next >= cap { return -1; }
+  cell = self.a_next;
+  cx = (cell % self.a_cols) * face::GLYPH_W * self.a_scale;
+  cy = (cell / self.a_cols ?? 0) * face::GLYPH_H * self.a_scale;
+  blit_glyph(self.a_cv, c, cx, cy, 0xffffffff, self.a_scale);
+  self.a_codes += [c];
+  self.a_next = cell + 1;
+  self.a_writes = self.a_writes + 1;
+  cell
+}
+
+// Lay a string out over the sheet.  Answers one quad per character; NOTHING is
+// written to the sheet unless a character is new to it.
+pub fn layout(self: Atlas, s: text, x: integer, y: integer) -> vector<Quad> {
+  out: vector<Quad> = [];
+  pen = x;
+  for ch in s {
+    cell = atlas_cell(self, ch as integer);
+    out += [Quad { q_x: pen, q_y: y, q_cell: cell }];
+    pen = pen + (face::GLYPH_W + 1) * self.a_scale;
+  }
+  out
+}
+
+// Blit laid-out quads from the sheet onto a canvas.
+pub fn draw_quads(cv: graphics::Canvas, atlas: const Atlas, quads: const vector<Quad>,
+                  colour: integer) {
+  gw = face::GLYPH_W * atlas.a_scale;
+  gh = face::GLYPH_H * atlas.a_scale;
+  for q in quads {
+    if q.q_cell < 0 { continue; }
+    sx = (q.q_cell % atlas.a_cols) * gw;
+    sy = (q.q_cell / atlas.a_cols ?? 0) * gh;
+    for py in 0..gh {
+      for px in 0..gw {
+        if atlas.a_cv.get_pixel(sx + px, sy + py) != 0 {
+          cv.set_pixel(q.q_x + px, q.q_y + py, colour);
+        }
+      }
+    }
+  }
 }

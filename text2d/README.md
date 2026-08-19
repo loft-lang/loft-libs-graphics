@@ -23,11 +23,27 @@ A face baked in as data needs none of the three.
 
 - `write_text(canvas, s, x, y, colour, scale) -> integer` — draws, answers the width
 - `write_centred(canvas, s, bx, by, bw, bh, colour, scale)`
-- `text_width(s, scale)` · `line_height(scale)`
+- `text_width(s, scale)` · `line_height(scale)` · `blit_glyph(canvas, code, …)`
+- `atlas_new(scale, capacity)` · `layout(s, x, y) -> vector<Quad>` ·
+  `draw_quads(canvas, atlas, quads, colour)` · `atlas_writes()` · `atlas_glyph_count()`
 
 ⚠ `write_text`, not `draw_text`: `graphics` has a `draw_text` **method** on `Canvas`, and a
 method spelling outranks a library's free function of the same name (loft#940). A distinct
 verb costs nothing and is reachable.
+
+## The glyph atlas
+
+`create_text_texture` bakes one GPU texture per string, per size, per colour — so a score
+that ticks uploads a texture every frame, which is why Brick Buster pre-baked digits 0-9 and
+one texture per level numeral. A sheet is written **once**; a new string only re-lays-out
+quads over it.
+
+`atlas_writes()` counts sheet changes, which is exactly what a GL consumer uploads on — so a
+caller can *assert* that a changing label costs nothing. Six hundred relayouts over ten
+digits: ten writes, then zero.
+
+A sheet holds exactly the `capacity` asked for, and a full sheet **refuses** — the quad
+carries `-1` and draws nothing, so a caller sees a gap rather than another glyph's pixels.
 
 ## What the face is, and is not
 

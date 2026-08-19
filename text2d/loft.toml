@@ -1,6 +1,6 @@
 [package]
 name = "text2d"
-version = "0.1.0"
+version = "0.2.0"
 loft = ">=2026.8.0"
 repository = "loft-libs-graphics"
 
