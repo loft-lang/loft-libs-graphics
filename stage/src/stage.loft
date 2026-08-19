@@ -85,6 +85,21 @@ pub struct StageNode {
     nd_ty: float,
 }
 
+// Everything one ordering band carries: how much of the camera it feels, what
+// atmosphere stands in front of it, and how far out of focus it is.
+//
+// ⚠ ONE RECORD, NOT THREE PARALLEL VECTORS.  Parallax lived in a bare
+// `vector<float>` and fog and blur were about to join it as siblings — which is
+// exactly the shape that put a sequence's name on another sequence's cells in
+// P5: every list stays well-formed on its own and only the correspondence goes
+// wrong, silently.  A layer's facts travel together.
+pub struct Layer {
+    ly_parallax: float,      // 1.0 is the world plane; below lags, above leads
+    ly_fog: integer,         // packed 0xRRGGBB the layer fades toward
+    ly_density: float,       // 0 is clear, 1 is entirely the fog colour
+    ly_blur: integer,        // radius in pixels; 0 is sharp
+}
+
 // A way of LOOKING at the stage: a camera and the screen rect it paints into.
 //
 // ⚠ A VIEW IS PRESENTATION, NEVER WORLD.  The scene cannot tell how many are
@@ -134,7 +149,7 @@ pub struct Stage {
     st_light_map: boolean,       // L2: light per PIXEL instead of per sprite
     st_hud_layer: integer,       // layers at or above this draw AFTER, unlit
     st_views: vector<View>,      // at least one; view 0 is the unsplit camera
-    st_par: vector<float>,       // parallax factor per layer; missing means 1.0
+    st_layers: vector<Layer>,    // per-layer facts; a missing layer is the plain one
     st_uploads: integer,         // instance-buffer uploads — the gate reads this
     st_dirty: boolean,           // does the instance buffer need rewriting?
     st_time: float,              // ambient clock — a uniform, never a rewrite
@@ -239,7 +254,7 @@ pub fn stage_new() -> Stage {
             st_hud_layer: HUD_NONE,
             st_views: [View { vw_cam_x: 0.0, vw_cam_y: 0.0, vw_x: 0, vw_y: 0,
                               vw_w: 0, vw_h: 0 }],
-            st_par: [], st_uploads: 0, st_dirty: true,
+            st_layers: [], st_uploads: 0, st_dirty: true,
             st_time: 0.0, st_seqs: [], st_proj: TOP_DOWN }
 }
 
@@ -1131,9 +1146,61 @@ pub fn render_view(self: const Stage, view: integer, cv: graphics::Canvas) {
     render_band(self, view, cv, 0 - HUD_NONE, HUD_NONE);
 }
 
-// Paint the nodes whose layer is in `[lo, hi)`.
+// Paint the nodes whose layer is in `[lo, hi)`, blurring as each layer finishes.
+//
+// ⚠ THE BLUR IS INTERLEAVED WITH THE WALK, not applied at the end.  That is what
+// puts it BEFORE the layers above composite, so a sharp foreground over a hazy
+// distance is possible at all — the property a fullscreen blur cannot give.
 fn render_band(self: const Stage, view: integer, cv: graphics::Canvas,
                lo: integer, hi: integer) {
+    // ⚠ PAINT ONE LAYER, THEN BLUR, THEN THE NEXT.  Detecting the boundaries in
+    // one pass and painting in another only LOOKS interleaved: the blur then runs
+    // before anything is drawn and the whole feature is silent.  `st_order` is
+    // sorted by layer first, so its distinct layers arrive in drawing order.
+    prev = 0 - HUD_NONE;
+    started = false;
+    for oi in self.st_order {
+        ln = self.st_nodes[oi].nd_layer;
+        if ln < lo or ln >= hi { continue; }
+        if started and ln == prev { continue; }
+        if started { blur_layer(self, view, cv, prev); }
+        paint_band(self, view, cv, ln, ln + 1);
+        prev = ln;
+        started = true;
+    }
+    if started { blur_layer(self, view, cv, prev); }
+}
+
+// Blur what has been drawn so far, if this layer asks for it.
+fn blur_layer(self: const Stage, view: integer, cv: graphics::Canvas, layer: integer) {
+    r = layer_blur(self, layer);
+    if r <= 0 { return; }
+    vp = view_at(self, view);
+    x0 = 0;
+    y0 = 0;
+    x1 = cv.width;
+    y1 = cv.height;
+    if vp.vw_w > 0 and vp.vw_h > 0 {
+        x0 = vp.vw_x;
+        y0 = vp.vw_y;
+        if vp.vw_x + vp.vw_w < x1 { x1 = vp.vw_x + vp.vw_w; }
+        if vp.vw_y + vp.vw_h < y1 { y1 = vp.vw_y + vp.vw_h; }
+    }
+    if x0 < 0 { x0 = 0; }
+    if y0 < 0 { y0 = 0; }
+    blur_region(cv, x0, y0, x1, y1, r);
+}
+
+fn ly_density_of(self: const Stage, layer: integer) -> float {
+    layer_at(self, layer).ly_density
+}
+
+fn ly_fog_of(self: const Stage, layer: integer) -> integer {
+    layer_at(self, layer).ly_fog
+}
+
+fn paint_band(self: const Stage, view: integer, cv: graphics::Canvas,
+              lo: integer, hi: integer) {
     vpx = view_at(self, view).vw_x;
     vpy = view_at(self, view).vw_y;
     vpw = view_at(self, view).vw_w;
@@ -1155,6 +1222,18 @@ fn render_band(self: const Stage, view: integer, cv: graphics::Canvas,
         cr = mix((lc >> 16) & 255, (self.st_haze_colour >> 16) & 255, hz);
         cg = mix((lc >> 8) & 255, (self.st_haze_colour >> 8) & 255, hz);
         cb = mix(lc & 255, self.st_haze_colour & 255, hz);
+        // ⚠ The LAYER's fog, after the depth cue's haze and in the same mix:
+        // one is per-node by distance, the other a flat band, and they compose
+        // rather than compete.  Density 0 makes `fg` zero, so an unfogged layer
+        // takes the identity path and is bit-identical.
+        fg = (ly_density_of(self, n.nd_layer) * 255.0 + 0.5) as integer;
+        if fg > 0 {
+            if fg > 255 { fg = 255; }
+            fc = ly_fog_of(self, n.nd_layer);
+            cr = mix(cr, (fc >> 16) & 255, fg);
+            cg = mix(cg, (fc >> 8) & 255, fg);
+            cb = mix(cb, fc & 255, fg);
+        }
         sr = (cr * ia + 127) / 255 ?? 0;
         sg = (cg * ia + 127) / 255 ?? 0;
         sb = (cb * ia + 127) / 255 ?? 0;
@@ -1238,13 +1317,35 @@ pub fn camera_y(self: const Stage) -> float { view_camera_y(self, 0) }
 // background that lags; above it a foreground that leads.  Flat scrolling is every
 // factor at 1.0, which is the degenerate case rather than a second code path.
 pub fn set_parallax(self: Stage, layer: integer, factor: float) {
-    while len(self.st_par) <= layer { self.st_par += [1.0]; }
-    self.st_par[layer] = factor;
+    grow_layers(self, layer);
+    if layer < 0 { return; }
+    self.st_layers[layer].ly_parallax = factor;
 }
 
 pub fn parallax_of(self: const Stage, layer: integer) -> float {
-    if layer < 0 or layer >= len(self.st_par) { return 1.0; }
-    self.st_par[layer] ?? 1.0
+    layer_at(self, layer).ly_parallax
+}
+
+// Make sure `st_layers` reaches `layer`, filling with the plain layer.
+fn grow_layers(self: Stage, layer: integer) {
+    if layer < 0 { return; }
+    while len(self.st_layers) <= layer {
+        self.st_layers += [Layer { ly_parallax: 1.0, ly_fog: 0, ly_density: 0.0,
+                                   ly_blur: 0 }];
+    }
+}
+
+// ⚠ ALWAYS A FRESH RECORD, on every path.  Answering `self.st_layers[layer]`
+// directly would be a borrow on one branch and a literal on the other — the
+// mixed verdict that corrupted the store on `--native` in P6 (loft#1017).
+fn layer_at(self: const Stage, layer: integer) -> Layer {
+    if layer < 0 or layer >= len(self.st_layers) {
+        return Layer { ly_parallax: 1.0, ly_fog: 0, ly_density: 0.0, ly_blur: 0 };
+    }
+    l = self.st_layers[layer] ?? Layer { ly_parallax: 1.0, ly_fog: 0,
+                                         ly_density: 0.0, ly_blur: 0 };
+    Layer { ly_parallax: l.ly_parallax, ly_fog: l.ly_fog, ly_density: l.ly_density,
+            ly_blur: l.ly_blur }
 }
 
 // The screen-space offset a layer's content is drawn at, in view 0.
@@ -1880,3 +1981,97 @@ fn scale_channel(c: integer, level: float) -> integer {
 // The composite's fragment shader.  Public so a test can check it reads the
 // falloff and the floor as UNIFORMS rather than carrying its own copy of them.
 pub fn composite_shader_source() -> text { FRAG_LIGHT }
+
+
+// ── L3: per-layer atmosphere — fog and blur ──────────────────────────────────
+//
+// A layer already carries a parallax factor (P2).  Give it a fog colour, a
+// density and a blur radius, and *distant, hazy, out-of-focus* becomes LAYER
+// DATA rather than an effects pipeline.
+//
+// ⚠ FOG IS FREE, BLUR IS NOT.  Fog is a lerp toward a colour, folded into the
+// same per-node mix the depth cue's haze already uses, so it costs nothing and
+// needs no buffer.  Blur has to see a layer's neighbouring pixels, so it is a
+// pass over what has been drawn — which is why they are separate switches and
+// why only one of them is worth thinking about per frame.
+
+// Fade this layer toward `colour`.  Density 0 is clear and changes nothing.
+pub fn set_layer_fog(self: Stage, layer: integer, colour: integer, density: float) {
+    grow_layers(self, layer);
+    if layer < 0 { return; }
+    self.st_layers[layer].ly_fog = colour;
+    self.st_layers[layer].ly_density = density;
+    self.st_dirty = true;
+}
+
+pub fn layer_fog_colour(self: const Stage, layer: integer) -> integer {
+    layer_at(self, layer).ly_fog
+}
+
+pub fn layer_fog_density(self: const Stage, layer: integer) -> float {
+    layer_at(self, layer).ly_density
+}
+
+// Put this layer out of focus by `radius` pixels.  0 is sharp.
+//
+// ⚠ THE BLUR RUNS WHEN THE LAYER FINISHES, so it softens everything drawn up to
+// and including it and NOTHING above — which is what makes a sharp foreground
+// over a hazy distance possible, and what a fullscreen blur cannot do.  Distant
+// bands therefore blur together, which is what *distance is out of focus* means.
+pub fn set_layer_blur(self: Stage, layer: integer, radius: integer) {
+    grow_layers(self, layer);
+    if layer < 0 { return; }
+    self.st_layers[layer].ly_blur = radius;
+}
+
+pub fn layer_blur(self: const Stage, layer: integer) -> integer {
+    layer_at(self, layer).ly_blur
+}
+
+// Box-blur a rectangle of the canvas in place.
+//
+// ⚠ SAMPLES ARE CLAMPED TO THE EDGE, never read as black.  Counting an
+// off-image sample as black loses light everywhere the kernel overhangs, and it
+// shows as a dark frame around the picture — the classic bug this phase gates
+// against.  Clamping keeps a uniform field EXACTLY itself.
+pub fn blur_region(cv: graphics::Canvas, x0: integer, y0: integer, x1: integer,
+                   y1: integer, radius: integer) {
+    // Returning early on 0 is work avoided, NOT the guard: a radius-0 kernel
+    // averages exactly one sample and is already the identity.  What the gate
+    // actually defends is that 0 means NO blur rather than the smallest one.
+    if radius <= 0 { return; }
+    w = x1 - x0;
+    h = y1 - y0;
+    if w <= 0 or h <= 0 { return; }
+    src: vector<integer> = [];
+    for py in y0..y1 {
+        for px in x0..x1 { src += [cv.get_pixel(px, py)]; }
+    }
+    for py in 0..h {
+        for px in 0..w {
+            sr = 0;
+            sg = 0;
+            sb = 0;
+            n = 0;
+            for ky in (py - radius)..(py + radius + 1) {
+                jy = ky;
+                if jy < 0 { jy = 0; }
+                if jy >= h { jy = h - 1; }
+                for kx in (px - radius)..(px + radius + 1) {
+                    jx = kx;
+                    if jx < 0 { jx = 0; }
+                    if jx >= w { jx = w - 1; }
+                    v: integer = src[jy * w + jx] ?? 0;
+                    sr = sr + ((v >> 16) & 255);
+                    sg = sg + ((v >> 8) & 255);
+                    sb = sb + (v & 255);
+                    n = n + 1;
+                }
+            }
+            cv.set_pixel(x0 + px, y0 + py, 0xff000000
+                | (((sr + n / 2 ?? 0) / n ?? 0) << 16)
+                | (((sg + n / 2 ?? 0) / n ?? 0) << 8)
+                | ((sb + n / 2 ?? 0) / n ?? 0));
+        }
+    }
+}

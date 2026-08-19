@@ -26,6 +26,8 @@ loft install stage
   `released_on` / `capture` · `add_mask(w, h, alpha)`
 - `add_sequence(first, count, fps, mode) -> integer` · `advance(dt_us)` ·
   `frame_of(idx)` · `restart(idx)` · `LOOP` / `ONCE` / `PINGPONG`
+- `set_layer_fog(layer, colour, density)` / `layer_fog_colour` / `layer_fog_density` ·
+  `set_layer_blur(layer, radius)` / `layer_blur` · `blur_region(canvas, x0, y0, x1, y1, r)`
 - `set_light_map(on)` / `light_map()` · `set_hud_layer(n)` / `hud_layer()` ·
   `light_rgb_at(x, y)` / `light_level_at(x, y)` · `composite_light(view, canvas)` ·
   `LIGHT_FALLOFF` / `HUD_NONE` · `composite_shader_source()`
@@ -218,6 +220,48 @@ hand-compute is a gate nobody maintains. A light out of range contributes nothin
 ⚠ **Unlike the camera, a light dirties the instance buffer.** It changes what is *in* the
 data rather than how it is looked at, so a moving torch re-packs every frame. Taking that
 cost off the per-sprite path is exactly what a light-map pass is for.
+
+## Per-layer atmosphere — fog and blur
+
+A layer already carries a parallax factor. Give it a fog colour, a density and a blur
+radius, and *distant, hazy, out-of-focus* becomes **layer data rather than an effects
+pipeline**.
+
+```
+st.set_parallax(0, 0.3);              // a distant band...
+st.set_layer_fog(0, 0x8899bb, 0.6);   // ...hazy...
+st.set_layer_blur(0, 3);              // ...and out of focus
+```
+
+⚠ **Fog is free, blur is not.** Fog is a lerp toward a colour, folded into the same
+per-node mix the depth cue's haze already uses — no buffer, no pass. Blur has to see a
+layer's neighbouring pixels, so it is a pass over what has been drawn. They are separate
+switches for that reason.
+
+Both degenerate cases are proved rather than assumed: **density 0 is bit-identical to no
+fog**, and **density 1 is exactly the fog colour**. Fog and the depth cue's haze compose —
+one is per-node by distance, the other a flat band.
+
+⚠ **A layer's blur runs when that layer finishes**, so it softens everything drawn up to and
+including it and nothing above. That is what makes a sharp foreground over a hazy distance
+possible, and it is what a fullscreen blur cannot do. Distant bands therefore blur together,
+which is what *distance is out of focus* means.
+
+⚠ **Blur samples are clamped to the edge, never read as black.** Counting an off-image
+sample as black loses light wherever the kernel overhangs and shows as a dark frame around
+the picture — the classic bug. Clamping keeps a uniform field **exactly** itself, and total
+luminance is gated on a non-uniform one.
+
+Parallax, fog and blur live in **one `Layer` record**, not three vectors indexed in parallel
+— the shape that put a sequence's name on another sequence's cells in P5, where every list
+stays well-formed on its own and only the correspondence goes wrong.
+
+⚠ **This is the runtime blur.** The plan's default is a **baked** blur, where the asset
+packer pre-blurs a static layer so it costs nothing at run time; that belongs to the asset
+pipeline, not here. Runtime blur is what a radius that actually changes needs — a focus pull.
+And the **GL runtime blur is not implemented**: it needs a ping-pong pass that nothing here
+can gate, and shipping it unverified would be worse than its absence. GL fog and the
+software path are complete.
 
 ## The light-map pass
 

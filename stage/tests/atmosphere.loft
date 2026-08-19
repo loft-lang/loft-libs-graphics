@@ -1,0 +1,221 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN144 L3 — per-layer atmosphere: fog and blur.
+//
+// A layer already carries a parallax factor (P2).  Give it a fog colour, a
+// density and a blur radius, and *distant, hazy, out-of-focus* becomes LAYER
+// DATA rather than an effects pipeline.
+use stage;
+use graphics;
+
+EPS = 0.000001;
+fn near(a: float, b: float) -> boolean { a - b < EPS and b - a < EPS }
+fn differing(a: const graphics::Canvas, b: const graphics::Canvas) -> integer {
+  n = 0;
+  for i in 0..len(a.data) { if (a.data[i] ?? 0) != (b.data[i] ?? 0) { n = n + 1; } }
+  n
+}
+fn luminance(cv: const graphics::Canvas) -> integer {
+  t = 0;
+  for v in cv.data { t = t + ((v >> 16) & 255) + ((v >> 8) & 255) + (v & 255); }
+  t
+}
+fn band(st: stage::Stage, x: float, w: float, layer: integer, colour: integer) -> integer {
+  st.node_add(-1, stage::Place { pl_x: x, pl_y: 0.0, pl_w: w, pl_h: 10.0,
+                                 pl_layer: layer, pl_colour: colour })
+}
+
+// ── fog: the degenerate cases proved, as with P2's factor 1.0 ────────────────
+
+// ⚠ DENSITY 0 IS BIT-IDENTICAL TO NO FOG.  Setting a fog colour must not tint
+// anything until an author asks for density, or the feature changes games that
+// never used it.
+fn test_fog_at_density_zero_is_bit_identical() {
+  plain = stage::stage_new();
+  _ = band(plain, 0.0, 20.0, 0, 0xc03030);
+  plain.compose();
+  ca = graphics::canvas(40, 10, 0xff000000);
+  plain.render_view(0, ca);
+
+  fogged = stage::stage_new();
+  _ = band(fogged, 0.0, 20.0, 0, 0xc03030);
+  fogged.set_layer_fog(0, 0x2040ff, 0.0);
+  fogged.compose();
+  cb = graphics::canvas(40, 10, 0xff000000);
+  fogged.render_view(0, cb);
+  assert(differing(ca, cb) == 0, "{differing(ca, cb)} pixels moved at density 0");
+}
+
+// ⚠ AND DENSITY 1 IS EXACTLY THE FOG COLOUR — the other end pinned, so the lerp
+// cannot be subtly wrong in the middle without one end giving it away.
+fn test_fog_at_density_one_is_exactly_the_fog_colour() {
+  st = stage::stage_new();
+  _ = band(st, 0.0, 20.0, 0, 0xc03030);
+  st.set_layer_fog(0, 0x2040ff, 1.0);
+  st.compose();
+  cv = graphics::canvas(40, 10, 0xff000000);
+  st.render_view(0, cv);
+  assert(cv.get_pixel(5, 5) == 0xff2040ff,
+         "full fog is the fog colour exactly — got {cv.get_pixel(5, 5)}");
+}
+
+// Hand-computed on the way between, with the same rounding the haze mix uses:
+// t = round(0.5 * 255) = 128, and (192,48,48) toward (32,64,255) gives
+// (112, 56, 152) = 0x703898.
+fn test_fog_between_the_ends_is_hand_computed() {
+  st = stage::stage_new();
+  _ = band(st, 0.0, 20.0, 0, 0xc03030);
+  st.set_layer_fog(0, 0x2040ff, 0.5);
+  st.compose();
+  cv = graphics::canvas(40, 10, 0xff000000);
+  st.render_view(0, cv);
+  assert(cv.get_pixel(5, 5) == 0xff703898, "half fog — got {cv.get_pixel(5, 5)}");
+}
+
+// ⚠ FOG IS PER LAYER, so a foggy distance leaves the foreground alone.  That is
+// the whole reason it is layer data and not a stage-wide setting.
+fn test_fog_reaches_only_its_own_layer() {
+  st = stage::stage_new();
+  _ = band(st, 0.0, 10.0, 0, 0xc03030);     // background
+  _ = band(st, 20.0, 10.0, 1, 0xc03030);    // foreground, same colour
+  st.set_layer_fog(0, 0x2040ff, 1.0);
+  st.compose();
+  cv = graphics::canvas(40, 10, 0xff000000);
+  st.render_view(0, cv);
+  assert(cv.get_pixel(5, 5) == 0xff2040ff, "the background is fogged out");
+  assert(cv.get_pixel(25, 5) == 0xffc03030, "the foreground is untouched");
+}
+
+// ── blur ────────────────────────────────────────────────────────────────────
+
+// Radius 0 is no blur at all — the degenerate case, again bit-identical.
+fn test_blur_radius_zero_is_bit_identical() {
+  plain = stage::stage_new();
+  _ = band(plain, 0.0, 20.0, 0, 0xc03030);
+  plain.compose();
+  ca = graphics::canvas(40, 10, 0xff000000);
+  plain.render_view(0, ca);
+
+  z = stage::stage_new();
+  _ = band(z, 0.0, 20.0, 0, 0xc03030);
+  z.set_layer_blur(0, 0);
+  z.compose();
+  cb = graphics::canvas(40, 10, 0xff000000);
+  z.render_view(0, cb);
+  assert(differing(ca, cb) == 0, "radius 0 moved {differing(ca, cb)} pixels");
+}
+
+// ⚠ A UNIFORM FIELD BLURS TO ITSELF, EXACTLY.  This is the sharpest possible
+// statement of *the border does not darken*: every sample is equal, so every
+// average is that value — unless the kernel reads outside the image and counts
+// black, which is the classic bug and shows up as a dark frame around the edge.
+fn test_a_uniform_layer_blurs_to_itself() {
+  st = stage::stage_new();
+  _ = band(st, 0.0, 40.0, 0, 0x808080);     // fills the whole canvas
+  st.set_layer_blur(0, 2);
+  st.compose();
+  cv = graphics::canvas(40, 10, 0xff000000);
+  st.render_view(0, cv);
+  off = 0;
+  for v in cv.data { if v != 0xff808080 { off = off + 1; } }
+  assert(off == 0, "{off} pixels changed — the border darkened");
+}
+
+// ⚠ AND A NON-UNIFORM LAYER PRESERVES TOTAL LUMINANCE.  Sampling outside as
+// black loses light everywhere the kernel overhangs; clamping to the edge keeps
+// it.  Rounding may move the total by a pixel or two, never by a border's worth.
+fn test_blur_preserves_total_luminance() {
+  sharp = stage::stage_new();
+  _ = band(sharp, 0.0, 12.0, 0, 0xffffff);
+  _ = band(sharp, 26.0, 14.0, 0, 0x404040);
+  sharp.compose();
+  ca = graphics::canvas(40, 10, 0xff000000);
+  sharp.render_view(0, ca);
+
+  soft = stage::stage_new();
+  _ = band(soft, 0.0, 12.0, 0, 0xffffff);
+  _ = band(soft, 26.0, 14.0, 0, 0x404040);
+  soft.set_layer_blur(0, 2);
+  soft.compose();
+  cb = graphics::canvas(40, 10, 0xff000000);
+  soft.render_view(0, cb);
+
+  assert(differing(ca, cb) > 0, "the blur did something, or this proves nothing");
+  before = luminance(ca);
+  after = luminance(cb);
+  d = if after > before { after - before } else { before - after };
+  assert(d * 200 < before,
+         "luminance moved {before} -> {after} (delta {d}); a lost border shows here");
+}
+
+// ⚠ BLUR IS PER LAYER, BEFORE THE LAYERS ABOVE COMPOSITE — which a fullscreen
+// blur cannot do and is the entire point.  A blurred distance under a sharp
+// foreground: the far edge goes soft, the near one stays a hard step.
+fn test_a_sharp_foreground_over_a_blurred_background_stays_sharp() {
+  st = stage::stage_new();
+  _ = band(st, 0.0, 20.0, 0, 0xffffff);     // background, edge at x = 20
+  st.set_layer_blur(0, 2);
+  _ = band(st, 30.0, 6.0, 1, 0x00ff00);     // foreground, edge at x = 30
+  st.compose();
+  cv = graphics::canvas(40, 10, 0xff000000);
+  st.render_view(0, cv);
+
+  // The background edge is SOFT: the pixel on the boundary is neither colour.
+  e = (cv.get_pixel(20, 5) >> 16) & 255;
+  assert(e > 0 and e < 255, "the background edge is a gradient, got {e}");
+  // The foreground edge is HARD: background one side, full colour the other.
+  assert(cv.get_pixel(29, 5) == 0xff000000, "nothing just left of the foreground");
+  assert(cv.get_pixel(30, 5) == 0xff00ff00,
+         "and full colour immediately right — a fullscreen blur would soften this");
+}
+
+// ── layer data lives in one place ───────────────────────────────────────────
+
+// ⚠ PARALLAX, FOG AND BLUR ARE ONE LAYER'S FACTS, in one record.  They were
+// three parallel vectors in an earlier draft, which is exactly the shape that
+// put a sequence's name on another sequence's cells in P5: each list stays
+// well-formed on its own and only the correspondence goes wrong.
+fn test_a_layers_facts_travel_together() {
+  st = stage::stage_new();
+  st.set_layer_blur(3, 4);                  // reaches PAST the layers below it
+  st.set_parallax(1, 0.25);
+  st.set_layer_fog(3, 0x102030, 0.75);
+  assert(near(st.parallax_of(1), 0.25), "layer 1 kept its parallax");
+  assert(near(st.parallax_of(3), 1.0), "layer 3 was never given one");
+  assert(st.layer_blur(3) == 4, "layer 3 kept its blur");
+  assert(st.layer_blur(1) == 0, "layer 1 has none");
+  assert(st.layer_fog_colour(3) == 0x102030 and near(st.layer_fog_density(3), 0.75),
+         "and its fog");
+  assert(near(st.layer_fog_density(1), 0.0), "which layer 1 does not have");
+}
+
+// A layer nobody configured is the plain one: parallax 1, no fog, no blur.
+fn test_an_unconfigured_layer_is_plain() {
+  st = stage::stage_new();
+  assert(near(st.parallax_of(7), 1.0), "the world plane");
+  assert(st.layer_blur(7) == 0, "sharp");
+  assert(near(st.layer_fog_density(7), 0.0), "and clear");
+}
+
+// ⚠ `blur_region` IS PUBLIC, so its own radius guard is its contract rather than
+// a second copy of the layer's policy — `blur_layer` decides whether a layer
+// blurs at all, and returns before this is reached.  Two guards, two jobs; each
+// is gated where it lives, which is what keeps them from becoming one rule with
+// two homes.
+fn test_blur_region_of_radius_zero_is_the_identity() {
+  cv = graphics::canvas(8, 4, 0xff000000);
+  cv.set_pixel(1, 1, 0xffffffff);
+  cv.set_pixel(6, 2, 0xff204060);
+  before: vector<integer> = [];
+  for v in cv.data { before += [v]; }
+  stage::blur_region(cv, 0, 0, 8, 4, 0);
+  moved = 0;
+  for i in 0..len(cv.data) { if (cv.data[i] ?? 0) != (before[i] ?? 0) { moved = moved + 1; } }
+  assert(moved == 0, "radius 0 changed {moved} pixels");
+  // And a real radius does move it, or the cell above is vacuous.
+  stage::blur_region(cv, 0, 0, 8, 4, 1);
+  spread = 0;
+  for i in 0..len(cv.data) { if (cv.data[i] ?? 0) != (before[i] ?? 0) { spread = spread + 1; } }
+  assert(spread > 0, "radius 1 must actually blur");
+}
