@@ -64,6 +64,8 @@ pub struct StageNode {
     nd_cy0: float,
     nd_cx1: float,
     nd_cy1: float,
+    nd_sway: float,          // ambient sway amplitude in pixels; 0 is still
+    nd_phase: float,         // derived from POSITION, so neighbours are out of step
     nd_cue: float,           // derived: 0 at the near plane, 1 at the far one
     nd_layer: integer,       // ordering BAND — outranks depth entirely
     nd_depth: float,         // distance INTO the screen; larger draws first
@@ -91,6 +93,7 @@ pub struct Stage {
     st_par: vector<float>,       // parallax factor per layer; missing means 1.0
     st_uploads: integer,         // instance-buffer uploads — the gate reads this
     st_dirty: boolean,           // does the instance buffer need rewriting?
+    st_time: float,              // ambient clock — a uniform, never a rewrite
 }
 
 // An alpha mask: per-texel coverage, row-major, 0..255.
@@ -127,6 +130,7 @@ pub struct Place {
     pl_alpha: float = 1.0,
     pl_mask: integer = -1,   // index from `add_mask`, or -1 for solid
     pl_clips: boolean = false,  // clip this node's subtree to its own bounds
+    pl_sway: float = 0.0,       // ambient sway amplitude, in pixels
     pl_layer: integer = 0,      // background / world / UI are BANDS, not numbers
     pl_depth: float = 0.0,      // distance INTO the screen: LARGER draws first, so
                                 // `depth = -y` puts a lower sprite in front. A 2.5-D
@@ -160,7 +164,8 @@ pub fn stage_new() -> Stage {
     Stage { st_nodes: [], st_masks: [], st_capture: -1, st_order: [],
             st_cue: false, st_cue_near: 0.0, st_cue_far: 1.0,
             st_cue_scale: 1.0, st_cue_haze: 0.0, st_haze_colour: 0x000000,
-            st_cam_x: 0.0, st_cam_y: 0.0, st_par: [], st_uploads: 0, st_dirty: true }
+            st_cam_x: 0.0, st_cam_y: 0.0, st_par: [], st_uploads: 0, st_dirty: true,
+            st_time: 0.0 }
 }
 
 pub fn node_count(self: const Stage) -> integer {
@@ -184,6 +189,7 @@ pub fn node_add(self: Stage, parent: integer, p: const Place) -> integer {
         nd_w: p.pl_w, nd_h: p.pl_h, nd_colour: p.pl_colour, nd_visible: p.pl_visible,
         nd_atlas: p.pl_atlas, nd_u0: p.pl_u0, nd_v0: p.pl_v0, nd_u1: p.pl_u1,
         nd_v1: p.pl_v1, nd_alpha: p.pl_alpha, nd_mask: p.pl_mask,
+        nd_sway: p.pl_sway, nd_phase: 0.0,
         nd_cue: 0.0, nd_layer: p.pl_layer, nd_depth: p.pl_depth,
         nd_clips: p.pl_clips, nd_clipped: false,
         nd_cx0: 0.0, nd_cy0: 0.0, nd_cx1: 0.0, nd_cy1: 0.0,
@@ -211,6 +217,10 @@ pub fn compose(self: Stage) {
         // sprite shrinks — a cue that moved the anchor would slide a mob off the tile
         // it is standing on.  That falls out of the origin being the anchor rather
         // than being arranged for.
+        // The sway phase comes from WHERE the node is, so two tufts a metre apart
+        // are out of step without either storing anything.  Derived once here, never
+        // per frame.
+        self.st_nodes[i].nd_phase = n.nd_x * 0.37 + n.nd_y * 0.11;
         cue = cue_of(self, n.nd_depth);
         self.st_nodes[i].nd_cue = cue;
         k = 1.0 + (self.st_cue_scale - 1.0) * cue;
@@ -534,12 +544,13 @@ pub struct Batch {
 // and a premultiplied-ready rgba.  The stride is public because a caller wiring
 // `gl_instance_attrib` needs it, and a wrong one fails as garbage geometry rather
 // than as an error.
-pub const INSTANCE_STRIDE: integer = 14;
+pub const INSTANCE_STRIDE: integer = 16;
 
 // Offsets within one instance, for the same reason.
 pub const OFF_AFFINE: integer = 0;   // a, b, c, d, tx, ty
 pub const OFF_UV: integer = 6;       // u0, v0, u1, v1
 pub const OFF_RGBA: integer = 10;    // r, g, b, a
+pub const OFF_SWAY: integer = 14;    // amplitude, phase — static, so the clock is a uniform
 
 // Split the visible nodes into runs, in scene order.
 // Example: @STG-004 — adjacent runs only, never sorted, and what the interleave
@@ -603,6 +614,8 @@ pub fn pack_instances(self: const Stage) -> vector<single> {
         out += [((((n.nd_colour >> 8) & 255) as float / 255.0) * n.nd_alpha) as single];
         out += [(((n.nd_colour & 255) as float / 255.0) * n.nd_alpha) as single];
         out += [n.nd_alpha as single];
+        out += [n.nd_sway as single];
+        out += [n.nd_phase as single];
     }
     out
 }
@@ -620,12 +633,15 @@ layout (location = 1) in vec4 iAffine;  // a, b, c, d — size already folded in
 layout (location = 2) in vec2 iTrans;   // tx, ty — the node's origin, in pixels
 layout (location = 3) in vec4 iUV;
 layout (location = 4) in vec4 iRGBA;
+layout (location = 5) in vec2 iSway;
 uniform vec2 uScreen;
 uniform vec2 uCam;
+uniform float uTime;
 out vec4 vColor;
 void main() {{
   vec2 p = vec2(iAffine.x * aQuad.x + iAffine.z * aQuad.y + iTrans.x,
                 iAffine.y * aQuad.x + iAffine.w * aQuad.y + iTrans.y) + uCam;
+  p.x += iSway.x * sin(uTime + iSway.y);
   // Pixel space to NDC, y DOWN — the same orientation the software canvas uses,
   // so the two paths can be compared pixel for pixel rather than mirrored.
   gl_Position = vec4(p.x / uScreen.x * 2.0 - 1.0, 1.0 - p.y / uScreen.y * 2.0, 0.0, 1.0);
@@ -676,6 +692,7 @@ pub fn gl_render(self: Stage, p: Painter, screen_w: float, screen_h: float) -> i
     graphics::gl_blend_func(graphics::BLEND_ONE, graphics::BLEND_ONE_MINUS_SRC_ALPHA);
     graphics::gl_use_shader(p.pn_shader);
     graphics::gl_set_uniform_vec2(p.pn_shader, "uScreen", screen_w, screen_h);
+    graphics::gl_set_uniform_float(p.pn_shader, "uTime", self.st_time);
     calls = 0;
     for b in batches(self) {
         // ⚠ A RUN STARTS PART-WAY INTO THE BUFFER, and there is no first-instance
@@ -692,6 +709,7 @@ pub fn gl_render(self: Stage, p: Painter, screen_w: float, screen_h: float) -> i
         graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 2, 2, INSTANCE_STRIDE, base + OFF_AFFINE + 4);
         graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 3, 4, INSTANCE_STRIDE, base + OFF_UV);
         graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 4, 4, INSTANCE_STRIDE, base + OFF_RGBA);
+        graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 5, 2, INSTANCE_STRIDE, base + OFF_SWAY);
         if b.b_clipped {
             graphics::gl_enable(graphics::GL_SCISSOR_TEST);
             // Scissor is measured from the BOTTOM, the screen from the top.
@@ -864,9 +882,10 @@ pub fn render_stage(self: const Stage, cv: graphics::Canvas) {
         o = world_point(self, i, 0.0, 0.0);
         far = world_point(self, i, n.nd_w, n.nd_h);
         off = cam_offset(self, n.nd_layer);
-        x0 = (o.p_x + off.p_x) as integer;
+        sw = sway_of(self, i);
+        x0 = (o.p_x + off.p_x + sw) as integer;
         y0 = (o.p_y + off.p_y) as integer;
-        x1 = (far.p_x + off.p_x) as integer;
+        x1 = (far.p_x + off.p_x + sw) as integer;
         y1 = (far.p_y + off.p_y) as integer;
         if x1 < x0 { t = x0; x0 = x1; x1 = t; }
         if y1 < y0 { t2 = y0; y0 = y1; y1 = t2; }
@@ -943,3 +962,33 @@ pub fn cam_offset(self: const Stage, layer: integer) -> P2 {
 // How many times the instance buffer has been written.  A pure camera move must
 // not move this — the property the whole design turns on.
 pub fn uploads(self: const Stage) -> integer { self.st_uploads }
+
+
+// ── P3: ambient motion ───────────────────────────────────────────────────────
+//
+// ⚠ NOTHING PER FRAME AT ALL.  A field of grass, a canopy, a banner: the phase is
+// derived from POSITION and the animation from a single clock, so five hundred
+// swaying tufts are one buffer uploaded once and one uniform that changes.  This is
+// the limit of what `P4`'s frame-index attribute exists to keep cheap — there, one
+// integer per animating sprite; here, zero.
+//
+// ⚠ AND IT IS VISUAL ONLY.  Sway displaces what is DRAWN and never the footprint:
+// a swaying tree keeps its depth, its bounds and its hit area, because a sprite
+// that re-sorted as it swayed would flicker past its neighbours, and grass that
+// dodged the pointer would be worse than grass that ignored it.
+
+// Example: @STG-008 — ambient motion is free, out of step, and visual only.
+// Advance the ambient clock.  Does NOT dirty the instance buffer — that is the
+// whole point of deriving the phase rather than stepping it.
+pub fn set_time(self: Stage, t: float) { self.st_time = t; }
+
+pub fn time_of(self: const Stage) -> float { self.st_time }
+
+// How far node `idx` is displaced right now, in pixels.  Bounded by its amplitude
+// by construction, since it is an amplitude times a sine.
+pub fn sway_of(self: const Stage, idx: integer) -> float {
+    if idx < 0 or idx >= len(self.st_nodes) { return 0.0; }
+    n = self.st_nodes[idx];
+    if n.nd_sway == 0.0 { return 0.0; }
+    n.nd_sway * sin(self.st_time + n.nd_phase)
+}

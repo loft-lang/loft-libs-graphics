@@ -153,3 +153,29 @@ fn test_a_clip_inherits_and_intersects() {
   for v in cv.data { if v == 0xff00ff00 { n = n + 1; } }
   assert(n == 100, "the overlap of (0,0)-(20,20) and (10,10)-(40,40) is 10x10");
 }
+
+// @STG-008 — ambient motion costs NOTHING per frame, and that is a design
+// constraint rather than an optimisation.  A tuft's phase is derived from where it
+// stands and its motion from one clock, so a field of five hundred is a buffer
+// uploaded once plus a uniform that ticks; storing and stepping a phase would
+// rewrite all five hundred every frame.  Two consequences a caller should expect:
+// neighbours are out of step (a field looks like a field rather than like the
+// ground moving), and sway is VISUAL ONLY — a swaying tree keeps its depth, its
+// bounds and its hit area, because one that re-sorted as it swayed would flicker
+// past its neighbours and grass that dodged the pointer would be worse than grass
+// that ignored it.
+fn test_ambient_motion_is_free_and_visual_only() {
+  st = stage::stage_new();
+  a = st.node_add(-1, stage::Place { pl_x: 0.0, pl_w: 2.0, pl_h: 6.0, pl_sway: 4.0 });
+  b = st.node_add(-1, stage::Place { pl_x: 9.0, pl_w: 2.0, pl_h: 6.0, pl_sway: 4.0 });
+  st.compose();
+  before = st.pack_instances();
+  st.set_time(1.4);
+  after = st.pack_instances();
+  for i in 0..len(before) { assert(before[i] == after[i], "the clock rewrites nothing"); }
+  assert(st.sway_of(a) != st.sway_of(b), "and neighbours are out of step");
+  bounds = st.bounds_of(a);
+  st.set_time(2.9);
+  moved = st.bounds_of(a);
+  assert(bounds.b_x0 == moved.b_x0, "the footprint never moves with the sway");
+}

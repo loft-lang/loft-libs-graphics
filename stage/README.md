@@ -80,6 +80,18 @@ while its body shrinks. Off by default, and off is an identical picture.
 box's corner. Put it at `(w/2, h)` and the sprite stands up from its feet, centred on where it
 was placed.
 
+## Ambient motion
+
+`pl_sway` gives a node an amplitude; `set_time(t)` ticks one clock. The **phase is derived
+from position**, so neighbours are out of step and a field looks like a field rather than like
+the ground moving — and **nothing is stored or stepped**, so five hundred swaying tufts are a
+buffer uploaded once plus a uniform. There is a test that 100 ticks over 500 sprites change
+**not one float**.
+
+⚠ **Sway is visual only.** It displaces what is drawn and never the footprint, so a swaying
+tree keeps its depth, its bounds and its hit area — one that re-sorted as it swayed would
+flicker past its neighbours.
+
 ## The camera
 
 `set_camera(x, y)` and `set_parallax(layer, factor)`. **Flat scrolling is every factor at
@@ -142,7 +154,8 @@ under the first's scissor.
 `@STG-003` `compose` is the caller's to run ·
 `@STG-004` the batcher never reorders ·
 `@STG-005` a release belongs to the press · `@STG-006` a click falls through a hole ·
-`@STG-007` a clip inherits and intersects — [tests/worked-examples.loft](tests/worked-examples.loft).
+`@STG-007` a clip inherits and intersects ·
+`@STG-008` ambient motion is free and visual only — [tests/worked-examples.loft](tests/worked-examples.loft).
 
 ## Provenance
 

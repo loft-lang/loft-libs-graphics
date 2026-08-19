@@ -1,0 +1,125 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN144 P3 — ambient motion: a field of grass that costs nothing per frame.
+//
+// The phase comes from POSITION and the animation from one clock, so five hundred
+// swaying tufts are a buffer uploaded once and a uniform that changes.  Everything
+// below asserts that property rather than describing it.
+use stage;
+use graphics;
+
+fn grass(x: float, sway: float) -> stage::Place {
+  stage::Place { pl_x: x, pl_y: 10.0, pl_w: 2.0, pl_h: 6.0, pl_sway: sway,
+                 pl_colour: 0x00ff00 }
+}
+
+// ⚠ THE GATE: 500 sprites, 100 ticks of the clock, NOT ONE FLOAT of the instance
+// buffer changed.  Stepping a stored phase would rewrite all 500 every frame.
+fn test_five_hundred_swaying_sprites_cost_no_updates() {
+  st = stage::stage_new();
+  for i in 0..500 { _ = st.node_add(-1, grass((i * 3) as float, 4.0)); }
+  st.compose();
+  before = st.pack_instances();
+  for t in 0..100 { st.set_time((t as float) * 0.1); }
+  after = st.pack_instances();
+  assert(len(before) == len(after), "the buffer keeps its size");
+  differs = 0;
+  for i in 0..len(before) { if before[i] != after[i] { differs = differs + 1; } }
+  assert(differs == 0, "{differs} floats changed across 100 ticks — expected 0");
+}
+
+// ⚠ AND THEY ARE NOT IN LOCKSTEP.  A phase derived from position is the whole
+// reason a field looks like a field; one clock with no phase would sway every tuft
+// identically, which reads as the ground moving rather than the grass.
+fn test_neighbours_are_out_of_step() {
+  st = stage::stage_new();
+  a = st.node_add(-1, grass(0.0, 5.0));
+  b = st.node_add(-1, grass(7.0, 5.0));
+  c = st.node_add(-1, grass(19.0, 5.0));
+  st.compose();
+  st.set_time(0.3);
+  sa = st.sway_of(a);
+  sb = st.sway_of(b);
+  sc = st.sway_of(c);
+  assert(sa != sb and sb != sc and sa != sc,
+         "three tufts, three displacements: {sa} {sb} {sc}");
+}
+
+// The clock moves them: the same tuft is somewhere else a moment later.
+fn test_the_clock_moves_them() {
+  st = stage::stage_new();
+  n = st.node_add(-1, grass(4.0, 5.0));
+  st.compose();
+  st.set_time(0.0);
+  at0 = st.sway_of(n);
+  st.set_time(1.0);
+  at1 = st.sway_of(n);
+  assert(at0 != at1, "the displacement follows the clock");
+}
+
+// Amplitude bounds it — a sine times an amplitude can do nothing else, and a tuft
+// that wandered off its tile would be a bug you only see in a wide shot.
+fn test_the_sway_is_bounded_by_its_amplitude() {
+  st = stage::stage_new();
+  n = st.node_add(-1, grass(3.0, 2.0));
+  st.compose();
+  for t in 0..64 {
+    st.set_time((t as float) * 0.25);
+    v = st.sway_of(n);
+    assert(v <= 2.0 and v >= -2.0, "displacement {v} escaped its amplitude");
+  }
+}
+
+// Zero amplitude is still — the degenerate case proved, so a scene with no wind is
+// the same picture it was before sway existed.
+fn test_no_amplitude_is_no_motion() {
+  st = stage::stage_new();
+  n = st.node_add(-1, grass(3.0, 0.0));
+  st.compose();
+  st.set_time(0.0);
+  a = graphics::canvas(32, 32, 0xff000000);
+  st.render_stage(a);
+  st.set_time(12.7);
+  b = graphics::canvas(32, 32, 0xff000000);
+  st.render_stage(b);
+  assert(st.sway_of(n) == 0.0, "no displacement");
+  for i in 0..len(a.data) { assert(a.data[i] == b.data[i], "and an identical picture"); }
+}
+
+// ⚠ SWAY IS VISUAL ONLY.  It displaces what is drawn and never the footprint, so a
+// swaying tree keeps its depth, its bounds and its hit area — one that re-sorted as
+// it swayed would flicker past its neighbours.
+fn test_sway_does_not_move_the_footprint() {
+  st = stage::stage_new();
+  n = st.node_add(-1, grass(10.0, 6.0));
+  st.compose();
+  st.set_time(0.0);
+  b0 = st.bounds_of(n);
+  o0 = st.world_origin(n);
+  hit0 = st.pick(11.0, 12.0);
+  st.set_time(1.9);
+  b1 = st.bounds_of(n);
+  o1 = st.world_origin(n);
+  assert(st.sway_of(n) != 0.0, "it IS swaying");
+  assert(b0.b_x0 == b1.b_x0 and b0.b_x1 == b1.b_x1, "bounds do not move");
+  assert(o0.p_x == o1.p_x, "the origin does not move");
+  assert(st.pick(11.0, 12.0) == hit0, "and neither does what you can click");
+}
+
+// The picture does change, though — a sway that no one could see would pass every
+// numeric test above.
+fn test_the_drawn_picture_actually_moves() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, grass(10.0, 6.0));
+  st.compose();
+  st.set_time(0.0);
+  a = graphics::canvas(48, 32, 0xff000000);
+  st.render_stage(a);
+  st.set_time(1.6);
+  b = graphics::canvas(48, 32, 0xff000000);
+  st.render_stage(b);
+  moved = false;
+  for i in 0..len(a.data) { if a.data[i] != b.data[i] { moved = true; } }
+  assert(moved, "the drawn grass moved between the two clocks");
+}
