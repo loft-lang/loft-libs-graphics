@@ -1,0 +1,163 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// stage — a retained 2-D scene: the tree a game mutates instead of a frame loop
+// it draws.  @PLN144 arc A.
+//
+// ⚠ THE TREE IS FLAT.  Nodes live in one `vector<Node>` and a child names its
+// parent by INDEX, never by reference.  Two reasons, and the second is why it
+// stays that way even though a pointer tree reads more naturally:
+//
+//   * a parent holding its children while a child points back is a dependency
+//     cycle in loft's ownership model, and
+//   * a flat array IS the instance buffer the batched renderer wants, so the
+//     shape that avoids the cycle is also the shape `A3` needs.
+//
+// The invariant that makes composition one forward pass: **a parent always has a
+// lower index than its children**.  `node_add` enforces it rather than trusting
+// it, because a single out-of-order insert would make `compose` read a parent's
+// world transform before it was written — and produce a *plausible* wrong answer
+// rather than an error.
+
+// A node's local placement, plus the world affine `compose` derives for it.
+//
+// The affine is 2x3 and is applied as
+//     x' = a*lx + c*ly + tx
+//     y' = b*lx + d*ly + ty
+// which is the layout the instanced draw path consumes unchanged.
+pub struct Node {
+    nd_parent: integer,      // index of the parent, or -1 for a root
+    nd_x: float,             // where the ORIGIN lands, in the parent's space
+    nd_y: float,
+    nd_rot: float,           // radians; +ve turns +x toward +y
+    nd_sx: float,
+    nd_sy: float,
+    nd_ox: float,            // the origin, in the node's own units: put it at the
+    nd_oy: float,            // sprite's feet and the sprite stands up from (x, y)
+    nd_a: float,             // derived world affine — read after `compose`
+    nd_b: float,
+    nd_c: float,
+    nd_d: float,
+    nd_tx: float,
+    nd_ty: float,
+}
+
+pub struct Stage {
+    st_nodes: vector<Node>,
+}
+
+// Where to put a node, and how.  A struct rather than nine parameters because the
+// compiler said so — `too-many-parameters` fires at eight, and a caller's burden
+// is fixed by a struct where a reader's is fixed by an extracted function.
+//
+// ⚠ THE DEFAULTS ARE THE POINT, not convenience.  Scale defaults to 1.0 and not to
+// the zero an omitted field would otherwise take: a scale of 0 is a *meaningful*
+// value of the field's domain — it collapses the node to nothing — so an author
+// who writes `Place { pl_x: 10.0, pl_y: 20.0 }` and gets an invisible node has
+// been handed a legal answer to a question they did not ask.  That is exactly the
+// case `omitted-field-zero` exists to warn about, answered here at the declaration.
+pub struct Place {
+    pl_x: float = 0.0,
+    pl_y: float = 0.0,
+    pl_rot: float = 0.0,     // radians; +ve turns +x toward +y
+    pl_sx: float = 1.0,
+    pl_sy: float = 1.0,
+    pl_ox: float = 0.0,      // the origin, in the node's own units
+    pl_oy: float = 0.0,
+}
+
+// A point, so a caller can ask where something ended up without unpacking six
+// floats.  `world_point` is the only honest way to check a transform: a matrix
+// means nothing except through what it does to a point.
+pub struct P2 {
+    p_x: float,
+    p_y: float,
+}
+
+pub fn stage_new() -> Stage {
+    Stage { st_nodes: [] }
+}
+
+pub fn node_count(self: const Stage) -> integer {
+    len(self.st_nodes)
+}
+
+// Add a node and answer its index.  `parent` is -1 for a root.
+//
+// ⚠ Refuses a forward parent reference by answering -1.  `compose` is a single
+// forward pass, so a child placed before its parent would read an unwritten world
+// transform — silently, and the frame would look almost right.
+// Example: @STG-002 — the tree is a flat array and a forward parent reference is
+// refused, because `compose` is a single forward pass that would otherwise read an
+// unwritten parent and answer plausibly.
+pub fn node_add(self: Stage, parent: integer, p: const Place) -> integer {
+    idx = len(self.st_nodes);
+    if parent >= idx or parent < -1 { return -1; }
+    self.st_nodes += [Node {
+        nd_parent: parent, nd_x: p.pl_x, nd_y: p.pl_y, nd_rot: p.pl_rot,
+        nd_sx: p.pl_sx, nd_sy: p.pl_sy, nd_ox: p.pl_ox, nd_oy: p.pl_oy,
+        nd_a: 1.0, nd_b: 0.0, nd_c: 0.0, nd_d: 1.0, nd_tx: 0.0, nd_ty: 0.0,
+    }];
+    idx
+}
+
+// Derive every node's world affine in one forward pass.
+//
+// A node's local transform is  T(x, y) . R(rot) . S(sx, sy) . T(-ox, -oy), which
+// is what makes the ORIGIN the anchor: the local point (ox, oy) maps exactly to
+// (x, y), so a sprite whose origin sits at its feet stands up from where it is
+// placed.  World = parent's world composed with that.
+// Example: @STG-003 — deriving is the caller's to trigger; skipping it renders the
+// previous state, which reads as input lag rather than as a missing call.
+pub fn compose(self: Stage) {
+    for i in 0..len(self.st_nodes) {
+        n = self.st_nodes[i];
+        cs = cos(n.nd_rot);
+        sn = sin(n.nd_rot);
+        // R . S — scale first, then rotate.
+        la = cs * n.nd_sx;
+        lb = sn * n.nd_sx;
+        lc = -sn * n.nd_sy;
+        ld = cs * n.nd_sy;
+        // ... then place the ORIGIN at (x, y): t = (x, y) - A . (ox, oy).
+        ltx = n.nd_x - (la * n.nd_ox + lc * n.nd_oy);
+        lty = n.nd_y - (lb * n.nd_ox + ld * n.nd_oy);
+
+        if n.nd_parent < 0 {
+            self.st_nodes[i].nd_a = la;
+            self.st_nodes[i].nd_b = lb;
+            self.st_nodes[i].nd_c = lc;
+            self.st_nodes[i].nd_d = ld;
+            self.st_nodes[i].nd_tx = ltx;
+            self.st_nodes[i].nd_ty = lty;
+        } else {
+            p = self.st_nodes[n.nd_parent];
+            // W = P . L  — the parent's linear part acts on the child's, and on
+            // the child's translation before the parent's is added.
+            self.st_nodes[i].nd_a = p.nd_a * la + p.nd_c * lb;
+            self.st_nodes[i].nd_b = p.nd_b * la + p.nd_d * lb;
+            self.st_nodes[i].nd_c = p.nd_a * lc + p.nd_c * ld;
+            self.st_nodes[i].nd_d = p.nd_b * lc + p.nd_d * ld;
+            self.st_nodes[i].nd_tx = p.nd_a * ltx + p.nd_c * lty + p.nd_tx;
+            self.st_nodes[i].nd_ty = p.nd_b * ltx + p.nd_d * lty + p.nd_ty;
+        }
+    }
+}
+
+// Where a point in node `idx`'s own space lands in world space.  Valid after
+// `compose`; answers (0, 0) for an index that is not a node.
+pub fn world_point(self: const Stage, idx: integer, lx: float, ly: float) -> P2 {
+    if idx < 0 or idx >= len(self.st_nodes) { return P2 { p_x: 0.0, p_y: 0.0 }; }
+    n = self.st_nodes[idx];
+    P2 { p_x: n.nd_a * lx + n.nd_c * ly + n.nd_tx,
+         p_y: n.nd_b * lx + n.nd_d * ly + n.nd_ty }
+}
+
+// Where the node's ORIGIN is — the point A7's depth key sorts on.
+// Example: @STG-001 — a node is anchored by its origin, so a sprite whose origin
+// sits at its feet stands up from where it was placed.
+pub fn world_origin(self: const Stage, idx: integer) -> P2 {
+    if idx < 0 or idx >= len(self.st_nodes) { return P2 { p_x: 0.0, p_y: 0.0 }; }
+    n = self.st_nodes[idx];
+    world_point(self, idx, n.nd_ox, n.nd_oy)
+}

@@ -1,0 +1,68 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Worked examples for the `stage` library (@PLN141).  Each `test_*` below
+// demonstrates a contract the signature cannot state; the function documents
+// itself by CITING the tag with `// Example: @STG-00N`, and the doc-drift gate
+// fails if a citation goes dangling.  Distinct from the assertion suite in
+// `stage.loft`.
+//
+// Everything here is floats in and floats out, so the type checker sees none of
+// it.  What a caller gets wrong is WHICH POINT a node is anchored by, that the
+// tree is an ordered array rather than a graph, and that reading a world
+// transform before composing answers a stale one rather than an error.
+use stage;
+
+EPS = 0.0001;
+fn close(a: float, b: float) -> boolean { a - b < EPS and b - a < EPS }
+
+// @STG-001 — a node is anchored by its ORIGIN, not by its top-left corner.
+// `pl_ox`/`pl_oy` name a point in the node's own units, and `compose` places
+// exactly that point at (`pl_x`, `pl_y`) — whatever the rotation and scale are.
+// Put the origin at a sprite's feet and the sprite STANDS UP from where it was
+// placed, which is what lets a 2-D scene present a 3-D world: the footprint
+// decides where it sits and the artwork decides nothing.  Move the origin and the
+// node pivots about the new point rather than sliding, so the same `pl_x`/`pl_y`
+// mean a different picture — the commonest surprise in this library.
+fn test_origin_is_what_a_node_is_anchored_by() {
+  st = stage::stage_new();
+  feet = st.node_add(-1, stage::Place { pl_x: 50.0, pl_y: 80.0, pl_ox: 8.0, pl_oy: 16.0,
+                                        pl_rot: 0.7, pl_sx: 2.0, pl_sy: 3.0 });
+  st.compose();
+  at = st.world_origin(feet);
+  assert(close(at.p_x, 50.0) and close(at.p_y, 80.0),
+         "the origin lands on (pl_x, pl_y) under any rotation and scale");
+}
+
+// @STG-002 — the tree is a FLAT ARRAY and a parent must already exist.  A child
+// names its parent by index, and `node_add` REFUSES a forward reference by
+// answering -1 rather than accepting it.  That is not bookkeeping: `compose` is a
+// single forward pass, so a child sitting before its parent would read a world
+// transform that had not been written yet and produce a plausible wrong frame —
+// the kind of bug that looks like an art problem.  Build parents first and the
+// invariant holds by construction.
+fn test_a_parent_must_already_exist() {
+  st = stage::stage_new();
+  assert(st.node_add(3, stage::Place {}) == -1, "a forward parent reference is refused");
+  root = st.node_add(-1, stage::Place { pl_x: 1.0 });
+  child = st.node_add(root, stage::Place { pl_x: 2.0 });
+  assert(root == 0 and child == 1, "indices are assigned in insertion order");
+  assert(st.node_count() == 2, "a refused add appends nothing");
+}
+
+// @STG-003 — a world transform is DERIVED, and reading one before `compose` gives
+// the identity rather than an error.  Mutating a node is cheap precisely because
+// nothing recomputes on write; the cost is that `compose` is the caller's to run,
+// once per frame, after the last mutation.  Skip it and the frame renders the
+// PREVIOUS state — every node in the right relative place, the whole scene one
+// step behind, which reads as input lag rather than as a missing call.
+fn test_compose_is_the_callers_to_run() {
+  st = stage::stage_new();
+  n = st.node_add(-1, stage::Place { pl_x: 10.0, pl_y: 20.0 });
+  before = st.world_origin(n);
+  assert(close(before.p_x, 0.0) and close(before.p_y, 0.0),
+         "before compose, the world transform is still the identity");
+  st.compose();
+  after = st.world_origin(n);
+  assert(close(after.p_x, 10.0) and close(after.p_y, 20.0), "compose derives it");
+}

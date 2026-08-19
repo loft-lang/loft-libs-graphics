@@ -1,0 +1,8 @@
+[package]
+name = "stage"
+version = "0.1.0"
+loft = ">=2026.8.0"
+repository = "loft-libs-graphics"
+
+[library]
+entry = "src/stage.loft"
