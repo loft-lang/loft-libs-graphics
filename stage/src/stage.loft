@@ -100,6 +100,24 @@ pub struct View {
     vw_h: integer,
 }
 
+// A point light: where it stands, how far it reaches, and what colour it casts.
+//
+// ⚠ IT LIVES IN WORLD SPACE, like everything else the app places.  A light is
+// not attached to a node, so moving a torch-bearer means moving the light too —
+// deliberate, because a light parented to a sprite would inherit that sprite's
+// rotation and scale, and neither means anything to a point light.
+// ⚠ `StageLight`, not `Light`: a TYPE name is global across every package in the
+// build, and `mesh3d` — pulled in by `graphics` — already publishes a `Light`.
+// The compiler refusing is the good outcome; after publishing, this rename is one
+// nobody can make.  Same reason the node is `StageNode`.
+pub struct StageLight {
+    lt_x: float,
+    lt_y: float,
+    lt_r: float,             // radius; the reach is 0 at exactly this distance
+    lt_colour: integer,      // packed 0xRRGGBB
+    lt_power: float,         // intensity multiplier; 1.0 is full at the centre
+}
+
 pub struct Stage {
     st_nodes: vector<StageNode>,
     st_masks: vector<Mask>,
@@ -111,6 +129,8 @@ pub struct Stage {
     st_cue_scale: float,         // scale at the FAR end; 1.0 at the near end
     st_cue_haze: float,          // haze at the FAR end, 0..1
     st_haze_colour: integer,     // what distance fades toward
+    st_lights: vector<StageLight>,    // L1: sampled per sprite, folded into the tint
+    st_ambient: float,           // 1.0 is fully lit, which is the unlit default
     st_views: vector<View>,      // at least one; view 0 is the unsplit camera
     st_par: vector<float>,       // parallax factor per layer; missing means 1.0
     st_uploads: integer,         // instance-buffer uploads — the gate reads this
@@ -213,6 +233,7 @@ pub fn stage_new() -> Stage {
     Stage { st_nodes: [], st_masks: [], st_capture: -1, st_order: [],
             st_cue: false, st_cue_near: 0.0, st_cue_far: 1.0,
             st_cue_scale: 1.0, st_cue_haze: 0.0, st_haze_colour: 0x000000,
+            st_lights: [], st_ambient: 1.0,
             st_views: [View { vw_cam_x: 0.0, vw_cam_y: 0.0, vw_x: 0, vw_y: 0,
                               vw_w: 0, vw_h: 0 }],
             st_par: [], st_uploads: 0, st_dirty: true,
@@ -674,9 +695,10 @@ pub fn pack_instances(self: const Stage) -> vector<single> {
         // ⚠ PREMULTIPLIED.  Straight alpha under linear filtering darkens every
         // anti-aliased edge, and this stack draws overlapping soft-edged sprites
         // all day; the GL blend below is `(ONE, ONE_MINUS_SRC_ALPHA)` to match.
-        out += [((((n.nd_colour >> 16) & 255) as float / 255.0) * n.nd_alpha) as single];
-        out += [((((n.nd_colour >> 8) & 255) as float / 255.0) * n.nd_alpha) as single];
-        out += [(((n.nd_colour & 255) as float / 255.0) * n.nd_alpha) as single];
+        lc = lit_colour(self, i);
+        out += [((((lc >> 16) & 255) as float / 255.0) * n.nd_alpha) as single];
+        out += [((((lc >> 8) & 255) as float / 255.0) * n.nd_alpha) as single];
+        out += [(((lc & 255) as float / 255.0) * n.nd_alpha) as single];
         out += [n.nd_alpha as single];
         out += [n.nd_sway as single];
         out += [n.nd_phase as single];
@@ -985,9 +1007,10 @@ pub fn render_view(self: const Stage, view: integer, cv: graphics::Canvas) {
         hz = (n.nd_cue * self.st_cue_haze * 255.0 + 0.5) as integer;
         if hz < 0 { hz = 0; }
         if hz > 255 { hz = 255; }
-        cr = mix((n.nd_colour >> 16) & 255, (self.st_haze_colour >> 16) & 255, hz);
-        cg = mix((n.nd_colour >> 8) & 255, (self.st_haze_colour >> 8) & 255, hz);
-        cb = mix(n.nd_colour & 255, self.st_haze_colour & 255, hz);
+        lc = lit_colour(self, i);
+        cr = mix((lc >> 16) & 255, (self.st_haze_colour >> 16) & 255, hz);
+        cg = mix((lc >> 8) & 255, (self.st_haze_colour >> 8) & 255, hz);
+        cb = mix(lc & 255, self.st_haze_colour & 255, hz);
         sr = (cr * ia + 127) / 255 ?? 0;
         sg = (cg * ia + 127) / 255 ?? 0;
         sb = (cb * ia + 127) / 255 ?? 0;
@@ -1484,4 +1507,111 @@ pub fn hits_in(self: const Stage, view: integer, idx: integer, sx: float,
     l = to_local(self, idx, sx - off.p_x, sy - off.p_y);
     if l.p_x < 0.0 or l.p_y < 0.0 or l.p_x >= n.nd_w or l.p_y >= n.nd_h { return false; }
     solid_at(self, idx, l.p_x, l.p_y)
+}
+
+
+// ── L1: light sampled per sprite, applied as tint ────────────────────────────
+//
+// ⚠ NO PASS, NO FRAMEBUFFER, NO REORDER.  Each sprite samples every light at its
+// own ORIGIN and the answer folds into A5's tint attribute, so lighting a scene
+// costs a multiply per sprite and cannot disturb the draw.  That makes it
+// order-independent by construction, which is the property L2's composite has to
+// work for rather than inherit.
+//
+// ⚠ AND THE SAMPLE POINT IS THE ORIGIN — the footprint P1 sorts on, not the
+// artwork.  Two mobs standing on one tile take the same light however tall they
+// are; sampling a corner would light a tall sprite as though it stood further
+// away, which is the 2.5-D wrong picture wearing a different hat.
+
+// Add a light.  Answers its index, for `move_light`.
+pub fn add_light(self: Stage, x: float, y: float, radius: float, colour: integer,
+                 power: float) -> integer {
+    self.st_lights += [StageLight { lt_x: x, lt_y: y, lt_r: radius, lt_colour: colour,
+                               lt_power: power }];
+    // ⚠ Unlike a camera, a light DIRTIES the buffer: it changes what is in the
+    // instance data rather than how it is looked at.  A moving torch therefore
+    // re-packs every frame, and taking that cost off the per-sprite path is
+    // exactly what L2's composite pass is for.
+    self.st_dirty = true;
+    len(self.st_lights) - 1
+}
+
+pub fn move_light(self: Stage, i: integer, x: float, y: float) {
+    if i < 0 or i >= len(self.st_lights) { return; }
+    self.st_lights[i].lt_x = x;
+    self.st_lights[i].lt_y = y;
+    self.st_dirty = true;
+}
+
+pub fn light_count(self: const Stage) -> integer { len(self.st_lights) }
+
+// How lit the world is before any light: 1.0 leaves the material untouched, so a
+// game that never asks for light cannot be dimmed by this existing.  Turn it
+// down and the scene goes dark except where a light reaches.
+pub fn set_ambient(self: Stage, level: float) {
+    self.st_ambient = level;
+    self.st_dirty = true;
+}
+
+pub fn ambient(self: const Stage) -> float { self.st_ambient }
+
+// What a light contributes at a point: linear in the radius, clamped at both ends.
+//
+// ⚠ LINEAR, `1 - d/r`, and that is a design call.  This phase's gate is
+// hand-computed values, and a curve nobody can hand-compute is a gate nobody
+// maintains.  L2 owns the prettier curve, and its own gate says how: expectations
+// GENERATED from the same constants the shader uses, so retuning is one edit.
+pub fn light_reach(l: const StageLight, px: float, py: float) -> float {
+    if l.lt_r <= 0.0 { return 0.0; }
+    dx = px - l.lt_x;
+    dy = py - l.lt_y;
+    d = sqrt(dx * dx + dy * dy);
+    a = 1.0 - (d / l.lt_r ?? 1.0);
+    if a <= 0.0 { return 0.0; }
+    if a > 1.0 { return 1.0; }
+    a * l.lt_power
+}
+
+// The colour a node is actually drawn in: its material, multiplied by the light
+// standing on its footprint.
+//
+// ⚠ ONE HOME.  Both render paths and the instance packer read this rather than
+// each folding the light in themselves — the shape P6 shipped a defect through,
+// where one fact derived per path was validated only where the derivations
+// happened to agree.
+pub fn lit_colour(self: const Stage, idx: integer) -> integer {
+    if idx < 0 or idx >= len(self.st_nodes) { return 0; }
+    n = self.st_nodes[idx];
+    if len(self.st_lights) == 0 and self.st_ambient >= 1.0 { return n.nd_colour; }
+    o = world_origin(self, idx);
+    lr = self.st_ambient;
+    lg = self.st_ambient;
+    lb = self.st_ambient;
+    for i in 0..len(self.st_lights) {
+        l = self.st_lights[i];
+        a = light_reach(l, o.p_x, o.p_y);
+        // Skipping zero is work avoided, NOT the guard: `light_reach` is the one
+        // place that decides a light out of range contributes nothing, and it is
+        // gated there.  Two places enforcing one rule is how they drift.
+        if a <= 0.0 { continue; }
+        lr = lr + (((l.lt_colour >> 16) & 255) as float / 255.0) * a;
+        lg = lg + (((l.lt_colour >> 8) & 255) as float / 255.0) * a;
+        lb = lb + ((l.lt_colour & 255) as float / 255.0) * a;
+    }
+    // ⚠ CLAMPED PER CHANNEL.  Unclamped, standing between two torches multiplies
+    // past 255 and the byte wraps, so the brightest place in the scene comes out
+    // DARK — the classic and the one everybody finds by accident.
+    pack_channel(n.nd_colour >> 16, lr) << 16
+        | pack_channel(n.nd_colour >> 8, lg) << 8
+        | pack_channel(n.nd_colour, lb)
+}
+
+fn pack_channel(material: integer, level: float) -> integer {
+    k = level;
+    if k < 0.0 { k = 0.0; }
+    if k > 1.0 { k = 1.0; }
+    v = (((material & 255) as float) * k + 0.5) as integer;
+    if v < 0 { return 0; }
+    if v > 255 { return 255; }
+    v
 }

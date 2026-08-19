@@ -26,6 +26,8 @@ loft install stage
   `released_on` / `capture` · `add_mask(w, h, alpha)`
 - `add_sequence(first, count, fps, mode) -> integer` · `advance(dt_us)` ·
   `frame_of(idx)` · `restart(idx)` · `LOOP` / `ONCE` / `PINGPONG`
+- `add_light(x, y, radius, colour, power)` / `move_light` / `light_count()` ·
+  `set_ambient(level)` / `ambient()` · `lit_colour(idx)` · `light_reach(light, x, y)`
 - `add_view(x, y, w, h)` / `view_count()` / `set_view_rect` / `set_view_camera` ·
   `view_camera_x` / `view_camera_y` / `view_offset` · `render_view(view, canvas)` ·
   `pick_in(view, x, y)` / `hits_in` / `in_view_rect` · `sync_instances()` · `scissor_of`
@@ -183,6 +185,36 @@ that 100 camera moves change **not one float** of the packed buffer.
 ⚠ **Parallax translates; it does not resize.** Distance-as-smaller is `depth_cue`'s job,
 which scales about the origin so a sprite's feet stay planted. And picking **un-applies the
 camera per layer** — one screen point is a different world point in each.
+
+## Light
+
+`add_light(x, y, radius, colour, power)` puts a point light in the world; every sprite
+samples every light **at its own origin** and the answer folds into A5's tint attribute.
+So lighting costs a multiply per sprite — **no pass, no framebuffer, and no change to draw
+order** — which is the whole feature for a flat-lit 2-D game.
+
+⚠ **Ambient is 1.0 by default**, so a game that never asks for light cannot be dimmed by
+this existing. `set_ambient(0.2)` is how a night scene starts, before a torch goes in it.
+
+⚠ **The sample point is the origin — the footprint, not the artwork.** Two mobs standing on
+one tile take the same light however tall they are. Sampling a corner would light a tall
+sprite as though it stood further away, which is the 2.5-D wrong picture wearing a different
+hat.
+
+⚠ **Light composes with the material, it does not replace it.** A red sprite under a blue
+light goes nearly black, not blue — the light multiplies A5's tint rather than throwing it
+away. Channels are clamped, so standing between two torches gives you the material rather
+than a wrapped byte that comes out dark.
+
+The falloff is **linear in the radius**, `1 - d/r`, clamped to nothing beyond it. That is a
+deliberate choice: this phase's gate is hand-computed values, and a curve nobody can
+hand-compute is a gate nobody maintains. A light out of range contributes nothing and never
+*subtracts* — `light_reach` owns that bound and is tested on it directly, because
+`lit_colour` skips a zero contribution as work avoided rather than as a guard.
+
+⚠ **Unlike the camera, a light dirties the instance buffer.** It changes what is *in* the
+data rather than how it is looked at, so a moving torch re-packs every frame. Taking that
+cost off the per-sprite path is exactly what a light-map pass is for.
 
 ## Several views over one stage
 
