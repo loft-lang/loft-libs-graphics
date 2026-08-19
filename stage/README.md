@@ -80,6 +80,21 @@ while its body shrinks. Off by default, and off is an identical picture.
 box's corner. Put it at `(w/2, h)` and the sprite stands up from its feet, centred on where it
 was placed.
 
+## The camera
+
+`set_camera(x, y)` and `set_parallax(layer, factor)`. **Flat scrolling is every factor at
+1.0** — the two scroll modes are one mechanism, and the flat one is proved pixel-identical to
+having placed every node that much further left, not maintained as a second path.
+
+⚠ **Applied at draw time, never baked into node positions.** A pan is one uniform pair per
+run; baking it would rewrite every node and re-upload the whole instance buffer on every
+scrolled frame — the retained tree's entire budget spent on standing still. There is a test
+that 100 camera moves change **not one float** of the packed buffer.
+
+⚠ **Parallax translates; it does not resize.** Distance-as-smaller is `depth_cue`'s job,
+which scales about the origin so a sprite's feet stay planted. And picking **un-applies the
+camera per layer** — one screen point is a different world point in each.
+
 ## Picking
 
 `pick` walks the draw order **backwards**, so the node drawn last is tested first and

@@ -86,6 +86,11 @@ pub struct Stage {
     st_cue_scale: float,         // scale at the FAR end; 1.0 at the near end
     st_cue_haze: float,          // haze at the FAR end, 0..1
     st_haze_colour: integer,     // what distance fades toward
+    st_cam_x: float,             // the camera, applied at DRAW time
+    st_cam_y: float,
+    st_par: vector<float>,       // parallax factor per layer; missing means 1.0
+    st_uploads: integer,         // instance-buffer uploads — the gate reads this
+    st_dirty: boolean,           // does the instance buffer need rewriting?
 }
 
 // An alpha mask: per-texel coverage, row-major, 0..255.
@@ -154,7 +159,8 @@ pub struct P2 {
 pub fn stage_new() -> Stage {
     Stage { st_nodes: [], st_masks: [], st_capture: -1, st_order: [],
             st_cue: false, st_cue_near: 0.0, st_cue_far: 1.0,
-            st_cue_scale: 1.0, st_cue_haze: 0.0, st_haze_colour: 0x000000 }
+            st_cue_scale: 1.0, st_cue_haze: 0.0, st_haze_colour: 0x000000,
+            st_cam_x: 0.0, st_cam_y: 0.0, st_par: [], st_uploads: 0, st_dirty: true }
 }
 
 pub fn node_count(self: const Stage) -> integer {
@@ -271,6 +277,7 @@ pub fn compose(self: Stage) {
         self.st_nodes[i].nd_cy1 = cy1;
     }
     order_nodes(self);
+    self.st_dirty = true;
 }
 
 // Turn the depth cue on.  `near` and `far` are depths; a node at `far` is drawn at
@@ -512,6 +519,7 @@ pub fn opaque(colour: integer) -> integer {
 
 // One run of consecutive instances that share an atlas.
 pub struct Batch {
+    b_layer: integer,        // one run, one layer — so one camera offset
     b_atlas: integer,
     b_first: integer,        // index of the first instance in the packed buffer
     b_count: integer,
@@ -550,14 +558,15 @@ pub fn batches(self: const Stage) -> vector<Batch> {
         same = false;
         if last >= 0 {
             b = out[last];
-            same = b.b_atlas == n.nd_atlas and b.b_clipped == n.nd_clipped
+            same = b.b_layer == n.nd_layer and b.b_atlas == n.nd_atlas
+                   and b.b_clipped == n.nd_clipped
                    and b.b_cx0 == n.nd_cx0 and b.b_cy0 == n.nd_cy0
                    and b.b_cx1 == n.nd_cx1 and b.b_cy1 == n.nd_cy1;
         }
         if same {
             out[last].b_count = out[last].b_count + 1;
         } else {
-            out += [Batch { b_atlas: n.nd_atlas, b_first: idx, b_count: 1,
+            out += [Batch { b_layer: n.nd_layer, b_atlas: n.nd_atlas, b_first: idx, b_count: 1,
                             b_clipped: n.nd_clipped, b_cx0: n.nd_cx0,
                             b_cy0: n.nd_cy0, b_cx1: n.nd_cx1, b_cy1: n.nd_cy1 }];
         }
@@ -612,10 +621,11 @@ layout (location = 2) in vec2 iTrans;   // tx, ty — the node's origin, in pixe
 layout (location = 3) in vec4 iUV;
 layout (location = 4) in vec4 iRGBA;
 uniform vec2 uScreen;
+uniform vec2 uCam;
 out vec4 vColor;
 void main() {{
   vec2 p = vec2(iAffine.x * aQuad.x + iAffine.z * aQuad.y + iTrans.x,
-                iAffine.y * aQuad.x + iAffine.w * aQuad.y + iTrans.y);
+                iAffine.y * aQuad.x + iAffine.w * aQuad.y + iTrans.y) + uCam;
   // Pixel space to NDC, y DOWN — the same orientation the software canvas uses,
   // so the two paths can be compared pixel for pixel rather than mirrored.
   gl_Position = vec4(p.x / uScreen.x * 2.0 - 1.0, 1.0 - p.y / uScreen.y * 2.0, 0.0, 1.0);
@@ -651,15 +661,16 @@ pub fn painter_new() -> Painter {
 // Draw the scene, one instanced call per run.  Answers the number of draw calls
 // issued, which is the half of the gate that pixels cannot see: a batch that fell
 // back to one draw per sprite would look identical and cost N.
-pub fn gl_render(self: const Stage, p: Painter, screen_w: float, screen_h: float) -> integer {
+pub fn gl_render(self: Stage, p: Painter, screen_w: float, screen_h: float) -> integer {
     floats = pack_instances(self);
     if len(floats) == 0 { return 0; }
     if p.pn_ivbo == 0 {
         p.pn_ivbo = graphics::gl_upload_instance_buffer(floats);
         p.pn_cap = len(floats) / INSTANCE_STRIDE ?? 0;
     } else {
-        graphics::gl_update_buffer(p.pn_ivbo, floats);
+        if self.st_dirty { graphics::gl_update_buffer(p.pn_ivbo, floats); }
     }
+    if self.st_dirty { self.st_uploads = self.st_uploads + 1; }
     // Premultiplied compositing, to match `pack_instances` and the software path.
     graphics::gl_enable(graphics::GL_BLEND);
     graphics::gl_blend_func(graphics::BLEND_ONE, graphics::BLEND_ONE_MINUS_SRC_ALPHA);
@@ -673,6 +684,9 @@ pub fn gl_render(self: const Stage, p: Painter, screen_w: float, screen_h: float
         // is GL 4.2 and is NOT in WebGL 2.  So the offset moves into the ATTRIBUTE
         // POINTERS — re-bound per run at `b_first * INSTANCE_STRIDE` — which is the
         // portable way and costs four calls per run rather than a wider draw call.
+        // One uniform pair per run, rather than N rewritten positions.
+        coff = cam_offset(self, b.b_layer);
+        graphics::gl_set_uniform_vec2(p.pn_shader, "uCam", coff.p_x, coff.p_y);
         base = b.b_first * INSTANCE_STRIDE;
         graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 1, 4, INSTANCE_STRIDE, base + OFF_AFFINE);
         graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 2, 2, INSTANCE_STRIDE, base + OFF_AFFINE + 4);
@@ -692,6 +706,7 @@ pub fn gl_render(self: const Stage, p: Painter, screen_w: float, screen_h: float
         calls = calls + 1;
     }
     graphics::gl_disable(graphics::GL_SCISSOR_TEST);
+    self.st_dirty = false;
     calls
 }
 
@@ -728,7 +743,10 @@ pub fn hits(self: const Stage, idx: integer, sx: float, sy: float) -> boolean {
     if idx < 0 or idx >= len(self.st_nodes) { return false; }
     n = self.st_nodes[idx];
     if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { return false; }
-    l = to_local(self, idx, sx, sy);
+    // ⚠ Un-applied PER LAYER: one screen point is a different world point in each,
+    // so a single inverse would pick the wrong thing the moment a layer lags.
+    off = cam_offset(self, n.nd_layer);
+    l = to_local(self, idx, sx - off.p_x, sy - off.p_y);
     u = l.p_x;
     v = l.p_y;
     if u < 0.0 or v < 0.0 or u >= n.nd_w or v >= n.nd_h { return false; }
@@ -845,10 +863,11 @@ pub fn render_stage(self: const Stage, cv: graphics::Canvas) {
         sb = (cb * ia + 127) / 255 ?? 0;
         o = world_point(self, i, 0.0, 0.0);
         far = world_point(self, i, n.nd_w, n.nd_h);
-        x0 = o.p_x as integer;
-        y0 = o.p_y as integer;
-        x1 = far.p_x as integer;
-        y1 = far.p_y as integer;
+        off = cam_offset(self, n.nd_layer);
+        x0 = (o.p_x + off.p_x) as integer;
+        y0 = (o.p_y + off.p_y) as integer;
+        x1 = (far.p_x + off.p_x) as integer;
+        y1 = (far.p_y + off.p_y) as integer;
         if x1 < x0 { t = x0; x0 = x1; x1 = t; }
         if y1 < y0 { t2 = y0; y0 = y1; y1 = t2; }
         // The clip is applied by NARROWING THE SPAN, not by testing each pixel:
@@ -878,3 +897,49 @@ pub fn render_stage(self: const Stage, cv: graphics::Canvas) {
         }
     }
 }
+
+
+// ── P2: the camera ───────────────────────────────────────────────────────────
+//
+// ⚠ THE CAMERA IS APPLIED AT DRAW TIME, NEVER BAKED INTO NODE POSITIONS.  The
+// three knobs already let an app do parallax by recomputing every node each frame
+// — and that is an O(N) rewrite per scrolled frame AND a full instance re-upload,
+// which is the retained tree's whole budget spent on standing still.  As an offset
+// per run it costs one pair of floats.
+//
+// ⚠ AND IT TRANSLATES, IT DOES NOT SCALE.  Scaling by parallax is a perspective
+// projection and would resize the footprint a base-anchored sprite is aligned to.
+// Distance-as-smaller is the depth CUE's job (`depth_cue`), which scales about the
+// origin and therefore keeps the feet planted; parallax only moves things.
+
+// Move the camera.  Does NOT dirty the instance buffer — that is the point.
+pub fn set_camera(self: Stage, x: float, y: float) {
+    self.st_cam_x = x;
+    self.st_cam_y = y;
+}
+
+pub fn camera_x(self: const Stage) -> float { self.st_cam_x }
+pub fn camera_y(self: const Stage) -> float { self.st_cam_y }
+
+// How much of the camera a layer feels.  1.0 is the world; below that is a
+// background that lags; above it a foreground that leads.  Flat scrolling is every
+// factor at 1.0, which is the degenerate case rather than a second code path.
+pub fn set_parallax(self: Stage, layer: integer, factor: float) {
+    while len(self.st_par) <= layer { self.st_par += [1.0]; }
+    self.st_par[layer] = factor;
+}
+
+pub fn parallax_of(self: const Stage, layer: integer) -> float {
+    if layer < 0 or layer >= len(self.st_par) { return 1.0; }
+    self.st_par[layer] ?? 1.0
+}
+
+// The screen-space offset a layer's content is drawn at.
+pub fn cam_offset(self: const Stage, layer: integer) -> P2 {
+    f = parallax_of(self, layer);
+    P2 { p_x: -self.st_cam_x * f, p_y: -self.st_cam_y * f }
+}
+
+// How many times the instance buffer has been written.  A pure camera move must
+// not move this — the property the whole design turns on.
+pub fn uploads(self: const Stage) -> integer { self.st_uploads }
