@@ -96,3 +96,35 @@ fn test_the_batcher_never_reorders() {
   grouped.compose();
   assert(len(grouped.batches()) == 2, "the same four sprites, packed well, are two runs");
 }
+
+// @STG-005 — a release belongs to the node that took the PRESS, not to whatever
+// is under the pointer now.  This is the half of input routing that a hit test
+// alone does not give you, and leaving it out produces two bugs that both read as
+// "the button is broken": it fires when you press it and slide away, and it fails
+// to fire when you press it and drift a single pixel.  `release` therefore answers
+// the CAPTURED node wherever the pointer went, and `released_on` is the separate
+// question a button actually asks — did the release land back on me.
+fn test_a_release_belongs_to_the_press() {
+  st = stage::stage_new();
+  btn = st.node_add(-1, stage::Place { pl_w: 10.0, pl_h: 10.0 });
+  st.compose();
+  assert(st.press(5.0, 5.0) == btn, "the press lands");
+  assert(st.release(900.0, 900.0) == btn, "the release still belongs to it");
+  assert(!st.released_on(btn, 900.0, 900.0), "but it did not release ON it — no fire");
+  assert(st.press(5.0, 5.0) == btn and st.released_on(btn, 6.0, 6.0), "this one fires");
+}
+
+// @STG-006 — a sprite is mostly holes, so picking samples its ALPHA and a click
+// over a transparent texel reaches what is behind.  A node with no mask is solid,
+// which is what a panel or a tile wants; give a node a mask and its shape becomes
+// its art rather than its rectangle.  You can see through the tree, so you can
+// click through it.
+fn test_a_click_falls_through_a_hole() {
+  st = stage::stage_new();
+  behind = st.node_add(-1, stage::Place { pl_w: 40.0, pl_h: 40.0 });
+  holed = st.add_mask(2, 2, [255, 255, 255, 0]);
+  front = st.node_add(-1, stage::Place { pl_w: 40.0, pl_h: 40.0, pl_mask: holed });
+  st.compose();
+  assert(st.pick(5.0, 5.0) == front, "the opaque quadrant is the front node");
+  assert(st.pick(35.0, 35.0) == behind, "the hole reaches what is behind");
+}

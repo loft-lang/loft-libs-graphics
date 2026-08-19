@@ -52,6 +52,7 @@ pub struct StageNode {
     nd_u1: float,
     nd_v1: float,
     nd_alpha: float,
+    nd_mask: integer,        // index into `st_masks`, or -1 for solid
     nd_a: float,             // derived world affine — read after `compose`
     nd_b: float,
     nd_c: float,
@@ -62,6 +63,19 @@ pub struct StageNode {
 
 pub struct Stage {
     st_nodes: vector<StageNode>,
+    st_masks: vector<Mask>,
+    st_capture: integer,      // the node holding the press, or -1
+}
+
+// An alpha mask: per-texel coverage, row-major, 0..255.
+//
+// A sprite is mostly holes, so a rect test answers the wrong question — you can
+// SEE through a tree, therefore you must be able to CLICK through it.  A node
+// without a mask is solid, which is the right default for a panel or a tile.
+pub struct Mask {
+    m_w: integer,
+    m_h: integer,
+    m_alpha: vector<integer>,
 }
 
 // Where to put a node, and how.  A struct rather than nine parameters because the
@@ -85,6 +99,7 @@ pub struct Place {
     pl_u1: float = 1.0,
     pl_v1: float = 1.0,
     pl_alpha: float = 1.0,
+    pl_mask: integer = -1,   // index from `add_mask`, or -1 for solid
     pl_x: float = 0.0,
     pl_y: float = 0.0,
     pl_rot: float = 0.0,     // radians; +ve turns +x toward +y
@@ -103,7 +118,7 @@ pub struct P2 {
 }
 
 pub fn stage_new() -> Stage {
-    Stage { st_nodes: [] }
+    Stage { st_nodes: [], st_masks: [], st_capture: -1 }
 }
 
 pub fn node_count(self: const Stage) -> integer {
@@ -126,7 +141,7 @@ pub fn node_add(self: Stage, parent: integer, p: const Place) -> integer {
         nd_sx: p.pl_sx, nd_sy: p.pl_sy, nd_ox: p.pl_ox, nd_oy: p.pl_oy,
         nd_w: p.pl_w, nd_h: p.pl_h, nd_colour: p.pl_colour, nd_visible: p.pl_visible,
         nd_atlas: p.pl_atlas, nd_u0: p.pl_u0, nd_v0: p.pl_v0, nd_u1: p.pl_u1,
-        nd_v1: p.pl_v1, nd_alpha: p.pl_alpha,
+        nd_v1: p.pl_v1, nd_alpha: p.pl_alpha, nd_mask: p.pl_mask,
         nd_a: 1.0, nd_b: 0.0, nd_c: 0.0, nd_d: 1.0, nd_tx: 0.0, nd_ty: 0.0,
     }];
     idx
@@ -442,3 +457,108 @@ pub fn gl_render(self: const Stage, p: Painter, screen_w: float, screen_h: float
     }
     calls
 }
+
+
+// ── A4: picking and input routing ────────────────────────────────────────────
+
+// Register an alpha mask and answer its index, for `Place.pl_mask`.
+pub fn add_mask(self: Stage, w: integer, h: integer, alpha: const vector<integer>) -> integer {
+    self.st_masks += [Mask { m_w: w, m_h: h, m_alpha: alpha }];
+    len(self.st_masks) - 1
+}
+
+// Take a screen point into node `idx`'s own space.
+//
+// The world affine is 2x2 plus a translation, so the inverse is closed form —
+// `det = a*d - c*b`, and no general 4x4 inversion is involved.  A degenerate node
+// (zero scale) has no inverse and answers its own origin rather than an infinity.
+pub fn to_local(self: const Stage, idx: integer, sx: float, sy: float) -> P2 {
+    if idx < 0 or idx >= len(self.st_nodes) { return P2 { p_x: 0.0, p_y: 0.0 }; }
+    n = self.st_nodes[idx];
+    det = n.nd_a * n.nd_d - n.nd_c * n.nd_b;
+    if det > -0.000001 and det < 0.000001 {
+        return P2 { p_x: n.nd_ox, p_y: n.nd_oy };
+    }
+    dx = sx - n.nd_tx;
+    dy = sy - n.nd_ty;
+    P2 { p_x: (n.nd_d * dx - n.nd_c * dy) / det ?? 0.0,
+         p_y: (n.nd_a * dy - n.nd_b * dx) / det ?? 0.0 }
+}
+
+// Is this screen point ON node `idx` — inside its rect AND, where it has a mask,
+// on a texel that is not a hole?
+pub fn hits(self: const Stage, idx: integer, sx: float, sy: float) -> boolean {
+    if idx < 0 or idx >= len(self.st_nodes) { return false; }
+    n = self.st_nodes[idx];
+    if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { return false; }
+    l = to_local(self, idx, sx, sy);
+    u = l.p_x - n.nd_ox;
+    v = l.p_y - n.nd_oy;
+    if u < 0.0 or v < 0.0 or u >= n.nd_w or v >= n.nd_h { return false; }
+    if n.nd_mask < 0 or n.nd_mask >= len(self.st_masks) { return true; }
+    // ⚠ Reached through a BOUNDED loop rather than `st_masks[n.nd_mask]`.  A
+    // vector element indexed by an arbitrary integer types as NULLABLE, where a
+    // loop variable narrows to non-null — so the direct form needs a `??` default,
+    // and a default `Mask` would mint a store record on every hit test.
+    solid = true;
+    for mi in 0..len(self.st_masks) {
+        if mi != n.nd_mask { continue; }
+        m = self.st_masks[mi];
+        if m.m_w <= 0 or m.m_h <= 0 { break; }
+        mx = ((u / n.nd_w ?? 0.0) * (m.m_w as float)) as integer;
+        my = ((v / n.nd_h ?? 0.0) * (m.m_h as float)) as integer;
+        if mx < 0 { mx = 0; }
+        if my < 0 { my = 0; }
+        if mx >= m.m_w { mx = m.m_w - 1; }
+        if my >= m.m_h { my = m.m_h - 1; }
+        cover: integer = m.m_alpha[my * m.m_w + mx] ?? 0;
+        solid = cover > 0;
+        break;
+    }
+    solid
+}
+
+// The topmost node under this screen point, or -1.
+// Example: @STG-006 — picking samples alpha, so a click falls through a hole.
+//
+// Walks the draw order BACKWARDS, so the node drawn last — the one on top — is
+// tested first, and insertion order breaks a tie the same way it does when
+// drawing.  One order, two consumers: a pick that disagreed with the picture
+// would be worse than no pick at all.
+pub fn pick(self: const Stage, sx: float, sy: float) -> integer {
+    i = len(self.st_nodes) - 1;
+    while i >= 0 {
+        if hits(self, i, sx, sy) { return i; }
+        i = i - 1;
+    }
+    -1
+}
+
+// A press picks, and REMEMBERS.
+pub fn press(self: Stage, sx: float, sy: float) -> integer {
+    hit = pick(self, sx, sy);
+    self.st_capture = hit;
+    hit
+}
+
+// A release answers the node that took the PRESS, wherever the pointer is now.
+// Example: @STG-005 — why a hit test alone is not input routing.
+//
+// ⚠ THE CAPTURE IS THE POINT, and it is the half everyone forgets.  Without it a
+// button fires when you press it and slide away, and never fires when you press it
+// and drift a pixel — both of which feel broken and neither of which a rect test
+// can explain.  A release with nothing captured answers -1.
+pub fn release(self: Stage, sx: float, sy: float) -> integer {
+    held = self.st_capture;
+    self.st_capture = -1;
+    if held < 0 { return -1; }
+    held
+}
+
+// Did the release land on the node that was pressed?  A button fires only when
+// this is true; `release` still reports the captured node either way.
+pub fn released_on(self: const Stage, idx: integer, sx: float, sy: float) -> boolean {
+    idx >= 0 and hits(self, idx, sx, sy)
+}
+
+pub fn capture(self: const Stage) -> integer { self.st_capture }

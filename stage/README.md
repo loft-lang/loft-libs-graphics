@@ -21,6 +21,8 @@ loft install stage
 - `compose()` — derive every world transform in one forward pass
 - `world_point(idx, lx, ly)` / `world_origin(idx)` — where a local point landed
 - `draw_list() -> vector<DrawRect>` · `render(list, canvas)` · `opaque(colour)`
+- `pick(x, y)` · `hits(idx, x, y)` · `to_local(idx, x, y)` · `press` / `release` /
+  `released_on` / `capture` · `add_mask(w, h, alpha)`
 - `batches() -> vector<Batch>` · `pack_instances() -> vector<single>` ·
   `INSTANCE_STRIDE` / `OFF_AFFINE` / `OFF_UV` / `OFF_RGBA`
 
@@ -61,11 +63,28 @@ composite in call order. The cost is that interleaving two atlases sprite-by-spr
 instance per run — a **packing** problem, cured upstream by putting sprites that draw near
 each other on one page.
 
+## Picking
+
+`pick` walks the draw order **backwards**, so the node drawn last is tested first and
+insertion order breaks a tie exactly as it does when drawing — one order, two consumers.
+`to_local` inverts the world affine in closed form, so rotation and scale are handled without
+a general matrix inversion.
+
+⚠ **Picking samples ALPHA.** Give a node a mask and its shape becomes its art rather than its
+rectangle: a click over a transparent texel reaches whatever is behind it. You can see through
+the tree, so you can click through it. A node with no mask is solid.
+
+⚠ **A release belongs to the press.** `release` answers the node that was pressed wherever the
+pointer has drifted to; `released_on` is the separate question a button asks. Without that
+split a button fires when you press it and slide away, and fails to fire when you press it and
+drift a pixel.
+
 ## Worked examples
 
 `@STG-001` the origin is the anchor · `@STG-002` a parent must already exist ·
 `@STG-003` `compose` is the caller's to run ·
-`@STG-004` the batcher never reorders — [tests/worked-examples.loft](tests/worked-examples.loft).
+`@STG-004` the batcher never reorders ·
+`@STG-005` a release belongs to the press · `@STG-006` a click falls through a hole — [tests/worked-examples.loft](tests/worked-examples.loft).
 
 ## Provenance
 
