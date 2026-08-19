@@ -117,3 +117,29 @@ fn test_one_clip_is_still_one_run() {
   st.compose();
   assert(len(st.batches()) == 1, "same atlas, same clip, one run");
 }
+
+// ⚠ A CLIP AND A CAMERA, TOGETHER — the off-diagonal cell neither phase tested.
+// The clip is derived in WORLD space by `compose`; what it cuts has already been
+// moved by the camera.  Applying it raw cut the wrong region, and a pan wider
+// than the node cut ALL of it: a clipped panel silently disappeared the moment
+// the camera moved.  A6 and P2 were each green alone.
+// A clipping parent at world (0,0) 10x10 with a child filling it.  Pan the
+// camera by 20: the whole thing should move 20 left and stay 10x10.
+fn test_a_clip_follows_its_content_under_a_camera() {
+  st = stage::stage_new();
+  p = st.node_add(-1, stage::Place { pl_w: 10.0, pl_h: 10.0, pl_x: 30.0, pl_y: 0.0,
+                                     pl_clips: true });
+  _ = st.node_add(p, stage::Place { pl_w: 10.0, pl_h: 10.0, pl_colour: 0xc03030 });
+  st.compose();
+  a = graphics::canvas(60, 20, 0xff000000);
+  st.render_stage(a);
+  assert(count_of(a, 0xffc03030) == 100, "unpanned: 10x10 = 100 px, got {count_of(a, 0xffc03030)}");
+  assert(a.get_pixel(35, 5) == 0xffc03030, "and it is at x=30..40");
+
+  st.set_camera(20.0, 0.0);
+  b = graphics::canvas(60, 20, 0xff000000);
+  st.render_stage(b);
+  assert(count_of(b, 0xffc03030) == 100,
+         "panned: STILL 10x10 = 100 px, got {count_of(b, 0xffc03030)}");
+  assert(b.get_pixel(15, 5) == 0xffc03030, "moved to x=10..20");
+}

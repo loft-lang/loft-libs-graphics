@@ -26,6 +26,9 @@ loft install stage
   `released_on` / `capture` · `add_mask(w, h, alpha)`
 - `add_sequence(first, count, fps, mode) -> integer` · `advance(dt_us)` ·
   `frame_of(idx)` · `restart(idx)` · `LOOP` / `ONCE` / `PINGPONG`
+- `add_view(x, y, w, h)` / `view_count()` / `set_view_rect` / `set_view_camera` ·
+  `view_camera_x` / `view_camera_y` / `view_offset` · `render_view(view, canvas)` ·
+  `pick_in(view, x, y)` / `hits_in` / `in_view_rect` · `sync_instances()` · `scissor_of`
 - `set_projection(mode)` / `projection()` · `TOP_DOWN` / `SIDE_ON` ·
   `add_named_sequence(name, …)` · `face(idx, angle)` · `set_action(idx, action)` ·
   `facing_of` / `action_of` / `rotation_of` / `mirrored` · `facing_name(angle)`
@@ -180,6 +183,37 @@ that 100 camera moves change **not one float** of the packed buffer.
 ⚠ **Parallax translates; it does not resize.** Distance-as-smaller is `depth_cue`'s job,
 which scales about the origin so a sprite's feet stay planted. And picking **un-applies the
 camera per layer** — one screen point is a different world point in each.
+
+## Several views over one stage
+
+A **view** is a camera and the screen rect it paints into.  A fresh stage already has one —
+`set_camera` *is* view 0's camera — so an unsplit game is the degenerate case rather than a
+second code path, exactly as parallax 1.0 is for scrolling.
+
+```
+v = st.add_view(400, 0, 400, 600);   // right half of the screen
+st.set_view_camera(v, player2_x, player2_y);
+st.render_view(v, canvas);           // or gl_render, which draws every view
+```
+
+⚠ **A view is presentation, never world.**  The scene cannot tell how many are looking at
+it: adding views adds no nodes and moves nothing.  That is the split this exists to enforce —
+the world is deterministic and shared, the presentation is local and free, so window size,
+camera and ambient motion may differ per viewer and *must* be allowed to.
+
+⚠ **Packed once, drawn N times.**  A second view costs draw calls, never another instance
+upload — P2's *the camera is a uniform* carried to N cameras.  `sync_instances()` is the one
+answer to *when does the buffer get rewritten*, so a count of uploads and the GL path cannot
+disagree about it.
+
+Every view shares one screen-space projection: a view is placed by **offsetting into its rect
+and scissoring to it**, not by remapping the clip volume.  The software and GL paths then stay
+directly comparable — the parity rig A2 and A3b rest on — and a sprite is the same size in
+every view rather than quietly zoomed by a viewport of a different shape.
+
+Picking follows the view the point is in: `pick_in(view, x, y)` un-applies **that** view's
+camera, per layer, and a point outside the view's own rect is not that view's to answer
+whatever its camera would map it to.  `pick` remains view 0's pick.
 
 ## Picking
 

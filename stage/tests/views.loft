@@ -1,0 +1,262 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN144 P6 — several views over one stage.
+//
+// The split this enforces is the useful half: the WORLD is deterministic and
+// shared, the PRESENTATION is local and free.  Two players may look at one scene
+// from two cameras through two viewports, and neither may perturb the other —
+// not its pixels, not its picking, and not the single instance upload they share.
+use stage;
+use graphics;
+
+EPS = 0.000001;
+fn near(a: float, b: float) -> boolean { a - b < EPS and b - a < EPS }
+
+fn same(a: const graphics::Canvas, b: const graphics::Canvas) -> integer {
+  n = 0;
+  for i in 0..len(a.data) { if (a.data[i] ?? 0) != (b.data[i] ?? 0) { n = n + 1; } }
+  n
+}
+fn count_of(cv: const graphics::Canvas, want: integer) -> integer {
+  n = 0;
+  for v in cv.data { if v == want { n = n + 1; } }
+  n
+}
+
+// A mark at world (100, 50), 10 x 10.
+fn marked(st: stage::Stage) -> integer {
+  st.node_add(-1, stage::Place { pl_w: 10.0, pl_h: 10.0, pl_x: 100.0, pl_y: 50.0,
+                                 pl_colour: 0xc03030 })
+}
+
+// ── the degenerate case first ────────────────────────────────────────────────
+
+// A stage nobody split has exactly ONE view, and the old camera calls are that
+// view — one code path, as P2's parallax 1.0 is.
+fn test_one_view_is_the_default_and_the_old_camera_is_it() {
+  st = stage::stage_new();
+  assert(st.view_count() == 1, "a fresh stage already has its view");
+  st.set_camera(7.0, 9.0);
+  assert(near(st.view_camera_x(0), 7.0) and near(st.view_camera_y(0), 9.0),
+         "set_camera writes view 0");
+  st.set_view_camera(0, 3.0, 4.0);
+  assert(near(st.camera_x(), 3.0) and near(st.camera_y(), 4.0),
+         "and reading it back through the old name agrees");
+}
+
+// ── a second view cannot perturb the first ───────────────────────────────────
+
+// ⚠ THE PHASE'S WHOLE CLAIM.  View 0's frame must be byte-identical whether or
+// not a second view exists — otherwise split-screen is a different game.
+fn test_a_second_view_does_not_change_the_first() {
+  alone = stage::stage_new();
+  _ = marked(alone);
+  alone.set_view_rect(0, 0, 0, 200, 100);
+  alone.set_view_camera(0, 60.0, 20.0);
+  alone.compose();
+  ca = graphics::canvas(400, 100, 0xff000000);
+  alone.render_view(0, ca);
+
+  shared = stage::stage_new();
+  _ = marked(shared);
+  shared.set_view_rect(0, 0, 0, 200, 100);
+  shared.set_view_camera(0, 60.0, 20.0);
+  v1 = shared.add_view(200, 0, 200, 100);
+  shared.set_view_camera(v1, -30.0, 5.0);
+  shared.compose();
+  cb = graphics::canvas(400, 100, 0xff000000);
+  shared.render_view(0, cb);
+
+  assert(shared.view_count() == 2, "two views");
+  assert(same(ca, cb) == 0,
+         "view 0 is byte-identical with a second view present — {same(ca, cb)} differ");
+}
+
+// ⚠ TWO VIEWS, ONE UPLOAD.  The scene is packed once and every view draws from
+// it; a view that re-packed would spend A3's entire budget on looking twice.
+// This is P2's property — the camera is a uniform — carried to N cameras.
+fn test_two_views_cost_one_upload() {
+  st = stage::stage_new();
+  _ = marked(st);
+  v1 = st.add_view(200, 0, 200, 100);
+  st.set_view_camera(v1, 40.0, 0.0);
+  st.compose();
+  assert(st.sync_instances(), "the scene is new, so the first pack is an upload");
+  assert(!st.sync_instances(), "nothing changed, so nothing re-packs");
+  st.set_view_camera(v1, 90.0, 0.0);
+  st.set_view_camera(0, -12.0, 3.0);
+  assert(!st.sync_instances(), "moving EITHER camera must not re-pack");
+  assert(st.uploads() == 1, "one upload serves both views — got {st.uploads()}");
+}
+
+// ── each view sees through its own camera ────────────────────────────────────
+
+// Hand-computed.  The mark sits at world x = 100.  View 0 is the rect
+// (0,0,200,100) with its camera at 0, so the mark lands at screen x = 100.
+// View 1 is the rect (200,0,200,100) with its camera at 100, so the mark lands
+// at 100 - 100 + 200 = 200 — the left edge of that viewport, because the camera
+// is looking straight at it.
+fn test_each_view_uses_its_own_camera_and_viewport() {
+  st = stage::stage_new();
+  _ = marked(st);
+  st.set_view_rect(0, 0, 0, 200, 100);
+  v1 = st.add_view(200, 0, 200, 100);
+  st.set_view_camera(v1, 100.0, 0.0);
+  st.compose();
+
+  c0 = graphics::canvas(400, 100, 0xff000000);
+  st.render_view(0, c0);
+  assert(c0.get_pixel(100, 50) == 0xffc03030, "view 0 draws the mark at x=100");
+  assert(count_of(c0, 0xffc03030) == 100, "one 10x10 mark, whole");
+
+  c1 = graphics::canvas(400, 100, 0xff000000);
+  st.render_view(v1, c1);
+  assert(c1.get_pixel(200, 50) == 0xffc03030, "view 1 draws it at its left edge");
+  assert(c1.get_pixel(100, 50) == 0xff000000,
+         "and NOT where view 0 put it — that would be one shared camera");
+  assert(count_of(c1, 0xffc03030) == 100, "still whole, just elsewhere");
+}
+
+// ⚠ A VIEW PAINTS ONLY INSIDE ITS OWN RECT.  Without that, one player's world
+// bleeds across the other's screen, which is the failure everybody sees first.
+fn test_a_view_paints_only_inside_its_viewport() {
+  st = stage::stage_new();
+  _ = marked(st);                       // world x 100..110
+  v1 = st.add_view(200, 0, 200, 100);
+  st.set_view_camera(v1, 0.0, 0.0);     // so it wants to draw at 100..110 + 200
+  st.set_view_camera(0, 0.0, 0.0);
+  st.set_view_rect(0, 0, 0, 200, 100);
+  st.compose();
+
+  c1 = graphics::canvas(400, 100, 0xff000000);
+  st.render_view(v1, c1);
+  assert(count_of(c1, 0xffc03030) == 100, "the mark is drawn, inside the rect");
+  assert(c1.get_pixel(300, 50) == 0xffc03030, "at 100 + 200, its viewport origin");
+
+  // Now push the camera so the mark would land left of the viewport.
+  st.set_view_camera(v1, 150.0, 0.0);   // 100 - 150 + 200 = 150, outside 200..400
+  c2 = graphics::canvas(400, 100, 0xff000000);
+  st.render_view(v1, c2);
+  assert(count_of(c2, 0xffc03030) == 0,
+         "outside the rect it paints NOTHING — {count_of(c2, 0xffc03030)} pixels leaked");
+}
+
+// ── picking follows the view the point is in ─────────────────────────────────
+
+// ⚠ ONE SCREEN POINT IS A DIFFERENT WORLD POINT IN EACH VIEW — the same reason
+// P2 un-applies the camera per LAYER, now per view as well.  A click routed
+// through the wrong view picks the wrong entity, silently.
+fn test_picking_un_applies_the_view_under_the_point() {
+  st = stage::stage_new();
+  m = marked(st);
+  st.set_view_rect(0, 0, 0, 200, 100);
+  v1 = st.add_view(200, 0, 200, 100);
+  st.set_view_camera(v1, 100.0, 0.0);
+  st.compose();
+
+  assert(st.pick_in(0, 105.0, 55.0) == m, "view 0: the mark is at screen 100..110");
+  assert(st.pick_in(0, 205.0, 55.0) == -1, "and nothing of view 0's is over there");
+  assert(st.pick_in(v1, 205.0, 55.0) == m, "view 1: the same mark, at 200..210");
+  assert(st.pick_in(v1, 105.0, 55.0) == -1, "not at view 0's screen position");
+}
+
+// A point outside a view's rect belongs to no entity OF THAT VIEW, whatever the
+// camera would say — the viewport is part of the mapping, not decoration.
+//
+// ⚠ THE CAMERA IS CHOSEN SO THE GUARD IS THE ONLY THING SAYING NO.  View 1's
+// offset is -155 + 200 = 45, so screen x = 150 maps to world x = 105 — squarely
+// inside the mark.  Drop the viewport test and this point PICKS IT, through a
+// view that does not even paint there.  An earlier version of this test put the
+// point where the camera missed anyway, so it passed either way and proved
+// nothing; the control is what exposed that.
+fn test_a_point_outside_a_view_picks_nothing_in_it() {
+  st = stage::stage_new();
+  m = marked(st);
+  st.set_view_rect(0, 0, 0, 200, 100);
+  v1 = st.add_view(200, 0, 200, 100);
+  st.set_view_camera(v1, 155.0, 0.0);
+  st.compose();
+  assert(st.hits_in(v1, m, 150.0, 55.0),
+         "the mark IS under that point as view 1 maps it — 150 - 45 = 105");
+  assert(st.pick_in(v1, 150.0, 55.0) == -1,
+         "but a point in view 0's half is not view 1's to answer");
+}
+
+// The unsplit path is unchanged: `pick` is view 0's pick.
+fn test_pick_is_view_zeros_pick() {
+  st = stage::stage_new();
+  m = marked(st);
+  st.compose();
+  assert(st.pick(105.0, 55.0) == m, "the old entry point still works");
+  st.set_camera(50.0, 0.0);
+  assert(st.pick(55.0, 55.0) == m, "and still un-applies the camera");
+}
+
+// ── presentation is per view, the world is shared ────────────────────────────
+
+// Adding a view adds no nodes, no sequences and no geometry — it is a way of
+// LOOKING, and the scene cannot tell how many are looking.
+fn test_a_view_is_presentation_not_world() {
+  st = stage::stage_new();
+  m = marked(st);
+  st.compose();
+  n_before = st.node_count();
+  b0 = st.bounds_of(m);
+  _ = st.add_view(200, 0, 200, 100);
+  _ = st.add_view(0, 100, 400, 100);
+  st.compose();
+  b1 = st.bounds_of(m);
+  assert(st.node_count() == n_before, "three views, no extra nodes");
+  assert(near(b0.b_x0, b1.b_x0) and near(b0.b_y0, b1.b_y0), "and the world did not move");
+  assert(near(b0.b_x1, b1.b_x1) and near(b0.b_y1, b1.b_y1), "in either corner");
+}
+
+// ── the GL path's own arithmetic ─────────────────────────────────────────────
+//
+// ⚠ GATED DIRECTLY, because `gl_render` needs a GL context these tests do not
+// have.  The scissor rect is the one piece of view arithmetic the software path
+// does NOT share — it narrows integer spans where GL cuts with a rect — so a
+// wrong answer here is a silent wrong picture on the target that ships.  Every
+// rect below is worked out by hand.
+fn batch_at(clipped: boolean, x0: float, y0: float, x1: float, y1: float) -> stage::Batch {
+  stage::Batch { b_layer: 0, b_atlas: 0, b_first: 0, b_count: 1,
+                 b_clipped: clipped, b_cx0: x0, b_cy0: y0, b_cx1: x1, b_cy1: y1 }
+}
+fn zero() -> stage::P2 { stage::P2 { p_x: 0.0, p_y: 0.0 } }
+
+fn test_the_scissor_is_the_view_rect_met_with_the_clip() {
+  st = stage::stage_new();
+  v1 = st.add_view(200, 0, 200, 100);
+
+  // An unbounded view and an unclipped run: nothing is cut.
+  a = st.scissor_of(0, batch_at(false, 0.0, 0.0, 0.0, 0.0), zero());
+  assert(near(a.b_x0, 0.0) and a.b_x1 > 100000.0, "view 0 unbounded, run unclipped");
+
+  // A bounded view, unclipped run: exactly the view's rect.
+  b = st.scissor_of(v1, batch_at(false, 0.0, 0.0, 0.0, 0.0), zero());
+  assert(near(b.b_x0, 200.0) and near(b.b_x1, 400.0), "the viewport, in x");
+  assert(near(b.b_y0, 0.0) and near(b.b_y1, 100.0), "and in y");
+
+  // Unbounded view, clipped run: the clip alone.
+  c = st.scissor_of(0, batch_at(true, 10.0, 10.0, 50.0, 60.0), zero());
+  assert(near(c.b_x0, 10.0) and near(c.b_x1, 50.0), "the clip, in x");
+  assert(near(c.b_y0, 10.0) and near(c.b_y1, 60.0), "and in y");
+
+  // Both: the INTERSECTION, not the innermost — the rule A6 already fixed.
+  d = st.scissor_of(v1, batch_at(true, 100.0, 10.0, 300.0, 60.0), zero());
+  assert(near(d.b_x0, 200.0) and near(d.b_x1, 300.0),
+         "met with the viewport: {d.b_x0}..{d.b_x1}, want 200..300");
+
+  // ⚠ And the clip MOVES WITH ITS CONTENT.  A camera 20 to the right shifts the
+  // cut 20 to the left, exactly as the software path shifts it.
+  e = st.scissor_of(0, batch_at(true, 100.0, 0.0, 200.0, 50.0),
+                    stage::P2 { p_x: -20.0, p_y: 0.0 });
+  assert(near(e.b_x0, 80.0) and near(e.b_x1, 180.0),
+         "panned clip: {e.b_x0}..{e.b_x1}, want 80..180");
+
+  // Disjoint reads as EMPTY, so the caller can tell "cut everything" from "cut
+  // nothing" — an inverted rect handed to GL is undefined behaviour.
+  f = st.scissor_of(v1, batch_at(true, 0.0, 0.0, 50.0, 50.0), zero());
+  assert(f.b_x1 <= f.b_x0, "a run outside the view leaves an empty rect");
+}

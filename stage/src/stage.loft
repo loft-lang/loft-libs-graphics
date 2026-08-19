@@ -85,6 +85,21 @@ pub struct StageNode {
     nd_ty: float,
 }
 
+// A way of LOOKING at the stage: a camera and the screen rect it paints into.
+//
+// ⚠ A VIEW IS PRESENTATION, NEVER WORLD.  The scene cannot tell how many are
+// looking at it — which is the split this phase exists to enforce: the world is
+// deterministic and shared, the presentation is local and free.  Window size,
+// camera and ambient motion may differ per viewer and must be allowed to.
+pub struct View {
+    vw_cam_x: float,
+    vw_cam_y: float,
+    vw_x: integer,           // the screen rect this view paints into
+    vw_y: integer,
+    vw_w: integer,           // 0 or less means unbounded — the whole target
+    vw_h: integer,
+}
+
 pub struct Stage {
     st_nodes: vector<StageNode>,
     st_masks: vector<Mask>,
@@ -96,8 +111,7 @@ pub struct Stage {
     st_cue_scale: float,         // scale at the FAR end; 1.0 at the near end
     st_cue_haze: float,          // haze at the FAR end, 0..1
     st_haze_colour: integer,     // what distance fades toward
-    st_cam_x: float,             // the camera, applied at DRAW time
-    st_cam_y: float,
+    st_views: vector<View>,      // at least one; view 0 is the unsplit camera
     st_par: vector<float>,       // parallax factor per layer; missing means 1.0
     st_uploads: integer,         // instance-buffer uploads — the gate reads this
     st_dirty: boolean,           // does the instance buffer need rewriting?
@@ -199,7 +213,9 @@ pub fn stage_new() -> Stage {
     Stage { st_nodes: [], st_masks: [], st_capture: -1, st_order: [],
             st_cue: false, st_cue_near: 0.0, st_cue_far: 1.0,
             st_cue_scale: 1.0, st_cue_haze: 0.0, st_haze_colour: 0x000000,
-            st_cam_x: 0.0, st_cam_y: 0.0, st_par: [], st_uploads: 0, st_dirty: true,
+            st_views: [View { vw_cam_x: 0.0, vw_cam_y: 0.0, vw_x: 0, vw_y: 0,
+                              vw_w: 0, vw_h: 0 }],
+            st_par: [], st_uploads: 0, st_dirty: true,
             st_time: 0.0, st_seqs: [], st_proj: TOP_DOWN }
 }
 
@@ -728,13 +744,16 @@ pub fn painter_new() -> Painter {
 pub fn gl_render(self: Stage, p: Painter, screen_w: float, screen_h: float) -> integer {
     floats = pack_instances(self);
     if len(floats) == 0 { return 0; }
+    // ⚠ PACKED ONCE, DRAWN PER VIEW.  The upload decision goes through
+    // `sync_instances` so there is ONE answer to *when does the buffer get
+    // rewritten* — a second view is draw calls, never another upload.
+    changed = sync_instances(self);
     if p.pn_ivbo == 0 {
         p.pn_ivbo = graphics::gl_upload_instance_buffer(floats);
         p.pn_cap = len(floats) / INSTANCE_STRIDE ?? 0;
     } else {
-        if self.st_dirty { graphics::gl_update_buffer(p.pn_ivbo, floats); }
+        if changed { graphics::gl_update_buffer(p.pn_ivbo, floats); }
     }
-    if self.st_dirty { self.st_uploads = self.st_uploads + 1; }
     // Premultiplied compositing, to match `pack_instances` and the software path.
     graphics::gl_enable(graphics::GL_BLEND);
     graphics::gl_blend_func(graphics::BLEND_ONE, graphics::BLEND_ONE_MINUS_SRC_ALPHA);
@@ -742,38 +761,77 @@ pub fn gl_render(self: Stage, p: Painter, screen_w: float, screen_h: float) -> i
     graphics::gl_set_uniform_vec2(p.pn_shader, "uScreen", screen_w, screen_h);
     graphics::gl_set_uniform_float(p.pn_shader, "uTime", self.st_time);
     calls = 0;
-    for b in batches(self) {
-        // ⚠ A RUN STARTS PART-WAY INTO THE BUFFER, and there is no first-instance
-        // parameter to say so: `gl_draw_instanced` takes a count and nothing else,
-        // and the base-instance form that would (glDrawArraysInstancedBaseInstance)
-        // is GL 4.2 and is NOT in WebGL 2.  So the offset moves into the ATTRIBUTE
-        // POINTERS — re-bound per run at `b_first * INSTANCE_STRIDE` — which is the
-        // portable way and costs four calls per run rather than a wider draw call.
-        // One uniform pair per run, rather than N rewritten positions.
-        coff = cam_offset(self, b.b_layer);
-        graphics::gl_set_uniform_vec2(p.pn_shader, "uCam", coff.p_x, coff.p_y);
-        base = b.b_first * INSTANCE_STRIDE;
-        graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 1, 4, INSTANCE_STRIDE, base + OFF_AFFINE);
-        graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 2, 2, INSTANCE_STRIDE, base + OFF_AFFINE + 4);
-        graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 3, 4, INSTANCE_STRIDE, base + OFF_CELL);
-        graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 4, 4, INSTANCE_STRIDE, base + OFF_RGBA);
-        graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 5, 2, INSTANCE_STRIDE, base + OFF_SWAY);
-        if b.b_clipped {
-            graphics::gl_enable(graphics::GL_SCISSOR_TEST);
-            // Scissor is measured from the BOTTOM, the screen from the top.
-            sy = screen_h - b.b_cy1;
-            graphics::gl_scissor(b.b_cx0 as integer, sy as integer,
-                                 (b.b_cx1 - b.b_cx0) as integer,
-                                 (b.b_cy1 - b.b_cy0) as integer);
-        } else {
-            graphics::gl_disable(graphics::GL_SCISSOR_TEST);
+    for v in 0..len(self.st_views) {
+        vp = view_at(self, v);
+        for b in batches(self) {
+            // ⚠ A RUN STARTS PART-WAY INTO THE BUFFER, and there is no first-instance
+            // parameter to say so: `gl_draw_instanced` takes a count and nothing else,
+            // and the base-instance form that would (glDrawArraysInstancedBaseInstance)
+            // is GL 4.2 and is NOT in WebGL 2.  So the offset moves into the ATTRIBUTE
+            // POINTERS — re-bound per run at `b_first * INSTANCE_STRIDE` — which is the
+            // portable way and costs four calls per run rather than a wider draw call.
+            // One uniform pair per run, rather than N rewritten positions.
+            coff = view_offset(self, v, b.b_layer);
+            graphics::gl_set_uniform_vec2(p.pn_shader, "uCam", coff.p_x, coff.p_y);
+            base = b.b_first * INSTANCE_STRIDE;
+            graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 1, 4, INSTANCE_STRIDE, base + OFF_AFFINE);
+            graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 2, 2, INSTANCE_STRIDE, base + OFF_AFFINE + 4);
+            graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 3, 4, INSTANCE_STRIDE, base + OFF_CELL);
+            graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 4, 4, INSTANCE_STRIDE, base + OFF_RGBA);
+            graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 5, 2, INSTANCE_STRIDE, base + OFF_SWAY);
+            // The scissor is the view's rect intersected with the batch's clip —
+            // computed in one place so a view boundary and a clip boundary cannot
+            // be enforced by two different rules.
+            sc = scissor_of(self, v, b, coff);
+            if sc.b_x1 > sc.b_x0 and sc.b_y1 > sc.b_y0 {
+                graphics::gl_enable(graphics::GL_SCISSOR_TEST);
+                // Scissor is measured from the BOTTOM, the screen from the top.
+                graphics::gl_scissor(sc.b_x0 as integer,
+                                     (screen_h - sc.b_y1) as integer,
+                                     (sc.b_x1 - sc.b_x0) as integer,
+                                     (sc.b_y1 - sc.b_y0) as integer);
+            } else {
+                if vp.vw_w > 0 or b.b_clipped {
+                    // Nothing of this run is visible in this view.
+                    graphics::gl_enable(graphics::GL_SCISSOR_TEST);
+                    graphics::gl_scissor(0, 0, 0, 0);
+                } else {
+                    graphics::gl_disable(graphics::GL_SCISSOR_TEST);
+                }
+            }
+            graphics::gl_draw_instanced(p.pn_vao, 6, b.b_count);
+            calls = calls + 1;
         }
-        graphics::gl_draw_instanced(p.pn_vao, 6, b.b_count);
-        calls = calls + 1;
     }
     graphics::gl_disable(graphics::GL_SCISSOR_TEST);
-    self.st_dirty = false;
     calls
+}
+
+// The screen rect a run may paint in: the view's own rect, intersected with the
+// batch's clip once that clip is moved by the same offset as its content.
+//
+// An unbounded rect is spelled as the whole target rather than as a flag, so the
+// intersection is arithmetic in every case and the unsplit stage is the
+// degenerate cell rather than a second path.
+pub fn scissor_of(self: const Stage, view: integer, b: const Batch, coff: const P2) -> Bounds {
+    vp = view_at(self, view);
+    x0 = 0.0;
+    y0 = 0.0;
+    x1 = 1000000.0;
+    y1 = 1000000.0;
+    if vp.vw_w > 0 and vp.vw_h > 0 {
+        x0 = vp.vw_x as float;
+        y0 = vp.vw_y as float;
+        x1 = (vp.vw_x + vp.vw_w) as float;
+        y1 = (vp.vw_y + vp.vw_h) as float;
+    }
+    if b.b_clipped {
+        if b.b_cx0 + coff.p_x > x0 { x0 = b.b_cx0 + coff.p_x; }
+        if b.b_cy0 + coff.p_y > y0 { y0 = b.b_cy0 + coff.p_y; }
+        if b.b_cx1 + coff.p_x < x1 { x1 = b.b_cx1 + coff.p_x; }
+        if b.b_cy1 + coff.p_y < y1 { y1 = b.b_cy1 + coff.p_y; }
+    }
+    Bounds { b_x0: x0, b_y0: y0, b_x1: x1, b_y1: y1 }
 }
 
 
@@ -806,16 +864,13 @@ pub fn to_local(self: const Stage, idx: integer, sx: float, sy: float) -> P2 {
 // Is this screen point ON node `idx` — inside its rect AND, where it has a mask,
 // on a texel that is not a hole?
 pub fn hits(self: const Stage, idx: integer, sx: float, sy: float) -> boolean {
-    if idx < 0 or idx >= len(self.st_nodes) { return false; }
+    hits_in(self, 0, idx, sx, sy)
+}
+
+// Is the node's own texel at this LOCAL point solid?  Split out of `hits` so the
+// per-view test uses the same sampling rather than a second copy of it.
+fn solid_at(self: const Stage, idx: integer, u: float, v: float) -> boolean {
     n = self.st_nodes[idx];
-    if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { return false; }
-    // ⚠ Un-applied PER LAYER: one screen point is a different world point in each,
-    // so a single inverse would pick the wrong thing the moment a layer lags.
-    off = cam_offset(self, n.nd_layer);
-    l = to_local(self, idx, sx - off.p_x, sy - off.p_y);
-    u = l.p_x;
-    v = l.p_y;
-    if u < 0.0 or v < 0.0 or u >= n.nd_w or v >= n.nd_h { return false; }
     if n.nd_mask < 0 or n.nd_mask >= len(self.st_masks) { return true; }
     // ⚠ Reached through a BOUNDED loop rather than `st_masks[n.nd_mask]`.  A
     // vector element indexed by an arbitrary integer types as NULLABLE, where a
@@ -847,13 +902,7 @@ pub fn hits(self: const Stage, idx: integer, sx: float, sy: float) -> boolean {
 // drawing.  One order, two consumers: a pick that disagreed with the picture
 // would be worse than no pick at all.
 pub fn pick(self: const Stage, sx: float, sy: float) -> integer {
-    k = len(self.st_order) - 1;
-    while k >= 0 {
-        i = self.st_order[k] ?? -1;
-        if hits(self, i, sx, sy) { return i; }
-        k = k - 1;
-    }
-    -1
+    pick_in(self, 0, sx, sy)
 }
 
 // A press picks, and REMEMBERS.
@@ -909,6 +958,21 @@ fn over(src: integer, dst: integer, ia: integer) -> integer {
 // carries 0xRRGGBB and no alpha by design.  This is the stage's own path, where a
 // node has an alpha to respect — and the two must agree wherever alpha is 1.
 pub fn render_stage(self: const Stage, cv: graphics::Canvas) {
+    render_view(self, 0, cv);
+}
+
+// Paint one VIEW of the scene: the same nodes, through that view's camera, and
+// confined to its own screen rect.
+//
+// ⚠ THE VIEWPORT NARROWS THE SPAN, it does not test each pixel — the same
+// technique A6's clip uses, so the boundary falls where the arithmetic puts it
+// rather than where a per-pixel predicate rounds it, and the two cannot disagree
+// about a shared edge.
+pub fn render_view(self: const Stage, view: integer, cv: graphics::Canvas) {
+    vpx = view_at(self, view).vw_x;
+    vpy = view_at(self, view).vw_y;
+    vpw = view_at(self, view).vw_w;
+    vph = view_at(self, view).vw_h;
     for i in self.st_order {
         n = self.st_nodes[i];
         if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { continue; }
@@ -929,7 +993,7 @@ pub fn render_stage(self: const Stage, cv: graphics::Canvas) {
         sb = (cb * ia + 127) / 255 ?? 0;
         o = world_point(self, i, 0.0, 0.0);
         far = world_point(self, i, n.nd_w, n.nd_h);
-        off = cam_offset(self, n.nd_layer);
+        off = view_offset(self, view, n.nd_layer);
         sw = sway_of(self, i);
         x0 = (o.p_x + off.p_x + sw) as integer;
         y0 = (o.p_y + off.p_y) as integer;
@@ -940,15 +1004,29 @@ pub fn render_stage(self: const Stage, cv: graphics::Canvas) {
         // The clip is applied by NARROWING THE SPAN, not by testing each pixel:
         // the boundary then falls where the arithmetic puts it rather than where a
         // per-pixel predicate rounds it.
+        // ⚠ THE CLIP TAKES THE SAME OFFSET AS THE CONTENT.  It is derived in WORLD
+        // space by `compose`, while what it cuts has already been moved by the
+        // camera and the viewport — so applying it raw cut the wrong region, and
+        // a pan of more than the node's own width cut ALL of it: a clipped panel
+        // silently disappeared the moment the camera moved.  A6 and P2 each
+        // shipped green because no test moved a camera across a clip.
         if n.nd_clipped {
-            k0 = n.nd_cx0 as integer;
-            k1 = n.nd_cx1 as integer;
-            l0 = n.nd_cy0 as integer;
-            l1 = n.nd_cy1 as integer;
+            k0 = (n.nd_cx0 + off.p_x) as integer;
+            k1 = (n.nd_cx1 + off.p_x) as integer;
+            l0 = (n.nd_cy0 + off.p_y) as integer;
+            l1 = (n.nd_cy1 + off.p_y) as integer;
             if k0 > x0 { x0 = k0; }
             if l0 > y0 { y0 = l0; }
             if k1 < x1 { x1 = k1; }
             if l1 < y1 { y1 = l1; }
+        }
+        // The view's own rect, narrowed the same way.  An unbounded view (width
+        // or height 0) confines nothing, which is the unsplit stage.
+        if vpw > 0 and vph > 0 {
+            if vpx > x0 { x0 = vpx; }
+            if vpy > y0 { y0 = vpy; }
+            if vpx + vpw < x1 { x1 = vpx + vpw; }
+            if vpy + vph < y1 { y1 = vpy + vph; }
         }
         for py in y0..y1 {
             for px in x0..x1 {
@@ -980,13 +1058,14 @@ pub fn render_stage(self: const Stage, cv: graphics::Canvas) {
 // origin and therefore keeps the feet planted; parallax only moves things.
 
 // Move the camera.  Does NOT dirty the instance buffer — that is the point.
-pub fn set_camera(self: Stage, x: float, y: float) {
-    self.st_cam_x = x;
-    self.st_cam_y = y;
-}
+//
+// An unsplit stage IS a one-view stage, so this is view 0's camera rather than a
+// second place a camera can live — the same move P2 made with parallax, where
+// flat scrolling is every factor at 1.0 instead of a separate path.
+pub fn set_camera(self: Stage, x: float, y: float) { set_view_camera(self, 0, x, y); }
 
-pub fn camera_x(self: const Stage) -> float { self.st_cam_x }
-pub fn camera_y(self: const Stage) -> float { self.st_cam_y }
+pub fn camera_x(self: const Stage) -> float { view_camera_x(self, 0) }
+pub fn camera_y(self: const Stage) -> float { view_camera_y(self, 0) }
 
 // How much of the camera a layer feels.  1.0 is the world; below that is a
 // background that lags; above it a foreground that leads.  Flat scrolling is every
@@ -1001,10 +1080,9 @@ pub fn parallax_of(self: const Stage, layer: integer) -> float {
     self.st_par[layer] ?? 1.0
 }
 
-// The screen-space offset a layer's content is drawn at.
+// The screen-space offset a layer's content is drawn at, in view 0.
 pub fn cam_offset(self: const Stage, layer: integer) -> P2 {
-    f = parallax_of(self, layer);
-    P2 { p_x: -self.st_cam_x * f, p_y: -self.st_cam_y * f }
+    view_offset(self, 0, layer)
 }
 
 // How many times the instance buffer has been written.  A pure camera move must
@@ -1276,4 +1354,134 @@ pub fn rotation_of(self: const Stage, idx: integer) -> float {
 pub fn mirrored(self: const Stage, idx: integer) -> boolean {
     if idx < 0 or idx >= len(self.st_nodes) { return false; }
     self.st_nodes[idx].nd_mirror
+}
+
+
+// ── P6: several views over one stage ─────────────────────────────────────────
+//
+// ⚠ ONE SCENE, PACKED ONCE, DRAWN N TIMES.  A view carries only a camera and a
+// screen rect, so adding one costs a draw pass and never a re-pack — which is
+// P2's *the camera is a uniform* carried to N cameras.  A view that baked its
+// camera into node positions would spend A3's entire budget on looking twice.
+//
+// ⚠ AND EVERY VIEW SHARES ONE SCREEN-SPACE PROJECTION.  A view is placed by
+// OFFSETTING into its rect and scissoring to it, not by remapping the clip
+// volume: the software path and the GL path then stay directly comparable — the
+// parity rig A2 and A3b rest on — and a sprite is the same size in every view
+// rather than quietly zoomed by a viewport of a different shape.
+
+pub fn view_count(self: const Stage) -> integer { len(self.st_views) }
+
+// Add a view painting into the screen rect `(x, y, w, h)`.  A width of 0 or less
+// means unbounded — the whole target, which is what view 0 starts as.
+pub fn add_view(self: Stage, x: integer, y: integer, w: integer,
+                h: integer) -> integer {
+    self.st_views += [View { vw_cam_x: 0.0, vw_cam_y: 0.0, vw_x: x, vw_y: y,
+                             vw_w: w, vw_h: h }];
+    len(self.st_views) - 1
+}
+
+pub fn set_view_rect(self: Stage, view: integer, x: integer, y: integer,
+                     w: integer, h: integer) {
+    if view < 0 or view >= len(self.st_views) { return; }
+    self.st_views[view].vw_x = x;
+    self.st_views[view].vw_y = y;
+    self.st_views[view].vw_w = w;
+    self.st_views[view].vw_h = h;
+}
+
+// Move one view's camera.  Like `set_camera`, it does not dirty the buffer.
+pub fn set_view_camera(self: Stage, view: integer, x: float, y: float) {
+    if view < 0 or view >= len(self.st_views) { return; }
+    self.st_views[view].vw_cam_x = x;
+    self.st_views[view].vw_cam_y = y;
+}
+
+fn view_at(self: const Stage, view: integer) -> View {
+    if view < 0 or view >= len(self.st_views) {
+        return View { vw_cam_x: 0.0, vw_cam_y: 0.0, vw_x: 0, vw_y: 0,
+                      vw_w: 0, vw_h: 0 };
+    }
+    // ⚠ ONE OWNERSHIP VERDICT ON EVERY PATH.  Answering `self.st_views[view]`
+    // directly is a BORROW, while the guard above answers a FRESH record — one
+    // function telling its caller two different things about who frees the
+    // result — and on `--native` that corrupted the store several calls later,
+    // reading canvas pixels as a record number (loft#1017).  Copying the fields
+    // out makes every return fresh.
+    v = self.st_views[view] ?? View { vw_cam_x: 0.0, vw_cam_y: 0.0, vw_x: 0,
+                                      vw_y: 0, vw_w: 0, vw_h: 0 };
+    View { vw_cam_x: v.vw_cam_x, vw_cam_y: v.vw_cam_y, vw_x: v.vw_x,
+           vw_y: v.vw_y, vw_w: v.vw_w, vw_h: v.vw_h }
+}
+
+pub fn view_camera_x(self: const Stage, view: integer) -> float {
+    view_at(self, view).vw_cam_x
+}
+
+pub fn view_camera_y(self: const Stage, view: integer) -> float {
+    view_at(self, view).vw_cam_y
+}
+
+// Where a layer's content lands on screen in this view: the camera un-applied by
+// the layer's parallax, then moved into the view's rect.
+//
+// ⚠ THE VIEWPORT ORIGIN IS PART OF THE MAPPING, not decoration.  Leave it out and
+// both views draw on top of each other while every camera test still passes.
+pub fn view_offset(self: const Stage, view: integer, layer: integer) -> P2 {
+    v = view_at(self, view);
+    f = parallax_of(self, layer);
+    P2 { p_x: -v.vw_cam_x * f + (v.vw_x as float),
+         p_y: -v.vw_cam_y * f + (v.vw_y as float) }
+}
+
+// Pack the instance buffer if the scene changed, and say whether it did.
+//
+// One home for *when does the buffer get rewritten*, so the GL path and any
+// count of uploads cannot disagree about it — and so N views can be shown to
+// cost ONE upload without a GL context to prove it in.
+pub fn sync_instances(self: Stage) -> boolean {
+    if !self.st_dirty { return false; }
+    self.st_uploads = self.st_uploads + 1;
+    self.st_dirty = false;
+    true
+}
+
+// The topmost node under a screen point AS THAT VIEW SEES IT, or -1.
+//
+// ⚠ ONE SCREEN POINT IS A DIFFERENT WORLD POINT IN EACH VIEW — the same reason
+// P2 un-applies the camera per LAYER.  A point outside the view's own rect is
+// not that view's to answer, whatever its camera would map it to.
+pub fn pick_in(self: const Stage, view: integer, sx: float, sy: float) -> integer {
+    if !in_view_rect(self, view, sx, sy) { return -1; }
+    k = len(self.st_order) - 1;
+    while k >= 0 {
+        i = self.st_order[k] ?? -1;
+        if hits_in(self, view, i, sx, sy) { return i; }
+        k = k - 1;
+    }
+    -1
+}
+
+// Is this screen point inside the view's rect?  An unbounded view holds every
+// point, which is what keeps the unsplit stage a single code path.
+pub fn in_view_rect(self: const Stage, view: integer, sx: float, sy: float) -> boolean {
+    v = view_at(self, view);
+    if v.vw_w <= 0 or v.vw_h <= 0 { return true; }
+    // Half-open, as A4's picking rects are, so abutting views never both claim
+    // a pixel — the seam of a split screen is exactly where that would show.
+    sx >= (v.vw_x as float) and sy >= (v.vw_y as float)
+        and sx < ((v.vw_x + v.vw_w) as float)
+        and sy < ((v.vw_y + v.vw_h) as float)
+}
+
+// Does this node cover the screen point, as `view` maps it?
+pub fn hits_in(self: const Stage, view: integer, idx: integer, sx: float,
+               sy: float) -> boolean {
+    if idx < 0 or idx >= len(self.st_nodes) { return false; }
+    n = self.st_nodes[idx];
+    if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { return false; }
+    off = view_offset(self, view, n.nd_layer);
+    l = to_local(self, idx, sx - off.p_x, sy - off.p_y);
+    if l.p_x < 0.0 or l.p_y < 0.0 or l.p_x >= n.nd_w or l.p_y >= n.nd_h { return false; }
+    solid_at(self, idx, l.p_x, l.p_y)
 }
