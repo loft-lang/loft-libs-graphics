@@ -26,10 +26,50 @@ A face baked in as data needs none of the three.
 - `text_width(s, scale)` · `line_height(scale)` · `blit_glyph(canvas, code, …)`
 - `atlas_new(scale, capacity)` · `layout(s, x, y) -> vector<Quad>` ·
   `draw_quads(canvas, atlas, quads, colour)` · `atlas_writes()` · `atlas_glyph_count()`
+- `metrics_measured(wide_run, narrow_run, n, line_h)` · `metrics_builtin(scale)` ·
+  `Metrics.width(s)` / `.fits(s, px)` / `.fit_text(s, px)` / `.advance()` /
+  `.advance64()` / `.height()` / `.is_mono()`
 
 ⚠ `write_text`, not `draw_text`: `graphics` has a `draw_text` **method** on `Canvas`, and a
 method spelling outranks a library's free function of the same name (loft#940). A distinct
 verb costs nothing and is reachable.
+
+## Measuring a real font — the metrics seam
+
+This package has no GL context and no font file, so it cannot measure a real face itself.
+The consumer measures **once at startup** through whichever backend resolved and hands the
+numbers over; `Metrics` turns them into the answers a layout needs. That keeps `text2d`
+headless while still serving a game that ships a real TTF — and `metrics_builtin(scale)`
+answers through the same seam, so a layout written against it works with no font at all.
+
+⚠ **Two runs, because one cannot answer the question.** Ten M's are ten M's in any font: a
+single measurement gives the advance of an M and says nothing about whether the face is
+fixed-pitch. `metrics_measured` takes `n` copies of a **wide** character and `n` of a
+**narrow** one and compares them. This is not hypothetical — asking for
+`DejaVuSansMono.ttf` gives a fixed-pitch face on the desktop and a **proportional fallback
+in the browser**, because the browser resolves the base name to a CSS family it does not
+know. The advance comes from the **wide** run: under fixed pitch the two agree, and when
+they do not, the wider one over-estimates rather than overflowing.
+
+⚠ **The advance is carried in 1/64 px, and that is not a detail.** DejaVu Sans Mono at 16 px
+advances 9.6 px, which a whole-pixel field truncates to 9 — and the error is per
+*character*, so it accumulates: a 60-character line comes out **36 px short**. The gate
+states it as a property rather than a war story — that line measures 576 px, and **no
+integer advance can produce 576 over 60 characters** — so a whole-pixel field provably
+cannot hold this face. 1/64 is the unit fonts are hinted in and keeps the residual under one
+pixel over any line a panel can hold.
+
+⚠ **Widths round outward.** An over-estimate reserves a pixel too many and the text still
+fits; an under-estimate spills out of a box that was just measured as fitting.
+
+`Metrics.width` is the **advance** extent — what you reserve a box by. `text_width` is the
+built-in face's **ink** extent — what you centre by. They differ by exactly the one trailing
+gap the ink extent leaves off, and answer different questions.
+
+`fit_text` returns the string **untouched** when it fits, so a caller cannot tell "fitted"
+from "never measured" by looking for the marker. The marker is `".."` and not a single `…`:
+the ellipsis is one code point but several bytes, and a marker whose own width is ambiguous
+is the wrong thing to measure a truncation with.
 
 ## The glyph atlas
 

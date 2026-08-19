@@ -1,0 +1,153 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN145 B1m — the metrics seam.
+//
+// `text2d` has no GL and no font file, so it cannot measure a real face itself.
+// The consumer measures ONCE at startup through whichever backend resolved and
+// hands the numbers over; this seam turns them into the answers a layout needs.
+// Both halves of its shape are findings rather than preferences, and both are
+// gated below: two runs are needed to know whether the resolved face is even
+// fixed-pitch, and the advance has to be sub-pixel or the error accumulates.
+use text2d;
+
+// A 16 px DejaVu Sans Mono advances 9.6 px — the real case that motivated this.
+// Ten of them measure 96.0.
+WIDE_10 = 96.0;
+NARROW_10 = 96.0;      // same, because the face really is fixed-pitch
+LINE_H = 19;
+
+// ── two runs, because one cannot answer the question ────────────────────────
+
+// ⚠ TEN M's ARE TEN M's IN ANY FONT.  A single measurement gives the advance of
+// an M and says NOTHING about whether the face is fixed-pitch.  Two
+// same-length, opposite-width runs answer it in one comparison — and this is not
+// hypothetical: asking for `DejaVuSansMono.ttf` gives a fixed-pitch face on the
+// desktop and a PROPORTIONAL fallback in the browser, because the browser
+// resolves the base name to a CSS family it does not know.
+fn test_two_runs_decide_fixed_pitch() {
+  mono = text2d::metrics_measured(WIDE_10, NARROW_10, 10, LINE_H);
+  prop = text2d::metrics_measured(WIDE_10, 42.0, 10, LINE_H);
+  assert(mono.is_mono(), "equal runs: the face really is fixed-pitch");
+  assert(!prop.is_mono(), "different runs: it is proportional, whatever was asked for");
+  // ⚠ AND THE ADVANCE COMES FROM THE WIDE RUN in both cases.  Under fixed pitch
+  // the two agree; when they do not, the wider one is the safe basis for a
+  // fits-in-the-box question — it over-estimates instead of overflowing.
+  assert(mono.advance() == prop.advance(),
+         "the narrow run informs `mono`, never the advance");
+}
+
+// ── the advance is sub-pixel, and that is not a detail ──────────────────────
+
+// Hand-computed: 96.0 over ten characters is 9.6 px, and 9.6 x 64 = 614.4, which
+// stores as 614.
+fn test_the_advance_is_carried_in_sixty_fourths() {
+  m = text2d::metrics_measured(WIDE_10, NARROW_10, 10, LINE_H);
+  assert(m.advance64() == 614, "9.6 px in 1/64 px — got {m.advance64()}");
+  assert(m.advance() == 10, "and 10 px when a caller wants whole pixels to show");
+  assert(m.height() == LINE_H, "line height passes straight through");
+}
+
+// ⚠ THE REASON THE FIELD IS SUB-PIXEL, stated as a property rather than as a
+// war story: a 60-character line of this face is 576 px, and NO whole-pixel
+// advance can produce that number.  9 gives 540 and 10 gives 600 — the first
+// under-estimates by 36 px, which is how a subject line came out 31 px narrower
+// than it rasterised, and under-estimating is the direction that overflows a box
+// already proved to fit.
+fn test_no_whole_pixel_advance_can_express_this_face() {
+  m = text2d::metrics_measured(WIDE_10, NARROW_10, 10, LINE_H);
+  line = "";
+  for _i in 0..60 { line += "M"; }
+  assert(m.width(line) == 576, "60 chars measure 576 px — got {m.width(line)}");
+  hits = 0;
+  for a in 0..64 { if a * 60 == 576 { hits = hits + 1; } }
+  assert(hits == 0,
+         "no integer advance yields 576 over 60 characters, so a whole-pixel field cannot hold this face");
+}
+
+// ⚠ ROUNDS OUTWARD, ALWAYS.  The residual is a fraction of a pixel per
+// character and the safe direction to spend it is outwards: an over-estimate
+// reserves a pixel too many and the text still fits, an under-estimate spills
+// out of a box that was just measured as fitting.
+fn test_the_width_never_under_estimates() {
+  m = text2d::metrics_measured(WIDE_10, NARROW_10, 10, LINE_H);
+  s = "";
+  for i in 0..40 {
+    s += "M";
+    // The true extent is (i+1) x 614/64, rounded UP; the seam must never answer
+    // less than the exact 1/64 arithmetic.
+    exact = (((i + 1) * 614 + 63) / 64) ?? 0;
+    assert(m.width(s) >= exact, "{i + 1} chars: {m.width(s)} < {exact}");
+    assert(m.width(s) == exact, "and it is exactly the rounded-up value");
+  }
+}
+
+// A face nobody measured answers zero rather than a plausible number, so a
+// caller cannot mistake "not measured" for "everything fits".
+fn test_unmeasured_metrics_are_zero_not_plausible() {
+  m = text2d::metrics_measured(96.0, 96.0, 0, LINE_H);
+  assert(m.advance64() == 0, "a run of zero characters measures nothing");
+  assert(!m.is_mono(), "and claims nothing about pitch");
+  assert(m.height() == LINE_H, "the line height was not measured, it was told");
+}
+
+// ── the built-in face measures itself through the same seam ─────────────────
+
+// ⚠ ONE SEAM, TWO SOURCES.  The 5x7 face can answer through `Metrics` too, so a
+// layout written against the seam works with no font file at all — and the two
+// numbers it exposes are DIFFERENT QUESTIONS, which this pins: `text_width` is
+// the INK extent (what you centre by) and `Metrics.width` is the ADVANCE extent
+// (what you reserve a box by).  They differ by exactly the one trailing gap the
+// ink extent leaves off.
+fn test_the_builtin_face_answers_through_the_seam() {
+  for scale in 1..3 {
+    m = text2d::metrics_builtin(scale);
+    assert(m.is_mono(), "a bitmap face is fixed-pitch by construction");
+    assert(m.advance() == 6 * scale, "5 px glyph + 1 px gap, scaled");
+    assert(m.height() == text2d::line_height(scale), "and its line height agrees");
+    for s in ["A", "ABCDE"] {
+      ink = text2d::text_width(s, scale);
+      assert(m.width(s) == ink + scale,
+             "scale {scale} {s}: advance {m.width(s)} vs ink {ink} — one trailing gap apart");
+    }
+  }
+}
+
+// ── fitting ─────────────────────────────────────────────────────────────────
+
+fn test_fits_answers_the_box_question() {
+  m = text2d::metrics_builtin(1);              // 6 px per character
+  assert(m.fits("ABCDE", 30), "5 x 6 = 30 fits exactly");
+  assert(!m.fits("ABCDE", 29), "and one pixel less does not");
+}
+
+// ⚠ AN UNTOUCHED STRING COMES BACK UNTOUCHED.  A caller must not be able to tell
+// "fitted" from "never measured" by looking for the marker, so the marker only
+// ever appears when something was actually removed.
+fn test_fit_text_marks_only_a_real_cut() {
+  m = text2d::metrics_builtin(1);
+  assert(m.fit_text("ABCDE", 30) == "ABCDE", "it fits, so it is returned whole");
+  assert(m.fit_text("ABCDE", 300) == "ABCDE", "room to spare changes nothing");
+  cut = m.fit_text("ABCDEFGHIJ", 30);
+  assert(cut != "ABCDEFGHIJ", "it does not fit, so it was cut");
+  assert(cut.ends_with(".."), "and the cut is marked: got {cut}");
+  // ⚠ ".." AND NOT A SINGLE ELLIPSIS.  The ellipsis is one code point but three
+  // bytes, and a marker whose own width is ambiguous is the wrong thing to
+  // measure a truncation with.
+  assert(!cut.contains("…"), "the marker is two full stops, not an ellipsis");
+}
+
+// A box too small for the marker itself still gets an honest answer rather than
+// a string that is wider than the box it was asked to fit.
+fn test_a_box_too_small_for_the_marker_still_fits() {
+  m = text2d::metrics_builtin(1);              // 6 px per character
+  assert(m.fit_text("ABCDEFGH", 12) == "AB", "room for two characters, no marker");
+  assert(m.fit_text("ABCDEFGH", 3) == "", "no room for even one");
+}
+
+// An unmeasured face cannot truncate, so it returns the string rather than
+// silently emptying every label on the screen.
+fn test_an_unmeasured_face_does_not_truncate() {
+  m = text2d::metrics_measured(0.0, 0.0, 0, LINE_H);
+  assert(m.fit_text("ABCDEFGH", 10) == "ABCDEFGH", "nothing measured, nothing cut");
+}

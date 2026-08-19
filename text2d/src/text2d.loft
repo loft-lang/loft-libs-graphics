@@ -204,3 +204,119 @@ pub fn draw_quads(cv: graphics::Canvas, atlas: const Atlas, quads: const vector<
     }
   }
 }
+
+
+// ── B1m: the metrics seam ────────────────────────────────────────────────────
+//
+// This package has no GL context and no font file, so it cannot measure a real
+// face itself.  The consumer measures ONCE at startup through whichever backend
+// resolved and hands the numbers over; everything a layout needs is derived
+// here.  That keeps `text2d` headless — the property `B0` exists for — while
+// still serving a game that ships a real TTF.
+
+// What the consumer measured.
+//
+// ⚠ `m_mono` IS A FACT ABOUT THE FACE THAT RESOLVED, not the one that was asked
+// for.  Requesting `DejaVuSansMono.ttf` gives a fixed-pitch face on the desktop
+// and a PROPORTIONAL fallback in the browser, because the browser resolves the
+// base name to a CSS family it does not know.  Only a measurement can tell.
+pub struct Metrics {
+    // ⚠ THE ADVANCE IS IN 1/64 PIXEL, and a whole-pixel field is what this
+    // replaces.  DejaVu Sans Mono at 16 px advances 9.6 px, which truncates to
+    // 9 — and the error is per CHARACTER, so it accumulates: a 60-character
+    // line comes out 36 px short.  Under-estimating is the dangerous direction,
+    // because a fit check then believes more fits than does and the text
+    // overflows the box it was just proved to fit, silently.
+    //
+    // 1/64 is the unit fonts are hinted in, and it keeps the residual under one
+    // pixel over any line a panel can hold.
+    m_adv64: integer,        // advance in 1/64 px
+    m_line_h: integer,       // line height in whole px
+    m_mono: boolean,         // is the resolved face actually fixed-pitch?
+}
+
+// Build metrics from two runs the consumer measured: `n` copies of a WIDE
+// character and `n` copies of a NARROW one.
+//
+// ⚠ THE TWO RUNS ARE THE WHOLE INSTRUMENT, and one width cannot replace them.
+// Ten M's are ten M's in any font, so a single measurement gives the advance of
+// an M and nothing about whether the face is fixed-pitch.  Two same-length,
+// opposite-width strings answer it in one comparison.
+//
+// The advance is taken from the WIDE run: under fixed pitch the two agree, and
+// when they do not, the wider one is the safe basis for a fits-in-the-box
+// question — it over-estimates rather than overflowing.
+pub fn metrics_measured(wide_run: float, narrow_run: float, n: integer,
+                        line_h: integer) -> Metrics {
+    if n <= 0 {
+        return Metrics { m_adv64: 0, m_line_h: line_h, m_mono: false };
+    }
+    Metrics { m_adv64: ((wide_run * 64.0 / (n as float)) ?? 0.0) as integer,
+              m_line_h: line_h,
+              m_mono: wide_run == narrow_run }
+}
+
+// The built-in face's own metrics, so a layout written against this seam works
+// with no font file at all — the property `B0` exists for, carried forward.
+pub fn metrics_builtin(scale: integer) -> Metrics {
+    Metrics { m_adv64: (face::GLYPH_W + 1) * scale * 64,
+              m_line_h: line_height(scale),
+              m_mono: true }
+}
+
+// The advance in 1/64 px, as measured.
+pub fn advance64(self: const Metrics) -> integer { self.m_adv64 }
+
+// The advance in whole pixels, for a caller that wants to show it.
+//
+// ⚠ DERIVED, NOT A SECOND FIELD.  One quantity stored twice is how two numbers
+// describing one distance drift apart the moment either is edited.
+pub fn advance(self: const Metrics) -> integer { (self.m_adv64 + 32) / 64 ?? 0 }
+
+pub fn height(self: const Metrics) -> integer { self.m_line_h }
+
+pub fn is_mono(self: const Metrics) -> boolean { self.m_mono }
+
+// The ADVANCE width of `s` — what to reserve a box by.
+//
+// ⚠ ROUNDED UP.  The residual is a fraction of a pixel per character, and the
+// safe direction to spend it is outwards: an over-estimate reserves a pixel too
+// many and the text still fits, an under-estimate spills out of a box that was
+// just measured as fitting.  Exact under fixed pitch, an over-estimate
+// otherwise — the same reason the advance comes from the wide run.
+//
+// Distinct from `text_width`, which is the built-in face's INK extent: the two
+// differ by the one trailing gap the ink extent leaves off, and they answer
+// different questions — centre by the ink, reserve by the advance.
+pub fn width(self: const Metrics, s: text) -> integer {
+    (len(s) * self.m_adv64 + 63) / 64 ?? 0
+}
+
+pub fn fits(self: const Metrics, s: text, px: integer) -> boolean {
+    width(self, s) <= px
+}
+
+// The longest prefix of `s` that fits in `px`, with ".." marking the cut.
+//
+// ⚠ AN UNTOUCHED STRING COMES BACK UNTOUCHED, so a caller cannot tell "fitted"
+// from "never measured" by looking for the marker — it appears only when
+// something was actually removed.
+//
+// ".." rather than a single "…": the ellipsis is one code point but several
+// bytes, and a marker whose own width is ambiguous is the wrong thing to measure
+// a truncation with.
+pub fn fit_text(self: const Metrics, s: text, px: integer) -> text {
+    if self.m_adv64 <= 0 { return s; }
+    if width(self, s) <= px { return s; }
+    adv = advance(self);
+    if adv <= 0 { return s; }
+    // Room for the marker itself.  Below that there is no honest answer, so it
+    // gives back as much as fits and no marker.
+    keep = (px / adv ?? 0) - 2;
+    if keep <= 0 {
+        room = px / adv ?? 0;
+        if room <= 0 { return ""; }
+        return s[0..room];
+    }
+    s[0..keep] + ".."
+}
