@@ -359,3 +359,86 @@ pub fn pack_instances(self: const Stage) -> vector<single> {
     }
     out
 }
+
+// ── A3b: submitting the batches ──────────────────────────────────────────────
+//
+// One `gl_draw_instanced` per run, drawing a unit quad transformed entirely by
+// per-instance data.  The vertex buffer never changes and never grows: a scene of
+// five thousand sprites uploads one quad and one instance buffer.
+
+VERT_2D = `
+#version 330 core
+layout (location = 0) in vec3 aQuad;    // the unit quad, 0..1
+layout (location = 1) in vec4 iAffine;  // a, b, c, d — size already folded in
+layout (location = 2) in vec2 iTrans;   // tx, ty — the node's origin, in pixels
+layout (location = 3) in vec4 iUV;
+layout (location = 4) in vec4 iRGBA;
+uniform vec2 uScreen;
+out vec4 vColor;
+void main() {{
+  vec2 p = vec2(iAffine.x * aQuad.x + iAffine.z * aQuad.y + iTrans.x,
+                iAffine.y * aQuad.x + iAffine.w * aQuad.y + iTrans.y);
+  // Pixel space to NDC, y DOWN — the same orientation the software canvas uses,
+  // so the two paths can be compared pixel for pixel rather than mirrored.
+  gl_Position = vec4(p.x / uScreen.x * 2.0 - 1.0, 1.0 - p.y / uScreen.y * 2.0, 0.0, 1.0);
+  vColor = iRGBA;
+}}
+`;
+
+FRAG_2D = `
+#version 330 core
+in vec4 vColor;
+out vec4 FragColor;
+void main() {{ FragColor = vColor; }}
+`;
+
+// The GL objects a stage needs, built once.
+pub struct Painter {
+    pn_shader: integer,
+    pn_vao: integer,
+    pn_ivbo: integer,
+    pn_cap: integer,          // instances the buffer currently holds
+}
+
+// Compile the shader and upload the unit quad.  Call once, after a window exists.
+pub fn painter_new() -> Painter {
+    quad: vector<single> = [
+        0.0f, 0.0f, 0.0f,  1.0f, 0.0f, 0.0f,  1.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f,  1.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f];
+    sh = graphics::gl_create_shader(VERT_2D, FRAG_2D);
+    vao = graphics::gl_upload_vertices(quad, 3);
+    Painter { pn_shader: sh, pn_vao: vao, pn_ivbo: 0, pn_cap: 0 }
+}
+
+// Draw the scene, one instanced call per run.  Answers the number of draw calls
+// issued, which is the half of the gate that pixels cannot see: a batch that fell
+// back to one draw per sprite would look identical and cost N.
+pub fn gl_render(self: const Stage, p: Painter, screen_w: float, screen_h: float) -> integer {
+    floats = pack_instances(self);
+    if len(floats) == 0 { return 0; }
+    if p.pn_ivbo == 0 {
+        p.pn_ivbo = graphics::gl_upload_instance_buffer(floats);
+        p.pn_cap = len(floats) / INSTANCE_STRIDE ?? 0;
+    } else {
+        graphics::gl_update_buffer(p.pn_ivbo, floats);
+    }
+    graphics::gl_use_shader(p.pn_shader);
+    graphics::gl_set_uniform_vec2(p.pn_shader, "uScreen", screen_w, screen_h);
+    calls = 0;
+    for b in batches(self) {
+        // ⚠ A RUN STARTS PART-WAY INTO THE BUFFER, and there is no first-instance
+        // parameter to say so: `gl_draw_instanced` takes a count and nothing else,
+        // and the base-instance form that would (glDrawArraysInstancedBaseInstance)
+        // is GL 4.2 and is NOT in WebGL 2.  So the offset moves into the ATTRIBUTE
+        // POINTERS — re-bound per run at `b_first * INSTANCE_STRIDE` — which is the
+        // portable way and costs four calls per run rather than a wider draw call.
+        base = b.b_first * INSTANCE_STRIDE;
+        graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 1, 4, INSTANCE_STRIDE, base + OFF_AFFINE);
+        graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 2, 2, INSTANCE_STRIDE, base + OFF_AFFINE + 4);
+        graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 3, 4, INSTANCE_STRIDE, base + OFF_UV);
+        graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 4, 4, INSTANCE_STRIDE, base + OFF_RGBA);
+        graphics::gl_draw_instanced(p.pn_vao, 6, b.b_count);
+        calls = calls + 1;
+    }
+    calls
+}
