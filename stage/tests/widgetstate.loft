@@ -115,6 +115,7 @@ fn test_touch_never_shows_over_and_fires_the_same() {
   st_m = stage_new();
   a_m = two_buttons(st_m);
   for e in the_stream() { mouse_fired += [apply(st_m, e)]; }
+  assert(a_m == 0, "both runs build the same scene, so the node ids line up");
 
   touch_fired: vector<integer> = [];
   st_t = stage_new();

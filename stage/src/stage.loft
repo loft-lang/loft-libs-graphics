@@ -872,7 +872,7 @@ pub fn gl_render(self: Stage, p: Painter, screen_w: float, screen_h: float) -> i
     // the two can be compared rather than merely believed.  With the map off,
     // `st_hud_layer` is the no-HUD sentinel and this is one pass over everything.
     if self.st_light_map {
-        ensure_light_target(self, p, screen_w as integer, screen_h as integer);
+        ensure_light_target(p, screen_w as integer, screen_h as integer);
         graphics::gl_bind_framebuffer(p.pn_fbo);
         graphics::gl_clear(0);
         calls = calls + gl_draw_band(self, p, screen_w, screen_h, 0 - HUD_NONE,
@@ -894,7 +894,14 @@ pub fn gl_render(self: Stage, p: Painter, screen_w: float, screen_h: float) -> i
 }
 
 // Draw every run whose layer is in `[lo, hi)`, for every view.
-fn gl_draw_band(self: const Stage, p: const Painter, screen_w: float,
+//
+// ⚠ `_screen_w` is deliberately unread, and the pair is kept rather than
+// trimmed: only the HEIGHT is needed here, to flip the scissor's y (GL measures
+// it from the bottom and the screen from the top) — x does not flip.  Its
+// sibling `gl_composite` uses both, so *(screen_w, screen_h)* is the shape this
+// family of helpers takes; dropping one of two symmetric floats would leave a
+// bare positional float at three call sites that could take either dimension.
+fn gl_draw_band(self: const Stage, p: const Painter, _screen_w: float,
                 screen_h: float, lo: integer, hi: integer) -> integer {
     calls = 0;
     for v in 0..len(self.st_views) {
@@ -944,7 +951,10 @@ fn gl_draw_band(self: const Stage, p: const Painter, screen_w: float,
 }
 
 // Make (or remake) the offscreen colour target the world pass draws into.
-fn ensure_light_target(self: const Stage, p: Painter, w: integer, h: integer) {
+//
+// ⚠ It takes no `Stage`: an offscreen target is a Painter and a size, and
+// nothing about the scene changes it.  The parameter was there and unread.
+fn ensure_light_target(p: Painter, w: integer, h: integer) {
     if p.pn_light == 0 {
         p.pn_light = graphics::gl_create_shader(VERT_LIGHT, FRAG_LIGHT);
     }
