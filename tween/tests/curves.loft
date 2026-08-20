@@ -1,0 +1,139 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN145 C1 — the easing table, and the one rule that decides its endpoints.
+//
+// The hand-computed values below are split into two groups ON PURPOSE.  The
+// polynomial curves are asserted with `==`, because their sample points are
+// dyadic — `quad_in(½) = ¼` is exact in binary and any tolerance there would
+// hide a real error.  The rest go through `cos`, `sqrt` or `pow`, so they are
+// asserted to within 1e-15 and the test says so rather than pretending.
+use tween;
+
+fn close(a: float, b: float) -> boolean {
+    abs(a - b) < 0.000000000000001
+}
+
+// THE HAND-COMPUTED TABLE.  Every expected value here was derived on paper
+// from the definition in `easing.loft`, not read off a run.
+fn test_the_easing_table_is_what_was_computed_by_hand() {
+  // Linear is the identity, exactly.
+  assert(ease(Curve.Linear, Shape.In, 0.25) == 0.25, "linear is the identity");
+  assert(ease(Curve.Linear, Shape.Out, 0.25) == 0.25, "and has no direction");
+  assert(ease(Curve.Linear, Shape.InOut, 0.25) == 0.25, "in any of the three");
+
+  // t², t³, t⁴, t⁵ at t = ½ — all dyadic, so exact.
+  assert(ease(Curve.Quad,  Shape.In, 0.5) == 0.25,    "quad in ½ = ¼");
+  assert(ease(Curve.Cubic, Shape.In, 0.5) == 0.125,   "cubic in ½ = ⅛");
+  assert(ease(Curve.Quart, Shape.In, 0.5) == 0.0625,  "quart in ½ = 1/16");
+  assert(ease(Curve.Quint, Shape.In, 0.5) == 0.03125, "quint in ½ = 1/32");
+
+  // Out is the reflection: 1 − in(1 − t).
+  assert(ease(Curve.Quad, Shape.Out, 0.5)  == 0.75,   "quad out ½ = 1 − ¼");
+  assert(ease(Curve.Quad, Shape.Out, 0.25) == 0.4375, "quad out ¼ = 1 − 0.75²");
+  assert(ease(Curve.Quad, Shape.In,  0.25) == 0.0625, "quad in ¼ = 1/16");
+
+  // InOut is in(2t)/2 below the midpoint and its mirror above.
+  assert(ease(Curve.Quad,  Shape.InOut, 0.25) == 0.125,  "quad in-out ¼ = ¼/2");
+  assert(ease(Curve.Quad,  Shape.InOut, 0.75) == 0.875,  "quad in-out ¾ = 1 − ¼/2");
+  assert(ease(Curve.Cubic, Shape.InOut, 0.25) == 0.0625, "cubic in-out ¼ = ⅛/2");
+
+  // The transcendental four, to 1e-15 — see the file header.
+  assert(close(ease(Curve.Sine, Shape.In, 0.5), 0.2928932188134524),
+         "sine in ½ = 1 − cos(π/4) = 1 − √2/2");
+  assert(close(ease(Curve.Circ, Shape.In, 0.5), 0.1339745962155614),
+         "circ in ½ = 1 − √0.75");
+  // (2^-5 − 2^-10) / (1 − 2^-10) = 31/1023 exactly, as a rational.
+  assert(close(ease(Curve.Expo, Shape.In, 0.5), 0.030303030303030304),
+         "expo in ½ = 31/1023");
+  // 2.70158·⅛ − 1.70158·¼ — negative, because `back` starts by pulling away.
+  assert(close(ease(Curve.Back, Shape.In, 0.5), -0.0876975),
+         "back in ½ dips below zero");
+  assert(ease(Curve.Back, Shape.In, 0.5) < 0.0, "and that is the point of it");
+
+  // Bounce's last hop: 7.5625·(½ − 1.5/2.75)² + 0.75 = 1/64 + ¾.
+  assert(close(ease(Curve.Bounce, Shape.Out, 0.5), 0.765625),
+         "bounce out ½ = 1/64 + ¾");
+}
+
+fn all_curves() -> vector<Curve> {
+  [Curve.Linear, Curve.Quad, Curve.Cubic, Curve.Quart, Curve.Quint,
+   Curve.Sine, Curve.Expo, Curve.Circ, Curve.Back, Curve.Elastic, Curve.Bounce]
+}
+
+fn all_shapes() -> vector<Shape> {
+  [Shape.In, Shape.Out, Shape.InOut]
+}
+
+// THE GATE THE WHOLE FILE IS BUILT AROUND.  Every one of the thirty-three
+// combinations lands on exactly 0 and exactly 1 — not near them.
+fn test_every_curve_lands_exactly_on_both_endpoints() {
+  n = 0;
+  for c in all_curves() {
+    for s in all_shapes() {
+      lo = ease(c, s, 0.0);
+      hi = ease(c, s, 1.0);
+      assert(lo == 0.0, "a curve started at {lo} instead of exactly 0");
+      assert(hi == 1.0, "a curve ended at {hi} instead of exactly 1");
+      // and outside the interval it stays put rather than extrapolating
+      assert(ease(c, s, -3.0) == 0.0, "before the start it holds at 0");
+      assert(ease(c, s, 7.5) == 1.0, "after the end it holds at 1");
+      n = n + 1;
+    }
+  }
+  assert(n == 33, "eleven curves times three directions is 33, counted {n}");
+}
+
+// ⚠ THE CONTROL, and it is the reason the clamp is in `ease` rather than in
+// each curve: the RAW curves genuinely miss their endpoints.  If this test
+// ever goes green by the raw values being exact, the gate above has stopped
+// proving anything.
+fn test_the_raw_curves_miss_the_endpoints_that_ease_hits() {
+  // 1 − cos(π/2), and cos(π/2) is 6.1e-17 in binary rather than zero.
+  raw_sine = curve_in(Curve.Sine, 1.0);
+  assert(raw_sine != 1.0, "the raw sine curve is expected to MISS 1.0");
+  assert(raw_sine > 0.9999999999999, "…but only just — it is a last-bit miss");
+  assert(ease(Curve.Sine, Shape.In, 1.0) == 1.0, "while `ease` lands on it");
+
+  // The textbook exponential answers 2^-10 at t = 0; the normalised one is 0.
+  textbook_expo = pow(2.0, -10.0) ?? 0.0;
+  assert(textbook_expo == 0.0009765625, "the textbook expo starts at 2^-10");
+  assert(curve_in(Curve.Expo, 0.0) == 0.0, "the normalised one starts at zero");
+
+  // Elastic's raw form misses at both ends.
+  assert(curve_in(Curve.Elastic, 0.0) != 0.0, "raw elastic misses 0");
+  assert(ease(Curve.Elastic, Shape.In, 0.0) == 0.0, "`ease` does not");
+}
+
+// The reflection rule is an identity, not an approximation — this is what
+// lets eleven definitions cover thirty-three.
+fn test_out_and_inout_are_exact_reflections_of_in() {
+  ts = [0.1, 0.25, 0.375, 0.5, 0.625, 0.75, 0.9];
+  for c in all_curves() {
+    for t in ts {
+      out_direct = 1.0 - curve_in(c, 1.0 - t);
+      assert(ease(c, Shape.Out, t) == out_direct,
+             "out(t) must be exactly 1 − in(1 − t)");
+    }
+    // The midpoint of an in-out is exactly half, for every curve.
+    assert(ease(c, Shape.InOut, 0.5) == 0.5,
+           "an in-out curve passes exactly through (½, ½)");
+  }
+}
+
+// The two overshooting curves leave [0,1] on purpose; the other nine do not.
+fn test_only_back_and_elastic_leave_the_unit_interval() {
+  for c in all_curves() {
+    out = 0;
+    for k in 0..=200 {
+      t = (k as float) / 200.0;
+      v = ease(c, Shape.In, t);
+      if v < 0.0 || v > 1.0 { out = out + 1; }
+    }
+    if c == Curve.Back || c == Curve.Elastic {
+      assert(out > 0, "back and elastic are supposed to overshoot");
+    } else {
+      assert(out == 0, "a curve left [0,1] {out} times and should not have");
+    }
+  }
+}

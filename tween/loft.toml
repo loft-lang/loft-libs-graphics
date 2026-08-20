@@ -1,0 +1,18 @@
+[package]
+name    = "tween"
+version = "0.1.0"
+loft    = ">=2026.8.0"
+repository = "loft-libs-graphics"
+description = "Property tweens in exact integer time — eleven easing curves, chains and groups"
+
+api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
+data_compatible_with = "0.1.0"   # oldest own release whose stored data this reads
+
+# ⚠ **NO DEPENDENCIES, AND THAT IS THE POINT.**  A tween takes a duration in
+# whatever integer unit its consumer's clock already runs in, so it never has
+# to know how long a second is — and a second definition of that is two facts
+# that can disagree.  `fixstep` owns the conversion; this composes with it
+# without importing it, and animates a value on a server just as happily.
+
+[library]
+entry = "src/tween.loft"
