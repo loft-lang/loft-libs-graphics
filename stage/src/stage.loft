@@ -78,6 +78,7 @@ pub struct StageNode {
     nd_cue: float,           // derived: 0 at the near plane, 1 at the far one
     nd_layer: integer,       // ordering BAND — outranks depth entirely
     nd_depth: float,         // distance INTO the screen; larger draws first
+    nd_disabled: boolean,    // D1: refuses to fire, and reads `Disabled`
     nd_a: float,             // derived world affine — read after `compose`
     nd_b: float,
     nd_c: float,
@@ -157,6 +158,11 @@ pub struct Stage {
     st_seqs: vector<Sequence>,   // animation sequences, referenced by index
     st_proj: integer,            // TOP_DOWN or SIDE_ON — it picks the facing model
     st_tweens: vector<NodeTween>,   // C2: at most one per (node, property)
+    // D1: where the pointer is, what kind it is, and what it is over.
+    st_ptr_x: float,
+    st_ptr_y: float,
+    st_pointer: integer,         // POINTER_MOUSE or POINTER_TOUCH
+    st_hover: integer,           // node under the pointer, or -1
 }
 
 // LOOP wraps, ONCE stops on the last frame, PINGPONG reverses at both ends.
@@ -257,7 +263,8 @@ pub fn stage_new() -> Stage {
             st_views: [View { vw_cam_x: 0.0, vw_cam_y: 0.0, vw_x: 0, vw_y: 0,
                               vw_w: 0, vw_h: 0 }],
             st_layers: [], st_uploads: 0, st_dirty: true,
-            st_time: 0.0, st_seqs: [], st_proj: TOP_DOWN, st_tweens: [] }
+            st_time: 0.0, st_seqs: [], st_proj: TOP_DOWN, st_tweens: [],
+            st_ptr_x: 0.0, st_ptr_y: 0.0, st_pointer: POINTER_MOUSE, st_hover: -1 }
 }
 
 pub fn node_count(self: const Stage) -> integer {
@@ -287,6 +294,7 @@ pub fn node_add(self: Stage, parent: integer, p: const Place) -> integer {
         nd_cue: 0.0, nd_layer: p.pl_layer, nd_depth: p.pl_depth,
         nd_clips: p.pl_clips, nd_clipped: false,
         nd_cx0: 0.0, nd_cy0: 0.0, nd_cx1: 0.0, nd_cy1: 0.0,
+        nd_disabled: false,
         nd_a: 1.0, nd_b: 0.0, nd_c: 0.0, nd_d: 1.0, nd_tx: 0.0, nd_ty: 0.0,
     }];
     idx
@@ -1076,6 +1084,11 @@ pub fn pick(self: const Stage, sx: float, sy: float) -> integer {
 pub fn press(self: Stage, sx: float, sy: float) -> integer {
     hit = pick(self, sx, sy);
     self.st_capture = hit;
+    // D1: the pointer is remembered so `ui_state` can answer without being told
+    // again where it is.
+    self.st_ptr_x = sx;
+    self.st_ptr_y = sy;
+    self.st_hover = hit;
     hit
 }
 
@@ -1089,6 +1102,9 @@ pub fn press(self: Stage, sx: float, sy: float) -> integer {
 pub fn release(self: Stage, sx: float, sy: float) -> integer {
     held = self.st_capture;
     self.st_capture = -1;
+    self.st_ptr_x = sx;
+    self.st_ptr_y = sy;
+    self.st_hover = pick(self, sx, sy);
     if held < 0 { return -1; }
     held
 }
@@ -1100,6 +1116,120 @@ pub fn released_on(self: const Stage, idx: integer, sx: float, sy: float) -> boo
 }
 
 pub fn capture(self: const Stage) -> integer { self.st_capture }
+
+
+// ── D1: the four states a widget shows, and the one predicate under them ─────
+//
+// ⚠⚠ **THE INVARIANT: a node reads `Down` exactly when a release at the current
+// pointer would FIRE it.**  The state and the firing decision are derived from
+// the same test — `the press is captured here AND the pointer is still inside` —
+// so the picture cannot promise something the click does not do.  A kit that
+// stored a `pressed` flag beside the capture would have two facts about one
+// gesture, and the visible one drifts first.
+//
+// ⚠ **`press`-then-LEAVE-then-`release` must not fire**, and the capture is what
+// makes that expressible: A4 remembers who took the press, so a release
+// elsewhere can answer *nobody* rather than *whoever is under the pointer now*.
+// The reverse — pressing and drifting a pixel — must still fire, and does.
+//
+// ⚠⚠ **ON TOUCH THERE IS NO `Over`.**  A finger has no position until it
+// touches, so a widget whose only affordance is hover is INVISIBLE on a phone.
+// The kit cannot fix that for an author, but it can refuse to lie: under
+// `POINTER_TOUCH` `ui_state` never answers `Over`, so a layout tested headlessly
+// on a touch stream shows the same states the phone will.
+//
+// ⚠ The pointer path was already injectable — `press` / `release` take
+// coordinates and read no device — so a replay harness needs no new seam here.
+// (The KEY half is the `input` package's `input_tick_from_state`, which @PLN145
+// `D0b` measured and cleared; nothing in this file needs a second one.)
+
+// What a pointing device is.  A mouse hovers; a finger does not exist until it
+// touches.
+pub const POINTER_MOUSE: integer = 0;
+pub const POINTER_TOUCH: integer = 1;
+
+// The four states a widget node can be in.
+//
+// ⚠ `Disabled` outranks the other three: a node that cannot be used must not
+// look pressable even while the pointer is on it.
+pub enum UiState {
+    Normal,
+    Over,
+    Down,
+    Disabled,
+}
+
+// Say whether the pointer is a mouse or a finger.  Mouse is the default.
+pub fn set_pointer(self: Stage, kind: integer) {
+    self.st_pointer = if kind == POINTER_TOUCH { POINTER_TOUCH } else { POINTER_MOUSE };
+}
+
+pub fn pointer(self: const Stage) -> integer { self.st_pointer }
+
+// The pointer moved without a button.  A touch stream never sends this.
+pub fn pointer_move(self: Stage, sx: float, sy: float) {
+    self.st_ptr_x = sx;
+    self.st_ptr_y = sy;
+    self.st_hover = pick(self, sx, sy);
+}
+
+// The node the pointer is over, or -1.  Answers even under touch, where it is
+// the node the finger is ON — `ui_state` is what declines to call that `Over`.
+pub fn hovered(self: const Stage) -> integer { self.st_hover }
+
+// Take a node out of use, or put it back.
+pub fn set_enabled(self: Stage, idx: integer, on: boolean) {
+    if idx >= 0 {
+        if idx < len(self.st_nodes) { self.st_nodes[idx].nd_disabled = !on; }
+    }
+}
+
+pub fn enabled(self: const Stage, idx: integer) -> boolean {
+    if idx >= 0 {
+        if idx < len(self.st_nodes) { return !self.st_nodes[idx].nd_disabled; }
+    }
+    false
+}
+
+// Would a release right now fire this node?  THE predicate — `ui_state` and
+// `click` are both it, which is why they cannot disagree.
+fn armed_on(self: const Stage, idx: integer) -> boolean {
+    if idx < 0 or idx >= len(self.st_nodes) { return false; }
+    if self.st_nodes[idx].nd_disabled { return false; }
+    if self.st_capture != idx { return false; }
+    hits(self, idx, self.st_ptr_x, self.st_ptr_y)
+}
+
+// What this node looks like right now.
+pub fn ui_state(self: const Stage, idx: integer) -> UiState {
+    if idx < 0 or idx >= len(self.st_nodes) { return UiState.Normal; }
+    if self.st_nodes[idx].nd_disabled { return UiState.Disabled; }
+    if armed_on(self, idx) { return UiState.Down; }
+    // ⚠ A press in flight ANYWHERE suppresses `Over` everywhere: dragging off a
+    // button and across its neighbour must not light the neighbour up.
+    if self.st_capture >= 0 { return UiState.Normal; }
+    if self.st_pointer == POINTER_TOUCH { return UiState.Normal; }
+    if self.st_hover == idx { return UiState.Over; }
+    UiState.Normal
+}
+
+// The release door for a widget: answers the node that FIRES, or -1.
+//
+// ⚠ **Use this OR `release`, not both** — either ends the press.  `release`
+// answers *who took the press* and leaves the fired/not decision to the caller;
+// this answers the question a button actually asks.  It exists because combining
+// `release` with `released_on` by hand is where press-then-leave-then-release
+// goes wrong, and that is a mistake a library can simply not offer.
+pub fn click(self: Stage, sx: float, sy: float) -> integer {
+    held = self.st_capture;
+    self.st_ptr_x = sx;
+    self.st_ptr_y = sy;
+    fired = -1;
+    if armed_on(self, held) { fired = held; }
+    self.st_capture = -1;
+    self.st_hover = pick(self, sx, sy);
+    fired
+}
 
 
 // ── A5: compositing ──────────────────────────────────────────────────────────

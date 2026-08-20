@@ -44,6 +44,10 @@ loft install stage
 - `prop_of(idx, prop)` / `set_prop(idx, prop, v)` · `tween_prop(idx, prop, to, dur_us,
   curve, shape)` · `prop_tweening(idx, prop)` / `cancel_prop_tween` / `cancel_node_tweens` /
   `tween_count()` · `Prop.` `X` `Y` `Rot` `ScaleX` `ScaleY` `OriginX` `OriginY` `Alpha` `Depth`
+- `ui_state(idx) -> UiState` · `UiState.` `Normal` `Over` `Down` `Disabled` ·
+  `pointer_move(x, y)` / `hovered()` · `click(x, y) -> integer` ·
+  `set_enabled(idx, on)` / `enabled(idx)` · `set_pointer(kind)` / `pointer()` ·
+  `POINTER_MOUSE` / `POINTER_TOUCH`
 
 ## The two things to know
 
@@ -379,6 +383,39 @@ the tree, so you can click through it. A node with no mask is solid.
 pointer has drifted to; `released_on` is the separate question a button asks. Without that
 split a button fires when you press it and slide away, and fails to fire when you press it and
 drift a pixel.
+
+## Widget states — four of them, and one predicate underneath
+
+`ui_state(idx)` answers `Normal`, `Over`, `Down` or `Disabled`; `pointer_move(x, y)` feeds it
+hover, `press` / `click` feed it the gesture.
+
+⚠⚠ **The invariant: a node reads `Down` exactly when a release at the current pointer would
+FIRE it.**  The state and the firing decision are the same test — *the press is captured here
+**and** the pointer is still inside* — so the picture cannot promise something the click does
+not do.  A kit that stored a `pressed` flag beside the capture would hold two facts about one
+gesture, and the visible one drifts first.
+
+`click(x, y)` is the release door a button wants: it answers the node that fires, or `-1`.
+Use it **or** `release`, not both — either ends the press.  `release` answers *who took the
+press* and leaves the decision to you; `click` exists because combining `release` with
+`released_on` by hand is exactly where **press-then-leave-then-release** goes wrong, and that
+is a mistake a library can simply decline to offer.
+
+⚠ **A press in flight suppresses `Over` everywhere**, so dragging off a button and across its
+neighbour does not light the neighbour up.  Leaving and returning **re-arms**: the capture is
+held the whole time, so drifting off and back does not lose the press.
+
+⚠⚠ **On touch there is no `Over`.**  A finger has no position until it touches, so a widget
+whose only affordance is hover is invisible on a phone.  The kit cannot fix that for an author,
+but it refuses to lie about it: under `POINTER_TOUCH`, `ui_state` never answers `Over`.  What
+the pointer kind changes is only what is **shown** — the same recorded stream fires the same
+nodes either way, and there is a test that replays it both ways to say so.
+
+`Disabled` outranks the other three: a node that cannot be used must not look pressable even
+while the pointer is on it, and it never fires.
+
+The whole path is injectable — every entry point takes coordinates and reads no device — which
+is what lets a recorded pointer stream drive an exact state sequence in a headless test.
 
 ## Compositing
 
