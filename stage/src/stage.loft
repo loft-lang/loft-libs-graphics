@@ -610,10 +610,12 @@ pub fn draw_list(self: const Stage) -> vector<DrawRect> {
 // ⚠ THE ALPHA BYTE IS ADDED HERE, and it has to be.  A `DrawRect` carries
 // 0xRRGGBB — `lavition_ui` says so, and keeps it a plain integer so it needs no
 // graphics dependency — while `graphics::Canvas` reads 0xAARRGGBB and treats a
-// missing top byte as FULLY TRANSPARENT.  That is `graphics`' own `@GFX-001`
-// trap: the colour looks right in the source and paints nothing.  One `| 0xff000000`
-// at the boundary is the whole fix, and it belongs at the boundary rather than in
-// every caller.
+// missing top byte as FULLY TRANSPARENT.  That is graphics' own trap: the colour
+// looks right in the source and paints nothing.  One `| 0xff000000` at the
+// boundary is the whole fix, and it belongs at the boundary rather than in every
+// caller.
+//
+// Example: @GFX-001
 pub fn render(list: const vector<DrawRect>, cv: graphics::Canvas) {
     for d in list {
         cv.fill_rect(d.dr_rect.r_x, d.dr_rect.r_y, d.dr_rect.r_w, d.dr_rect.r_h,

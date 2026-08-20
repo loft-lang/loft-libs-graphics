@@ -66,9 +66,11 @@ fn test_a_child_is_placed_through_its_parent() {
 }
 
 // The alpha seam.  A `DrawRect` carries 0xRRGGBB and `Canvas` reads 0xAARRGGBB,
-// where a missing top byte means FULLY TRANSPARENT — graphics' own @GFX-001 trap.
+// where a missing top byte means FULLY TRANSPARENT — graphics' own trap.
 // Without `opaque` at the boundary the stage paints nothing at all, and the canvas
 // stays exactly the colour it was cleared to.
+//
+// Example: @GFX-001
 fn test_the_alpha_byte_is_added_at_the_boundary() {
   assert(stage::opaque(0xc03030) == 0xffc03030, "0xRRGGBB gains an opaque alpha");
   assert(stage::opaque(0x80112233) == 0x80112233, "an explicit alpha is left alone");
