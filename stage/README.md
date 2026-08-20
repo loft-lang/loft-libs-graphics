@@ -41,6 +41,9 @@ loft install stage
   `facing_of` / `action_of` / `rotation_of` / `mirrored` · `facing_name(angle)`
 - `batches() -> vector<Batch>` · `pack_instances() -> vector<single>` ·
   `INSTANCE_STRIDE` / `OFF_AFFINE` / `OFF_CELL` / `OFF_RGBA` / `OFF_SWAY`
+- `prop_of(idx, prop)` / `set_prop(idx, prop, v)` · `tween_prop(idx, prop, to, dur_us,
+  curve, shape)` · `prop_tweening(idx, prop)` / `cancel_prop_tween` / `cancel_node_tweens` /
+  `tween_count()` · `Prop.` `X` `Y` `Rot` `ScaleX` `ScaleY` `OriginX` `OriginY` `Alpha` `Depth`
 
 ## The two things to know
 
@@ -133,6 +136,34 @@ test that ticks exactly that case.
 meaningful with a screen full of walking mobs — the packed grid (`cols`, `rows`) is static
 and uploads once.  Deriving the uv from that grid is the shader's job; today the GL path
 draws untextured quads, so the attribute is packed and bound but not yet read.
+
+## Moving a node — one write switch, two doors
+
+`set_prop(idx, prop, v)` writes one of a node's numbers now; `tween_prop(idx, prop, to,
+dur_us, curve, shape)` moves it there over time, off
+[`tween`](https://github.com/loft-lang/loft-libs-graphics/tree/main/tween)'s curves.  loft has
+no property references, so *which* number is a `Prop` the library switches on — and there is
+exactly **one** such switch, which both doors go through.  Two would be two spellings of
+*what `X` means* that can disagree.
+
+⚠ **`Prop.X` is also the first public way to move a node at all.**  Before it the stage could
+place a node and never shift it: a consumer had to reach into `st_nodes[i].nd_x` itself, which
+is a field write no gate can see.
+
+⚠⚠ **At most one tween per (node, property) — a second REPLACES the first.**  Two tweens on
+one number are two writers, and which won would depend on their order in a vector.
+Replacement is also what a caller means by *"now go there instead"*, so the safe rule and the
+expected one are the same rule.  A **finished** tween stops writing and releases the property,
+so a later `set_prop` sticks instead of being re-asserted every frame.
+
+⚠ **A tween rides `advance(dt_us)` and is therefore in MICROSECONDS** — not `tween`'s own
+unit-agnostic count, and not `fixstep`'s 3 000 000-per-second base.  One call steps the
+animation sequences and the property tweens together, so a scene never carries two clocks; a
+consumer on `fixstep` converts once, where it already converts for `advance`.  As with every
+other change, `compose()` still derives the transforms afterwards.
+
+Only numbers a node can be *half way between* are here.  Colour, atlas and the sequence are
+not: interpolating them would produce values the node never holds.
 
 ## Facings — the projection picks the model
 

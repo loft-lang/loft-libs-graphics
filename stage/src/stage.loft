@@ -20,6 +20,7 @@
 // rather than an error.
 
 use graphics;
+use tween;
 
 // A node's local placement, plus the world affine `compose` derives for it.
 //
@@ -155,6 +156,7 @@ pub struct Stage {
     st_time: float,              // ambient clock — a uniform, never a rewrite
     st_seqs: vector<Sequence>,   // animation sequences, referenced by index
     st_proj: integer,            // TOP_DOWN or SIDE_ON — it picks the facing model
+    st_tweens: vector<NodeTween>,   // C2: at most one per (node, property)
 }
 
 // LOOP wraps, ONCE stops on the last frame, PINGPONG reverses at both ends.
@@ -255,7 +257,7 @@ pub fn stage_new() -> Stage {
             st_views: [View { vw_cam_x: 0.0, vw_cam_y: 0.0, vw_x: 0, vw_y: 0,
                               vw_w: 0, vw_h: 0 }],
             st_layers: [], st_uploads: 0, st_dirty: true,
-            st_time: 0.0, st_seqs: [], st_proj: TOP_DOWN }
+            st_time: 0.0, st_seqs: [], st_proj: TOP_DOWN, st_tweens: [] }
 }
 
 pub fn node_count(self: const Stage) -> integer {
@@ -1431,6 +1433,9 @@ pub fn advance(self: Stage, dt_us: integer) {
             moved = true;
         }
     }
+    // ⚠ The property tweens ride THIS call rather than one of their own, which is
+    // what stops a scene from owning two clocks — see § C2 below.
+    if step_tweens(self, dt_us) { moved = true; }
     if moved { self.st_dirty = true; }
 }
 
@@ -1475,6 +1480,169 @@ pub fn restart(self: Stage, idx: integer) {
     if idx < 0 or idx >= len(self.st_nodes) { return; }
     self.st_nodes[idx].nd_elapsed = 0;
     self.st_dirty = true;
+}
+
+
+// ── C2: a node's numbers, read, written, and moved over time ────────────────
+//
+// ⚠⚠ **THE WRITE SWITCH IS THE POINT, AND THERE IS EXACTLY ONE OF IT.**  loft has
+// no property references, so "tween `node.x`" cannot be a pointer to a field — it
+// has to be a name the library switches on.  `write_prop` is that switch, and
+// both doors go through it: `set_prop` writes now, a tween writes every frame.
+// Two switches would be two spellings of *what X means* that can disagree.
+//
+// ⚠ **`Prop.X` is the first public way to MOVE a node at all.**  Before this the
+// stage could place a node and never shift it — a consumer had to reach into
+// `st_nodes[i].nd_x` itself, which is a field write no gate could see.
+//
+// ⚠⚠ **AT MOST ONE TWEEN PER (NODE, PROPERTY), and starting another REPLACES it.**
+// That is the invariant this section exists to hold, and it is structural rather
+// than checked: two tweens on one property are two writers of one number, and the
+// answer would depend on which happened to be later in a vector.  Replacement is
+// also what a caller means — "now go there instead" — so the safe rule and the
+// expected one are the same rule.
+//
+// ⚠ **A finished tween stops writing.**  It stays in the table so
+// `prop_tweening` can answer, but it no longer touches the node — otherwise it
+// would keep re-asserting its end value every frame and silently undo a later
+// `set_prop`, which is the same two-writers defect one move down the line.
+//
+// ⚠ **The unit is the one `advance` already takes: MICROSECONDS.**  A duration
+// here is `dt_us`, not `tween`'s own unit-agnostic count and not `fixstep`'s
+// 3 000 000-per-second base — because the tween rides `advance`, and a scene that
+// had to convert between two units to move a sprite would be carrying two clocks.
+// A consumer on `fixstep` converts once, where it already converts for `advance`.
+
+// Which of a node's numbers a tween drives.
+//
+// ⚠ Every one is a `float` the node already stores.  Colour, atlas and the
+// sequence are not here on purpose: they are not numbers you can be *half way*
+// between, and interpolating them would produce values the node never holds.
+pub enum Prop {
+    X, Y,
+    Rot,
+    ScaleX, ScaleY,
+    OriginX, OriginY,
+    Alpha,
+    Depth,
+}
+
+// One property of one node, moving.
+struct NodeTween {
+    nt_node: integer,
+    nt_prop: Prop = Prop.X,
+    nt_tw: Tween,
+}
+
+// What that property reads right now.
+pub fn prop_of(self: const Stage, idx: integer, p: Prop) -> float {
+    if idx >= 0 {
+        if idx < len(self.st_nodes) {
+            n = self.st_nodes[idx];
+            return match p {
+                X       => n.nd_x,
+                Y       => n.nd_y,
+                Rot     => n.nd_rot,
+                ScaleX  => n.nd_sx,
+                ScaleY  => n.nd_sy,
+                OriginX => n.nd_ox,
+                OriginY => n.nd_oy,
+                Alpha   => n.nd_alpha,
+                Depth   => n.nd_depth,
+            };
+        }
+    }
+    0.0
+}
+
+// Write it now.  The immediate door — the tween door writes through the same
+// switch, one frame at a time.
+pub fn set_prop(self: Stage, idx: integer, p: Prop, v: float) {
+    write_prop(self, idx, p, v);
+    self.st_dirty = true;
+}
+
+// THE SWITCH.  Every write to a node's number goes through here.
+fn write_prop(self: Stage, idx: integer, p: Prop, v: float) {
+    if idx >= 0 {
+        if idx < len(self.st_nodes) {
+            match p {
+                X       => self.st_nodes[idx].nd_x = v,
+                Y       => self.st_nodes[idx].nd_y = v,
+                Rot     => self.st_nodes[idx].nd_rot = v,
+                ScaleX  => self.st_nodes[idx].nd_sx = v,
+                ScaleY  => self.st_nodes[idx].nd_sy = v,
+                OriginX => self.st_nodes[idx].nd_ox = v,
+                OriginY => self.st_nodes[idx].nd_oy = v,
+                Alpha   => self.st_nodes[idx].nd_alpha = v,
+                Depth   => self.st_nodes[idx].nd_depth = v,
+            }
+        }
+    }
+}
+
+// Move `p` from where it is now to `to`, over `dur_us` microseconds.
+//
+// ⚠ `from` is read at THIS moment, so a tween started mid-flight carries on from
+// where the last one had got to rather than snapping back to a remembered start.
+// Replaces any tween already on this (node, property).
+pub fn tween_prop(self: Stage, idx: integer, p: Prop, to: float, dur_us: integer,
+                  c: Curve = Curve.Linear,
+                  s: Shape = Shape.In) {
+    if idx < 0 or idx >= len(self.st_nodes) { return; }
+    cancel_prop_tween(self, idx, p);
+    self.st_tweens += [NodeTween {
+        nt_node: idx, nt_prop: p,
+        nt_tw: tween_new(prop_of(self, idx, p), to, dur_us, c, s),
+    }];
+}
+
+// Is that property still moving?
+pub fn prop_tweening(self: const Stage, idx: integer, p: Prop) -> boolean {
+    for t in self.st_tweens {
+        if t.nt_node == idx and t.nt_prop == p and !t.nt_tw.done() { return true; }
+    }
+    false
+}
+
+// Stop it wherever it has got to.  The property keeps its current value.
+pub fn cancel_prop_tween(self: Stage, idx: integer, p: Prop) {
+    kept: vector<NodeTween> = [];
+    for t in self.st_tweens {
+        if t.nt_node != idx or t.nt_prop != p { kept += [t]; }
+    }
+    self.st_tweens = kept;
+}
+
+// Drop every tween on a node.
+pub fn cancel_node_tweens(self: Stage, idx: integer) {
+    kept_n: vector<NodeTween> = [];
+    for t in self.st_tweens {
+        if t.nt_node != idx { kept_n += [t]; }
+    }
+    self.st_tweens = kept_n;
+}
+
+// How many property tweens the stage is holding — the gate reads this.
+pub fn tween_count(self: const Stage) -> integer { len(self.st_tweens) }
+
+// Step every property tween and write what it now reads.  Answers whether any of
+// them moved, so `advance` can dirty the buffer exactly when something did.
+fn step_tweens(self: Stage, dt_us: integer) -> boolean {
+    if dt_us <= 0 { return false; }
+    any = false;
+    for i in 0..len(self.st_tweens) {
+        if i < len(self.st_tweens) {
+            if !self.st_tweens[i].nt_tw.done() {
+                _ = self.st_tweens[i].nt_tw.advance(dt_us);
+                write_prop(self, self.st_tweens[i].nt_node,
+                           self.st_tweens[i].nt_prop,
+                           self.st_tweens[i].nt_tw.value());
+                any = true;
+            }
+        }
+    }
+    any
 }
 
 
