@@ -1,6 +1,12 @@
 [package]
 name = "stage"
 version = "0.18.1"
+
+# ⚠ FIRST published release, so both floors are this release itself — there is no
+# earlier one it could be a drop-in for.  The 0.x numbers below it were used
+# during development and never left this repo.
+api_compatible_with  = "0.18.1"   # oldest own release this is a drop-in for
+data_compatible_with = "0.18.1"   # oldest own release whose stored data this reads
 loft = ">=2026.8.0"
 repository = "loft-libs-graphics"
 
