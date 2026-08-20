@@ -48,6 +48,12 @@ loft install stage
   `pointer_move(x, y)` / `hovered()` · `click(x, y) -> integer` ·
   `set_enabled(idx, on)` / `enabled(idx)` · `set_pointer(kind)` / `pointer()` ·
   `POINTER_MOUSE` / `POINTER_TOUCH`
+- `focused()` / `set_focus(idx)` · `focusable(idx)` / `set_focusable(idx, on)` ·
+  `focus_next()` / `focus_prev()`
+- `set_field(idx, s)` / `is_field(idx)` · `field_text` / `field_caret` / `field_mark` /
+  `field_selection` · `field_place_caret(idx, char, extend)` ·
+  `key_event(key, mods)` / `text_event(s)` · `clipboard()` / `set_clipboard(s)` ·
+  `KEY_CUT` / `KEY_COPY` / `KEY_PASTE`
 
 ## The two things to know
 
@@ -416,6 +422,48 @@ while the pointer is on it, and it never fires.
 
 The whole path is injectable — every entry point takes coordinates and reads no device — which
 is what lets a recorded pointer stream drive an exact state sequence in a headless test.
+
+## Focus, tab order and the text field
+
+`set_field(idx, s)` makes a node editable and puts it in the tab order; `key_event(key, mods)`
+and `text_event(s)` drive it.  Both take plain values rather than reading the event queue, so
+the whole model is **backend-independent and replayable** — a recorded keystroke list produces
+an exact buffer in a headless test.
+
+⚠⚠ **Every index is a CHARACTER index, and no byte index ever enters.**  `len(text)` counts
+characters while `s[a..b]` slices bytes, and loft snaps a byte cut outward — so a count applied
+as a range fits *fewer* characters than it measured, silently, and only in text that is not
+ASCII.  A caret **is** a count, so keeping it as a byte offset would put that trap inside the
+edit loop where every keystroke walks over it.  The gate is measured, not asserted: replacing
+the one edit primitive with byte slicing leaves `"héllo"` **unchanged** after a backspace over
+the `é` — and every ASCII test still passes, which is exactly the trap's signature.
+
+⚠ **One `splice` does every edit.**  Insert, backspace, delete, replace-the-selection and
+paste are all *"replace characters `[from, to)` with this"*.  Five hand-written walks over the
+same string would be five chances to count wrong.
+
+⚠⚠ **The modifier problem this phase was warned about does not exist.**  `input`'s `Bindings`
+cannot express a modifier — an `ActionBinding` is a name and a list of key codes — but a text
+field does not want *actions*.  It wants *this keystroke, with these modifiers, in this order*,
+and `graphics`'s event queue already delivers exactly that through `gl_event_mods()`.  So
+`key_event` takes the mods that arrived **with** the key, and Shift+Left selects where Left
+merely moves.
+
+⚠ **Tab order is the declared order** — the order nodes were added, which is the order a reader
+of the building code sees.  A separate `tab_index` would be a second ordering to keep in step
+with the first, and the two disagree the moment someone inserts a node.  A press moves the
+keyboard: onto a focusable node, off everything else.  A `Disabled` node leaves the tab order
+and cannot be focused directly either.
+
+**No pixels.**  The caret is a character index, so turning it into an x-coordinate is
+[`text2d`](../text2d/)'s measurement — `Metrics.width(take_chars(buf, caret))` — and the
+reverse (a click's x → a character index) is what `field_place_caret` takes.  That seam is why
+this file needs no font, no metrics and no dependency on the text package.
+
+**The clipboard is ours, not the system's.**  `graphics` exposes no clipboard, so cut/copy/
+paste round-trips inside the program and says so rather than pretending to reach the desktop.
+Not here either: undo, multi-line, word-wise motion, and IME *composition* state — `text_event`
+takes text that is already committed, which is what `EV_TEXT` delivers.
 
 ## Compositing
 

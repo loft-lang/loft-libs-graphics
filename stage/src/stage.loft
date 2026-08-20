@@ -79,6 +79,7 @@ pub struct StageNode {
     nd_layer: integer,       // ordering BAND — outranks depth entirely
     nd_depth: float,         // distance INTO the screen; larger draws first
     nd_disabled: boolean,    // D1: refuses to fire, and reads `Disabled`
+    nd_focusable: boolean,   // D2: can hold the keyboard, and joins the tab order
     nd_a: float,             // derived world affine — read after `compose`
     nd_b: float,
     nd_c: float,
@@ -163,6 +164,10 @@ pub struct Stage {
     st_ptr_y: float,
     st_pointer: integer,         // POINTER_MOUSE or POINTER_TOUCH
     st_hover: integer,           // node under the pointer, or -1
+    // D2: the keyboard, the fields it edits, and a clipboard of our own.
+    st_focus: integer,           // node holding the keyboard, or -1
+    st_fields: vector<NodeField>,
+    st_clip: text,
 }
 
 // LOOP wraps, ONCE stops on the last frame, PINGPONG reverses at both ends.
@@ -264,7 +269,8 @@ pub fn stage_new() -> Stage {
                               vw_w: 0, vw_h: 0 }],
             st_layers: [], st_uploads: 0, st_dirty: true,
             st_time: 0.0, st_seqs: [], st_proj: TOP_DOWN, st_tweens: [],
-            st_ptr_x: 0.0, st_ptr_y: 0.0, st_pointer: POINTER_MOUSE, st_hover: -1 }
+            st_ptr_x: 0.0, st_ptr_y: 0.0, st_pointer: POINTER_MOUSE, st_hover: -1,
+            st_focus: -1, st_fields: [], st_clip: "" }
 }
 
 pub fn node_count(self: const Stage) -> integer {
@@ -294,7 +300,7 @@ pub fn node_add(self: Stage, parent: integer, p: const Place) -> integer {
         nd_cue: 0.0, nd_layer: p.pl_layer, nd_depth: p.pl_depth,
         nd_clips: p.pl_clips, nd_clipped: false,
         nd_cx0: 0.0, nd_cy0: 0.0, nd_cx1: 0.0, nd_cy1: 0.0,
-        nd_disabled: false,
+        nd_disabled: false, nd_focusable: false,
         nd_a: 1.0, nd_b: 0.0, nd_c: 0.0, nd_d: 1.0, nd_tx: 0.0, nd_ty: 0.0,
     }];
     idx
@@ -1089,6 +1095,9 @@ pub fn press(self: Stage, sx: float, sy: float) -> integer {
     self.st_ptr_x = sx;
     self.st_ptr_y = sy;
     self.st_hover = hit;
+    // D2: a press moves the keyboard — onto the node if it can take it, and OFF
+    // whatever had it otherwise.  Clicking away is how a field is left.
+    if hit >= 0 and focusable(self, hit) { self.st_focus = hit; } else { self.st_focus = -1; }
     hit
 }
 
@@ -1230,6 +1239,337 @@ pub fn click(self: Stage, sx: float, sy: float) -> integer {
     self.st_hover = pick(self, sx, sy);
     fired
 }
+
+// ── D2: focus, tab order, and an editable text field ────────────────────────
+//
+// ⚠⚠ **EVERY INDEX HERE IS A CHARACTER INDEX, AND NO BYTE INDEX EVER ENTERS.**
+// That is the whole answer to a trap this stack has now met three times:
+// `len(text)` counts CHARACTERS while `s[a..b]` slices BYTES, and loft snaps a
+// byte cut outward — so a count applied as a range fits FEWER characters than it
+// measured, silently, and only in text that is not ASCII.  A caret IS a count.
+// Storing it as a byte offset would put that trap inside the edit loop, where
+// every keystroke walks over it.
+//
+// ⚠ **ONE `splice` DOES EVERY EDIT.**  Insert, backspace, delete, replace the
+// selection and paste are all *"replace characters [from, to) with this"*.  Five
+// hand-written walks over the same string would be five chances to get the
+// character counting wrong; there is one, and every editing key routes through
+// it.
+//
+// ⚠⚠ **THE MODIFIER PROBLEM THIS PHASE WAS WARNED ABOUT DOES NOT EXIST.**
+// @PLN145 `D0b` measured that `input`'s `Bindings` cannot express a modifier —
+// an `ActionBinding` is a name and a list of key codes — and the plan therefore
+// asked whether this phase must carry a ctrl rule of its own.  It must not:
+// `graphics`'s EVENT QUEUE already delivers `gl_event_mods()` per event
+// (`MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_SUPER`).  A text field does not want
+// ACTIONS — it wants *this keystroke, with these modifiers, in this order* —
+// and that is exactly what the queue carries.  The two findings do not
+// conflict: a binding table is the wrong instrument for an editor, not a
+// broken one.
+//
+// ⚠ `key_event` takes `(key, mods)` as plain integers rather than reading the
+// queue itself, so the whole model is backend-independent and replayable.  That
+// also makes the Android question — NativeActivity delivers `KeyEvent`s and may
+// not deliver `EV_TEXT` — a question for `graphics` rather than for this file:
+// feed the text in from wherever it comes.
+//
+// ⚠ The clipboard is OURS, not the system's.  `graphics` exposes no clipboard at
+// all, so cut/copy/paste round-trips inside the program and says so rather than
+// pretending to reach the desktop.
+//
+// ⚠ **What is NOT here:** no undo, no multi-line, no word-wise motion, and no
+// IME *composition* state — `text_event` takes text that is already committed,
+// which is what `EV_TEXT` delivers.  And **no pixels**: the caret is a character
+// index, so turning it into an x-coordinate is `text2d`'s measurement
+// (`Metrics.width(take_chars(buf, caret))`) and stays with whoever draws.
+
+// One node's editable text.  Carried BESIDE the nodes rather than inside them,
+// so a scene full of sprites pays nothing for a feature two of them use.
+struct NodeField {
+    nf_node: integer,
+    nf_buf: text,
+    nf_caret: integer,      // CHARACTER index, in [0, len(buf)]
+    nf_mark: integer,       // the selection anchor, same units
+}
+
+// Replace characters `[from, to)` of `s` with `ins` — THE edit primitive.
+//
+// ⚠ `from == len(s)` appends, which the loop cannot see because it stops at
+// `len - 1`; the tail test is what catches that case.
+fn splice(s: text, from: integer, to: integer, ins: text) -> text {
+    out = "";
+    k = 0;
+    for c in s {
+        if k == from { out += ins; }
+        if k < from or k >= to { out += "{c}"; }
+        k = k + 1;
+    }
+    if from >= k { out += ins; }
+    out
+}
+
+// Characters `[from, to)` of `s`.
+fn chars_between(s: text, from: integer, to: integer) -> text {
+    out = "";
+    k = 0;
+    for c in s {
+        if k >= from and k < to { out += "{c}"; }
+        k = k + 1;
+    }
+    out
+}
+
+// Can this node hold the keyboard?
+pub fn focusable(self: const Stage, idx: integer) -> boolean {
+    if idx >= 0 {
+        if idx < len(self.st_nodes) {
+            return self.st_nodes[idx].nd_focusable and !self.st_nodes[idx].nd_disabled;
+        }
+    }
+    false
+}
+
+pub fn set_focusable(self: Stage, idx: integer, on: boolean) {
+    if idx >= 0 {
+        if idx < len(self.st_nodes) { self.st_nodes[idx].nd_focusable = on; }
+    }
+}
+
+// Which node has the keyboard, or -1.
+pub fn focused(self: const Stage) -> integer { self.st_focus }
+
+// Give it the keyboard.  A node that cannot take it clears the focus instead, so
+// this never leaves the keyboard somewhere unreachable.
+pub fn set_focus(self: Stage, idx: integer) {
+    if focusable(self, idx) { self.st_focus = idx; return; }
+    self.st_focus = -1;
+}
+
+// ⚠ TAB ORDER IS THE DECLARED ORDER — the order the nodes were added, which is
+// the order a reader of the building code sees.  A separate `tab_index` would be
+// a second ordering to keep in step with the first, and the two disagree the
+// moment someone inserts a node.
+pub fn focus_next(self: Stage) { focus_step(self, 1); }
+pub fn focus_prev(self: Stage) { focus_step(self, -1); }
+
+fn focus_step(self: Stage, dir: integer) {
+    n = len(self.st_nodes);
+    if n <= 0 { return; }
+    // With nothing focused, forward starts BEFORE the first and backward AFTER
+    // the last, so both land where a reader expects rather than one of them
+    // skipping an end.
+    start = self.st_focus;
+    if start < 0 { start = if dir > 0 { -1 } else { n }; }
+    for step in 1..=n {
+        cand = (((start + dir * step) % n) + n) % n ?? 0;
+        if focusable(self, cand) { self.st_focus = cand; return; }
+    }
+    // Nothing in the scene can take it; leave the focus where it was.
+}
+
+// Make this node an editable field holding `s`, and give it the tab order.
+pub fn set_field(self: Stage, idx: integer, s: text) {
+    if idx < 0 or idx >= len(self.st_nodes) { return; }
+    self.st_nodes[idx].nd_focusable = true;
+    at = field_at(self, idx);
+    n = len(s);
+    if at >= 0 {
+        set_buf(self, at, s);
+        set_caret(self, at, n);
+        set_mark(self, at, n);
+        return;
+    }
+    self.st_fields += [NodeField { nf_node: idx, nf_buf: s, nf_caret: n, nf_mark: n }];
+}
+
+fn field_at(self: const Stage, idx: integer) -> integer {
+    if idx < 0 { return -1; }
+    for f in self.st_fields {
+        if f.nf_node == idx { return f#index; }
+    }
+    -1
+}
+
+// ── The six guarded ways to touch a field's record.
+//
+// ⚠ Every read and write of `st_fields` goes through one of these, so the bounds
+// test is written ONCE per accessor instead of at each of the twenty-odd places
+// an editing key touches the record.
+fn buf_of(self: const Stage, at: integer) -> text {
+    if at >= 0 {
+        if at < len(self.st_fields) { return self.st_fields[at].nf_buf; }
+    }
+    ""
+}
+
+fn caret_of(self: const Stage, at: integer) -> integer {
+    if at >= 0 {
+        if at < len(self.st_fields) { return self.st_fields[at].nf_caret; }
+    }
+    0
+}
+
+fn mark_of(self: const Stage, at: integer) -> integer {
+    if at >= 0 {
+        if at < len(self.st_fields) { return self.st_fields[at].nf_mark; }
+    }
+    0
+}
+
+fn set_buf(self: Stage, at: integer, v: text) {
+    if at >= 0 {
+        if at < len(self.st_fields) { self.st_fields[at].nf_buf = v; }
+    }
+}
+
+fn set_caret(self: Stage, at: integer, v: integer) {
+    if at >= 0 {
+        if at < len(self.st_fields) { self.st_fields[at].nf_caret = v; }
+    }
+}
+
+fn set_mark(self: Stage, at: integer, v: integer) {
+    if at >= 0 {
+        if at < len(self.st_fields) { self.st_fields[at].nf_mark = v; }
+    }
+}
+
+pub fn is_field(self: const Stage, idx: integer) -> boolean { field_at(self, idx) >= 0 }
+
+pub fn field_text(self: const Stage, idx: integer) -> text {
+    buf_of(self, field_at(self, idx))
+}
+
+// Where the caret is, counted in CHARACTERS.
+pub fn field_caret(self: const Stage, idx: integer) -> integer {
+    caret_of(self, field_at(self, idx))
+}
+
+// The selection anchor.  Equal to the caret when nothing is selected.
+pub fn field_mark(self: const Stage, idx: integer) -> integer {
+    mark_of(self, field_at(self, idx))
+}
+
+// The selected text, or "" when the caret is a point.
+pub fn field_selection(self: const Stage, idx: integer) -> text {
+    at = field_at(self, idx);
+    chars_between(buf_of(self, at), min(caret_of(self, at), mark_of(self, at)),
+                  max(caret_of(self, at), mark_of(self, at)))
+}
+
+// Put the caret at a CHARACTER index — what a click resolves to once whoever
+// draws the text has turned an x-coordinate into a count.
+pub fn field_place_caret(self: Stage, idx: integer, at_char: integer, extend: boolean) {
+    at = field_at(self, idx);
+    if at < 0 { return; }
+    c = clamp(at_char, 0, len(buf_of(self, at)));
+    set_caret(self, at, c);
+    if !extend { set_mark(self, at, c); }
+}
+
+// Our own clipboard — see the header.
+pub fn clipboard(self: const Stage) -> text { self.st_clip }
+pub fn set_clipboard(self: Stage, s: text) { self.st_clip = s; }
+
+// Commit text into the focused field, replacing any selection.
+//
+// ⚠ This is where IME text arrives: `EV_TEXT` delivers a whole COMMITTED string,
+// which may be several characters and is very often not ASCII.
+pub fn text_event(self: Stage, s: text) {
+    at = field_at(self, self.st_focus);
+    if at < 0 { return; }
+    if s == "" { return; }
+    replace_selection(self, at, s);
+}
+
+fn replace_selection(self: Stage, at: integer, ins: text) {
+    lo = min(caret_of(self, at), mark_of(self, at));
+    hi = max(caret_of(self, at), mark_of(self, at));
+    set_buf(self, at, splice(buf_of(self, at), lo, hi, ins));
+    c = lo + len(ins);
+    set_caret(self, at, c);
+    set_mark(self, at, c);
+}
+
+// A key, with the modifiers that arrived WITH it.  Tab moves the focus; every
+// other key goes to the focused field.
+pub fn key_event(self: Stage, key: integer, mods: integer) {
+    if key == graphics::KEY_TAB {
+        if (mods & graphics::MOD_SHIFT) != 0 { focus_prev(self); } else { focus_next(self); }
+        return;
+    }
+    at = field_at(self, self.st_focus);
+    if at < 0 { return; }
+    shift = (mods & graphics::MOD_SHIFT) != 0;
+    n = len(buf_of(self, at));
+    caret = caret_of(self, at);
+    lo = min(caret, mark_of(self, at));
+    hi = max(caret, mark_of(self, at));
+
+    if (mods & graphics::MOD_CTRL) != 0 {
+        if key == graphics::KEY_A { set_mark(self, at, 0); set_caret(self, at, n); return; }
+        if key == KEY_COPY {
+            if lo != hi { self.st_clip = chars_between(buf_of(self, at), lo, hi); }
+            return;
+        }
+        if key == KEY_CUT {
+            if lo != hi {
+                self.st_clip = chars_between(buf_of(self, at), lo, hi);
+                replace_selection(self, at, "");
+            }
+            return;
+        }
+        if key == KEY_PASTE { replace_selection(self, at, self.st_clip); }
+        return;
+    }
+
+    if key == graphics::KEY_BACKSPACE {
+        if lo != hi { replace_selection(self, at, ""); return; }
+        if caret > 0 {
+            set_buf(self, at, splice(buf_of(self, at), caret - 1, caret, ""));
+            set_caret(self, at, caret - 1);
+            set_mark(self, at, caret - 1);
+        }
+        return;
+    }
+    if key == graphics::KEY_DELETE {
+        if lo != hi { replace_selection(self, at, ""); return; }
+        if caret < n { set_buf(self, at, splice(buf_of(self, at), caret, caret + 1, "")); }
+        return;
+    }
+    if key == graphics::KEY_LEFT {
+        // ⚠ Without shift a LIVE SELECTION collapses to its near end rather than
+        // stepping one further — pressing left with three characters selected
+        // must land at the START of them, not before the start.
+        if shift { set_caret(self, at, max(caret - 1, 0)); return; }
+        c = if lo != hi { lo } else { max(caret - 1, 0) };
+        set_caret(self, at, c);
+        set_mark(self, at, c);
+        return;
+    }
+    if key == graphics::KEY_RIGHT {
+        if shift { set_caret(self, at, min(caret + 1, n)); return; }
+        c = if lo != hi { hi } else { min(caret + 1, n) };
+        set_caret(self, at, c);
+        set_mark(self, at, c);
+        return;
+    }
+    if key == graphics::KEY_HOME {
+        set_caret(self, at, 0);
+        if !shift { set_mark(self, at, 0); }
+        return;
+    }
+    if key == graphics::KEY_END {
+        set_caret(self, at, n);
+        if !shift { set_mark(self, at, n); }
+    }
+}
+
+// The three editing keys `graphics` does not name.  Loft's key constants ARE the
+// lowercase ASCII codes, so these follow the same convention.
+pub const KEY_CUT: integer = 120;     // 'x'
+pub const KEY_COPY: integer = 99;     // 'c'
+pub const KEY_PASTE: integer = 118;   // 'v'
 
 
 // ── A5: compositing ──────────────────────────────────────────────────────────
