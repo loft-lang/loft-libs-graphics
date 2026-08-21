@@ -9,6 +9,8 @@ api_compatible_with  = "0.4.0"   # oldest own release this is a drop-in for
 data_compatible_with = "0.4.0"   # oldest own release whose stored data this reads
 loft = ">=2026.8.0"
 repository = "loft-libs-graphics"
+description = "Text that always draws — a built-in face, a glyph atlas, measured metrics, wrapping and alignment, with no font file and no GL context"
+categories  = ["text", "graphics"]
 
 [dependencies]
 graphics = ">=0.5.0"

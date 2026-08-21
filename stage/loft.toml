@@ -9,6 +9,8 @@ api_compatible_with  = "0.18.1"   # oldest own release this is a drop-in for
 data_compatible_with = "0.18.1"   # oldest own release whose stored data this reads
 loft = ">=2026.8.0"
 repository = "loft-libs-graphics"
+description = "A retained 2-D scene for loft: a node tree you mutate, with transforms, clipping, batching, pointer routing and widget states"
+categories  = ["graphics", "game"]
 
 [dependencies]
 graphics = ">=0.5.0"
