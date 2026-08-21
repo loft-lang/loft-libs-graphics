@@ -11,4 +11,4 @@ jobs:
   ci:
     uses: loft-lang/loft/.github/workflows/library-ci-reusable.yml@main
     with:
-      packages: '["graphics", "gridmesh", "imaging", "shapes"]'
+      packages: '["graphics", "gridmesh", "imaging", "shapes", "stage", "text2d", "tween"]'
