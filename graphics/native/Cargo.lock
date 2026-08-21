@@ -913,6 +913,7 @@ dependencies = [
 name = "loft-graphics-native"
 version = "0.1.0"
 dependencies = [
+ "android-activity",
  "fontdue",
  "gl",
  "glutin",
