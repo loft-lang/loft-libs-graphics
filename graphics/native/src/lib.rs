@@ -225,21 +225,71 @@ fn enqueue(ev: InEvent) {
 // winit events, so `loft_gl_mouse_x/y/button` read touch identically (no new loft API). Called
 // from `android_gl::poll` on the `android_main` thread — the same thread the loft program runs
 // on, so these thread-local cells are shared with the `gl_mouse_*` reads.
+//
+// ⚠⚠ THEY ALSO ENQUEUE.  The ordered event queue (Gap 01) arrived in v0.5.x, AFTER the
+// Android backend was written against v0.1.1, so nothing on this platform fed it: the
+// polled reads worked and `gl_next_event` answered EV_NONE for ever.  Half the input API
+// silently absent is worse than a build error, and the only signal was `enqueue` and the
+// `InEvent` variants showing up as dead code under `cfg(android)`.
+//
+// Enqueuing HERE rather than in `android_gl` keeps the file's stated invariant intact —
+// one enqueue chokepoint, in this file — and leaves `android_gl` reporting device facts
+// and nothing else.  These three helpers are `cfg(android)`, so the desktop winit arms
+// cannot double-enqueue through them.
 #[cfg(target_os = "android")]
 pub(crate) fn set_pointer_pos(x: f64, y: f64) {
     MOUSE_X.with(|c| c.set(x));
     MOUSE_Y.with(|c| c.set(y));
+    enqueue(InEvent::MouseMove { x, y });
+    // ⚠ And `TouchMove` when a finger is actually down.  Emitting Begin/End without Move
+    // would be incoherent — a consumer tracking a drag through the touch events would see
+    // it start and stop and never travel.  The button cell is the only "is a finger down"
+    // this seam has, and it is the same bit `set_pointer_down` wrote.
+    if MOUSE_BTN.with(std::cell::Cell::get) & 1 != 0 {
+        enqueue(InEvent::TouchMove { id: 0, x, y });
+    }
 }
 #[cfg(target_os = "android")]
 pub(crate) fn set_pointer_down(down: bool) {
     // Touch maps to the left mouse button (bit 0), matching the desktop `MouseButton::Left`.
     MOUSE_BTN.with(|c| c.set(u8::from(down)));
+    let (x, y) = (
+        MOUSE_X.with(std::cell::Cell::get),
+        MOUSE_Y.with(std::cell::Cell::get),
+    );
+    // ⚠ Both spellings, because a consumer may be written against either and the pointer
+    // IS a touch here: `TouchBegin/End` carries the truth, `MouseDown/Up` is the same
+    // event in the shape the desktop path emits — which is what lets one recorded stream
+    // replay as mouse and as touch (stage's D1 gate relies on exactly that).
+    if down {
+        enqueue(InEvent::TouchBegin { id: 0, x, y });
+        enqueue(InEvent::MouseDown { button: 0, x, y });
+    } else {
+        enqueue(InEvent::TouchEnd { id: 0, x, y });
+        enqueue(InEvent::MouseUp { button: 0, x, y });
+    }
 }
 /// @PLN106 B4 IME — set a key's pressed state (`idx` is the 0-255 index `gl_key_pressed`
 /// reads, matching the desktop `key_index` scheme). Called from `android_gl::drain_input`.
 #[cfg(target_os = "android")]
 pub(crate) fn set_key(idx: u8, pressed: bool) {
     KEYS.with(|k| k.borrow_mut()[idx as usize] = pressed);
+    // ⚠ `mods: 0` is honest rather than convenient: NativeActivity's KeyEvent carries a
+    // meta state this seam does not receive, so a modifier is NOT KNOWN here.  Reporting 0
+    // says "no modifiers seen"; inventing one would make `gl_event_mods` lie on the one
+    // platform that cannot check it.  Feeding real meta state is the follow-up, together
+    // with `gl_text_input()` for composition — NativeActivity has no TextEvent, which is
+    // why EV_TEXT stays unfed here (@PLN145 D2 Targets records the same limit).
+    let key = i64::from(idx);
+    if pressed {
+        enqueue(InEvent::KeyDown {
+            key,
+            mods: 0,
+            repeat: false,
+        });
+    } else {
+        enqueue(InEvent::KeyUp { key, mods: 0 });
+    }
 }
 
 // Map winit key codes to a simple 0-255 index. Desktop-only; Android input is B4.
@@ -327,7 +377,9 @@ impl ApplicationHandler for JsonApp {
                 MODS.with(|c| c.set(bits));
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                let code = key_index(&event.logical_key).map(|i| i as i64).unwrap_or(-1);
+                let code = key_index(&event.logical_key)
+                    .map(|i| i as i64)
+                    .unwrap_or(-1);
                 if (0..=255).contains(&code) {
                     KEYS.with(|k| k.borrow_mut()[code as usize] = event.state.is_pressed());
                 }
@@ -936,7 +988,11 @@ pub unsafe extern "C" fn n_gl_upload_indices(
 
 /// Native path (raw pointer): upload indices from a raw i64 pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn loft_gl_upload_indices_rawptr(vao: i64, idx_ptr: *const i64, count: u32) -> i64 {
+pub unsafe extern "C" fn loft_gl_upload_indices_rawptr(
+    vao: i64,
+    idx_ptr: *const i64,
+    count: u32,
+) -> i64 {
     gl_guard!(0);
     unsafe { upload_ebo(vao as u32, idx_ptr, count) as i64 }
 }
@@ -2665,7 +2721,11 @@ mod input_event_tests {
         assert_eq!(loft_gl_event_button(), 1);
         assert_eq!(loft_gl_event_x(), 12.0);
         assert_eq!(loft_gl_event_y(), 34.0);
-        assert_eq!(text_of(loft_gl_event_text()), "", "text leaked across events");
+        assert_eq!(
+            text_of(loft_gl_event_text()),
+            "",
+            "text leaked across events"
+        );
 
         // 4 — Wheel.
         assert_eq!(loft_gl_next_event(), EV_WHEEL);
@@ -2689,7 +2749,6 @@ mod input_event_tests {
     }
 }
 
-
 // ── loft-named aliases: the STORE-AWARE entry points own the exported names ──
 //
 // A loft declaration carries `#native "loft_gl_x"`, and a library compiled to a
@@ -2700,21 +2759,39 @@ mod input_event_tests {
 // holds a pointer; they simply no longer shadow (loft-libs-graphics#33).
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn loft_gl_upload_vertices(store: loft_ffi::LoftStore, data: loft_ffi::LoftRef, stride: i64) -> i64 {
+pub unsafe extern "C" fn loft_gl_upload_vertices(
+    store: loft_ffi::LoftStore,
+    data: loft_ffi::LoftRef,
+    stride: i64,
+) -> i64 {
     unsafe { n_gl_upload_vertices(store, data, stride) }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn loft_gl_update_buffer(store: loft_ffi::LoftStore, vbo: i64, data: loft_ffi::LoftRef) {
+pub unsafe extern "C" fn loft_gl_update_buffer(
+    store: loft_ffi::LoftStore,
+    vbo: i64,
+    data: loft_ffi::LoftRef,
+) {
     unsafe { n_gl_update_buffer(store, vbo, data) }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn loft_gl_upload_indices(store: loft_ffi::LoftStore, vao: i64, data: loft_ffi::LoftRef) -> i64 {
+pub unsafe extern "C" fn loft_gl_upload_indices(
+    store: loft_ffi::LoftStore,
+    vao: i64,
+    data: loft_ffi::LoftRef,
+) -> i64 {
     unsafe { n_gl_upload_indices(store, vao, data) }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn loft_gl_set_mat4(store: loft_ffi::LoftStore, program: i64, name_ptr: *const u8, name_len: usize, mat: loft_ffi::LoftRef) {
+pub unsafe extern "C" fn loft_gl_set_mat4(
+    store: loft_ffi::LoftStore,
+    program: i64,
+    name_ptr: *const u8,
+    name_len: usize,
+    mat: loft_ffi::LoftRef,
+) {
     unsafe { n_gl_set_mat4(store, program, name_ptr, name_len, mat) }
 }
