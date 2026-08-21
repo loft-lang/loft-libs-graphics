@@ -1,0 +1,104 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN144 A1 — transform composition, checked against HAND-COMPUTED POINTS.
+//
+// Not against matrix entries.  `mesh3d` has no `mat4_rotate_z`, so a mat4 oracle
+// cannot even express a 2-D rotation — but the deeper reason is that comparing
+// entries checks a convention while comparing transformed points checks the
+// thing a renderer needs.  Every expected value below is worked out by hand and
+// written as a literal; agreement between two runs of the same code is not a pass.
+use stage;
+
+EPS = 0.0001;
+
+fn near(a: float, b: float) -> boolean { a - b < EPS and b - a < EPS }
+
+fn check_pt(name: text, got: stage::P2, ex: float, ey: float) {
+    assert(near(got.p_x, ex) and near(got.p_y, ey),
+           "{name}: got ({got.p_x}, {got.p_y}) want ({ex}, {ey})");
+}
+
+// The ORIGIN is the anchor: local (ox, oy) must land exactly on (x, y), whatever
+// the rotation and scale are.  This is what lets a sprite stand up from its feet.
+fn test_origin_is_the_anchor() {
+    st = stage::stage_new();
+    n = st.node_add(-1, stage::Place { pl_x: 100.0, pl_y: 40.0, pl_rot: 1.1, pl_sx: 3.0, pl_sy: 0.5, pl_ox: 5.0, pl_oy: 9.0 });
+    st.compose();
+    check_pt("origin lands on (x,y)", st.world_origin(n), 100.0, 40.0);
+}
+
+// A quarter turn: +ve rotation takes +x toward +y.  With the origin at (0,0) and
+// unit scale, local (1,0) -> (0,1), so the world point is (x, y) + (0, 1).
+fn test_quarter_turn() {
+    st = stage::stage_new();
+    n = st.node_add(-1, stage::Place { pl_x: 10.0, pl_y: 20.0, pl_rot: 1.5707963267948966 });
+    st.compose();
+    check_pt("+x turns toward +y", st.world_point(n, 1.0, 0.0), 10.0, 21.0);
+    check_pt("+y turns toward -x", st.world_point(n, 0.0, 1.0), 9.0, 20.0);
+}
+
+// Non-uniform scale must scale the node's own axes, not the world's — so after a
+// quarter turn, sx stretches what is now the world's y.
+fn test_non_uniform_scale_follows_rotation() {
+    st = stage::stage_new();
+    n = st.node_add(-1, stage::Place { pl_rot: 1.5707963267948966, pl_sx: 3.0, pl_sy: 7.0 });
+    st.compose();
+    check_pt("sx acts along local x", st.world_point(n, 1.0, 0.0), 0.0, 3.0);
+    check_pt("sy acts along local y", st.world_point(n, 0.0, 1.0), -7.0, 0.0);
+}
+
+// A pivot away from the corner rotates ABOUT the pivot.  Node at (100,100) with
+// origin (5,5) and a quarter turn: local (5,5) pins to (100,100), and local (6,5)
+// — one step along local +x — lands one step along world +y.
+fn test_pivot_rotates_about_the_origin() {
+    st = stage::stage_new();
+    n = st.node_add(-1, stage::Place { pl_x: 100.0, pl_y: 100.0, pl_rot: 1.5707963267948966, pl_ox: 5.0, pl_oy: 5.0 });
+    st.compose();
+    check_pt("pivot pins", st.world_point(n, 5.0, 5.0), 100.0, 100.0);
+    check_pt("a step of local +x", st.world_point(n, 6.0, 5.0), 100.0, 101.0);
+    check_pt("a step of local +y", st.world_point(n, 5.0, 6.0), 99.0, 100.0);
+}
+
+// THE GATE: three deep, with rotation, non-uniform scale and a pivot at every
+// level, all moving together.  A sweep that varies one and pins the rest reads as
+// proof and is not — this is the cell where a wrong multiply ORDER survives every
+// simpler test.
+//
+// Worked by hand:
+//   A: pos (10,0), rot +90, scale (2,1), origin (0,0)
+//      A.linear = R90 . S(2,1) = [a=0, b=2, c=-1, d=0];  A.t = (10, 0)
+//   B: child of A, pos (3,0) in A's space, rot 0, scale (1,1), origin (0,0)
+//      B.local.t = (3,0)  ->  world t = A.linear . (3,0) + A.t = (10, 6)
+//      B.linear = A.linear
+//   C: child of B, pos (0,2) in B's space, rot 0, scale (1,4), origin (0,1)
+//      C.local: A=[1,0,0,4], t = (0,2) - A.(0,1) = (0, -2)
+//      C.world.linear = B.linear . C.local.linear = [a=0, b=2, c=-4, d=0]
+//      C.world.t = B.linear . (0,-2) + B.t = (0*0 + -1*-2 + 10, 2*0 + 0*-2 + 6)
+//                = (12, 6)
+//   C's origin (0,1) must therefore land at C.world.linear.(0,1) + C.world.t
+//                = (-4 + 12, 0 + 6) = (8, 6)
+fn test_three_deep_all_axes_together() {
+    st = stage::stage_new();
+    q = 1.5707963267948966;
+    a = st.node_add(-1, stage::Place { pl_x: 10.0, pl_rot: q, pl_sx: 2.0 });
+    b = st.node_add(a, stage::Place { pl_x: 3.0 });
+    c = st.node_add(b, stage::Place { pl_y: 2.0, pl_sy: 4.0, pl_oy: 1.0 });
+    st.compose();
+    check_pt("A origin", st.world_origin(a), 10.0, 0.0);
+    check_pt("B origin", st.world_origin(b), 10.0, 6.0);
+    check_pt("C origin", st.world_origin(c), 8.0, 6.0);
+    check_pt("C local (1,1)", st.world_point(c, 1.0, 1.0), 8.0, 8.0);
+}
+
+// The invariant compose depends on, enforced rather than trusted: a parent must
+// already exist.  Without this a child could be composed against an unwritten
+// parent and produce a plausible wrong frame instead of an error.
+fn test_forward_parent_is_refused() {
+    st = stage::stage_new();
+    assert(st.node_add(5, stage::Place {}) == -1,
+             "a forward parent reference must be refused");
+    assert(st.node_add(-2, stage::Place {}) == -1,
+             "a parent below -1 must be refused");
+    assert(st.node_count() == 0, "a refused add must not append");
+}

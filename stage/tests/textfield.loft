@@ -1,0 +1,258 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN145 D2 — focus, tab order and the text field, driven by REPLAYED events.
+//
+// ⚠ Every buffer below was worked out by hand from the keystroke list, and the
+// non-ASCII cells are the point: `len(text)` counts CHARACTERS while `s[a..b]`
+// slices BYTES, so a caret kept as a byte offset puts that trap inside the edit
+// loop.  Every index here is a character count, and the gates say so in text
+// where the two differ.
+use stage;
+use graphics;
+
+const NOMOD = 0;
+const SHIFT = 1;      // graphics::MOD_SHIFT
+const CTRL  = 2;      // graphics::MOD_CTRL
+
+fn field_node(st: Stage, s: text) -> integer {
+  n = st.node_add(-1, Place { pl_w: 100.0, pl_h: 12.0 });
+  st.compose();
+  st.set_field(n, s);
+  st.set_focus(n);
+  n
+}
+
+// THE GATE.  A replayed keystroke sequence produces the exact buffer, and the
+// text arriving through `text_event` is what an IME commits.
+fn test_replayed_keystrokes_produce_the_exact_buffer() {
+  st = stage_new();
+  n = field_node(st, "");
+  st.text_event("Ada");
+  assert(st.field_text(n) == "Ada", "typed: {st.field_text(n)}");
+  assert(st.field_caret(n) == 3, "caret follows the insertion");
+
+  st.key_event(graphics::KEY_BACKSPACE, NOMOD);
+  assert(st.field_text(n) == "Ad", "backspace: {st.field_text(n)}");
+
+  st.key_event(graphics::KEY_LEFT, NOMOD);
+  st.text_event("m");
+  assert(st.field_text(n) == "Amd", "insert in the middle: {st.field_text(n)}");
+
+  st.key_event(graphics::KEY_END, NOMOD);
+  st.text_event("in");
+  assert(st.field_text(n) == "Amdin", "at the end: {st.field_text(n)}");
+
+  st.key_event(graphics::KEY_HOME, NOMOD);
+  st.key_event(graphics::KEY_DELETE, NOMOD);
+  assert(st.field_text(n) == "mdin", "delete at the start: {st.field_text(n)}");
+  assert(st.field_caret(n) == 0, "and the caret stays put");
+}
+
+// ⚠⚠ THE NON-ASCII GATE.  Every one of these is a CHARACTER operation, and each
+// would come out differently if the caret were a byte offset.
+fn test_editing_counts_characters_and_not_bytes() {
+  st = stage_new();
+  n = field_node(st, "héllo");
+  assert(len("héllo") == 5, "five characters");
+  assert(size("héllo") == 6, "…but six bytes — which is the whole trap");
+
+  assert(st.field_caret(n) == 5, "a new field puts the caret after the last CHARACTER");
+
+  st.key_event(graphics::KEY_HOME, NOMOD);
+  st.key_event(graphics::KEY_RIGHT, NOMOD);
+  st.key_event(graphics::KEY_RIGHT, NOMOD);
+  assert(st.field_caret(n) == 2, "two rights is two characters");
+  st.key_event(graphics::KEY_BACKSPACE, NOMOD);
+  // Removing the 'é' — a two-byte character — must leave exactly "hllo".
+  assert(st.field_text(n) == "hllo", "backspace over a 2-byte char: {st.field_text(n)}");
+  assert(st.field_caret(n) == 1, "and the caret steps back one CHARACTER");
+
+  st.text_event("é");
+  assert(st.field_text(n) == "héllo", "and it goes back exactly where it was");
+
+  // A whole IME commit lands as one insertion, several characters wide.
+  st.key_event(graphics::KEY_END, NOMOD);
+  st.text_event("世界");
+  assert(st.field_text(n) == "héllo世界", "IME commit: {st.field_text(n)}");
+  assert(st.field_caret(n) == 7, "five plus two characters, got {st.field_caret(n)}");
+  assert(size(st.field_text(n)) == 12, "which is twelve BYTES — the counts differ");
+}
+
+// ⚠⚠ THE MODIFIER GATE.  `D0b` measured that `input`'s bindings cannot express a
+// modifier; the EVENT carries one, and here is the difference it makes: the same
+// key with and without Shift does two different things.
+fn test_the_same_key_with_shift_does_something_else() {
+  st = stage_new();
+  n = field_node(st, "abcdef");
+
+  st.key_event(graphics::KEY_LEFT, NOMOD);
+  assert(st.field_selection(n) == "", "plain left selects nothing");
+  assert(st.field_caret(n) == 5, "and just moves");
+
+  st.key_event(graphics::KEY_LEFT, SHIFT);
+  st.key_event(graphics::KEY_LEFT, SHIFT);
+  assert(st.field_selection(n) == "de", "shift+left selects: {st.field_selection(n)}");
+  assert(st.field_mark(n) == 5, "the anchor stayed where the selection began");
+
+  // Typing over a selection replaces it.
+  st.text_event("X");
+  assert(st.field_text(n) == "abcXf", "typing replaces the selection: {st.field_text(n)}");
+}
+
+// Ctrl+C / Ctrl+X / Ctrl+V round-trip through our own clipboard.
+fn test_copy_cut_and_paste() {
+  st = stage_new();
+  n = field_node(st, "hello");
+  st.key_event(graphics::KEY_A, CTRL);
+  assert(st.field_selection(n) == "hello", "ctrl+a selects all");
+
+  st.key_event(KEY_COPY, CTRL);
+  assert(st.clipboard() == "hello", "ctrl+c copied: {st.clipboard()}");
+  assert(st.field_text(n) == "hello", "and changed nothing");
+
+  st.key_event(graphics::KEY_END, NOMOD);
+  st.key_event(KEY_PASTE, CTRL);
+  assert(st.field_text(n) == "hellohello", "ctrl+v pasted: {st.field_text(n)}");
+
+  st.key_event(graphics::KEY_A, CTRL);
+  st.key_event(KEY_CUT, CTRL);
+  assert(st.field_text(n) == "", "ctrl+x emptied it");
+  assert(st.clipboard() == "hellohello", "and took the text with it");
+}
+
+// Backspace with a selection deletes the SELECTION, not one character — the
+// classic off-by-a-lot.
+fn test_backspace_over_a_selection_deletes_the_selection() {
+  st = stage_new();
+  n = field_node(st, "abcdef");
+  st.key_event(graphics::KEY_HOME, NOMOD);
+  for _ in 0..3 { st.key_event(graphics::KEY_RIGHT, SHIFT); }
+  assert(st.field_selection(n) == "abc", "three selected");
+  st.key_event(graphics::KEY_BACKSPACE, NOMOD);
+  assert(st.field_text(n) == "def", "the selection went, not one char: {st.field_text(n)}");
+  assert(st.field_selection(n) == "", "and nothing is selected now");
+}
+
+// ⚠ A plain arrow with a LIVE selection collapses to its near end rather than
+// stepping one further.
+fn test_an_arrow_collapses_a_selection_to_its_near_end() {
+  st = stage_new();
+  n = field_node(st, "abcdef");
+  st.key_event(graphics::KEY_HOME, NOMOD);
+  for _ in 0..3 { st.key_event(graphics::KEY_RIGHT, SHIFT); }
+  assert(st.field_caret(n) == 3 and st.field_mark(n) == 0, "caret 3, anchor 0");
+  st.key_event(graphics::KEY_LEFT, NOMOD);
+  assert(st.field_caret(n) == 0, "left collapses to the START of the selection");
+
+  for _ in 0..3 { st.key_event(graphics::KEY_RIGHT, SHIFT); }
+  st.key_event(graphics::KEY_RIGHT, NOMOD);
+  assert(st.field_caret(n) == 3, "and right collapses to its END");
+}
+
+// Tab order is the DECLARED order, and it wraps in both directions.
+fn test_tab_order_follows_the_declared_order() {
+  st = stage_new();
+  a = st.node_add(-1, Place { pl_w: 10.0, pl_h: 10.0 });
+  b = st.node_add(-1, Place { pl_w: 10.0, pl_h: 10.0 });
+  c = st.node_add(-1, Place { pl_w: 10.0, pl_h: 10.0 });
+  st.compose();
+  st.set_focusable(a, true);
+  st.set_focusable(c, true);          // b is deliberately NOT focusable
+
+  assert(st.focused() == -1, "nothing has it to begin with");
+  st.focus_next();
+  assert(st.focused() == a, "forward from nothing lands on the FIRST");
+  st.focus_next();
+  assert(st.focused() == c, "and skips the one that cannot take it");
+  st.focus_next();
+  assert(st.focused() == a, "and wraps");
+  st.focus_prev();
+  assert(st.focused() == c, "backward wraps the other way");
+
+  st2 = stage_new();
+  _ = st2.node_add(-1, Place { pl_w: 10.0, pl_h: 10.0 });
+  z = st2.node_add(-1, Place { pl_w: 10.0, pl_h: 10.0 });
+  st2.compose();
+  st2.set_focusable(z, true);
+  st2.focus_prev();
+  assert(st2.focused() == z, "backward from nothing lands on the LAST");
+  assert(b == a + 1, "…and b really was between them");
+}
+
+// Tab is delivered as a key like any other, and moves the focus rather than
+// typing.
+fn test_tab_moves_the_focus_and_does_not_type() {
+  st = stage_new();
+  a = st.node_add(-1, Place { pl_w: 10.0, pl_h: 10.0 });
+  b = st.node_add(-1, Place { pl_w: 10.0, pl_h: 10.0 });
+  st.compose();
+  st.set_field(a, "one");
+  st.set_field(b, "two");
+  st.set_focus(a);
+
+  st.key_event(graphics::KEY_TAB, NOMOD);
+  assert(st.focused() == b, "tab moved on");
+  assert(st.field_text(a) == "one", "and typed nothing into the old field");
+  st.key_event(graphics::KEY_TAB, SHIFT);
+  assert(st.focused() == a, "shift+tab goes back");
+
+  // Keys reach only the FOCUSED field.
+  st.text_event("!");
+  assert(st.field_text(a) == "one!", "the focused field took it");
+  assert(st.field_text(b) == "two", "the other one did not");
+}
+
+// A press moves the keyboard: onto a focusable node, off everything else.
+fn test_a_press_moves_the_keyboard() {
+  st = stage_new();
+  a = st.node_add(-1, Place { pl_w: 10.0, pl_h: 10.0 });
+  b = st.node_add(-1, Place { pl_w: 10.0, pl_h: 10.0, pl_x: 20.0 });
+  st.compose();
+  st.set_field(a, "");
+  st.set_focusable(b, false);
+
+  _ = st.press(5.0, 5.0);
+  assert(st.focused() == a, "pressing the field focused it");
+  _ = st.click(5.0, 5.0);
+  _ = st.press(25.0, 5.0);
+  assert(st.focused() == -1, "pressing a node that cannot take it blurs");
+  st.text_event("x");
+  assert(st.field_text(a) == "", "and nothing is typed anywhere");
+}
+
+// A disabled node cannot hold the keyboard and is skipped by tab.
+fn test_a_disabled_node_leaves_the_tab_order() {
+  st = stage_new();
+  a = st.node_add(-1, Place { pl_w: 10.0, pl_h: 10.0 });
+  b = st.node_add(-1, Place { pl_w: 10.0, pl_h: 10.0 });
+  st.compose();
+  st.set_focusable(a, true);
+  st.set_focusable(b, true);
+  st.set_enabled(b, false);
+
+  st.focus_next();
+  assert(st.focused() == a, "on the first");
+  st.focus_next();
+  assert(st.focused() == a, "the disabled one is skipped, so it stays");
+  st.set_focus(b);
+  assert(st.focused() == -1, "and it cannot be focused directly either");
+}
+
+// A click resolves to a CHARACTER index — the seam whoever draws the text uses
+// once it has turned an x-coordinate into a count.
+fn test_placing_the_caret_by_character_index() {
+  st = stage_new();
+  n = field_node(st, "héllo");
+  st.field_place_caret(n, 2, false);
+  assert(st.field_caret(n) == 2, "placed at 2");
+  assert(st.field_selection(n) == "", "with nothing selected");
+
+  st.field_place_caret(n, 4, true);
+  assert(st.field_selection(n) == "ll", "extending selects: {st.field_selection(n)}");
+
+  st.field_place_caret(n, 99, false);
+  assert(st.field_caret(n) == 5, "a click past the end clamps to the length");
+  st.field_place_caret(n, -3, false);
+  assert(st.field_caret(n) == 0, "and before the start clamps to zero");
+}

@@ -1,0 +1,135 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN145 C1 — the tween core: the same animation must come out the same
+// however the frames were cut, and it must ARRIVE.
+//
+// Both gates below are paired with a control that computes the same thing the
+// obvious way (float seconds, or the other spelling of a linear
+// interpolation) and asserts that it DISAGREES.  Without those, a green run
+// here would only prove that this file agrees with itself.
+use tween;
+
+// 3 000 000 base units per second — `fixstep`'s unit, and the divisor that
+// makes 24, 25, 30, 50, 60 and 120 Hz all whole numbers.
+const SECOND = 3000000;
+
+// THE GATE.  One second of animation, sampled at the same ten instants, is
+// bit-identical at 30 Hz and at 60 Hz.
+fn test_thirty_hertz_and_sixty_hertz_agree_to_the_bit() {
+  slow = tween_new(0.0, 100.0, SECOND, Curve.Cubic, Shape.InOut);
+  fast = tween_new(0.0, 100.0, SECOND, Curve.Cubic, Shape.InOut);
+  for k in 0..30 {
+    _ = slow.advance(100000);      // one frame at 30 Hz
+    _ = fast.advance(50000);       // two frames at 60 Hz
+    _ = fast.advance(50000);
+    assert(slow.value() == fast.value(),
+           "at instant {k} the two rates parted: {slow.value()} vs {fast.value()}");
+  }
+  assert(slow.value() == 100.0, "and 30 Hz ARRIVED, exactly");
+  assert(fast.value() == 100.0, "and so did 60 Hz");
+}
+
+// ⚠ THE CONTROL for the gate above: the obvious float-seconds accumulation
+// does NOT agree, and does NOT arrive.  If this ever passes, integer time has
+// stopped being the reason the gate holds.
+fn test_float_seconds_would_disagree_and_would_not_arrive() {
+  slow = 0.0;
+  for _ in 0..30 { slow = slow + (1.0 / 30.0 ?? 0.0); }
+  fast = 0.0;
+  for _ in 0..60 { fast = fast + (1.0 / 60.0 ?? 0.0); }
+  assert(slow != fast, "float seconds are expected to part at the two rates");
+  assert(slow != 1.0, "30 Hz in float seconds stops SHORT of the end");
+  assert(fast != 1.0, "60 Hz in float seconds runs PAST it");
+  assert(slow < 1.0 && fast > 1.0, "and they miss in opposite directions");
+}
+
+// A tween reads exactly `from` before it moves and exactly `to` once it is
+// done — for pairs where the arithmetic makes that hard.
+fn test_it_lands_on_the_endpoints_exactly() {
+  froms = [0.1,  -3.7, 100.0, 1e17, 0.0];
+  tos   = [0.3,   9.1,   0.7,  1.0, 1.0];
+  for i in 0..len(froms) {
+    a = froms[i] ?? 0.0;
+    b = tos[i] ?? 0.0;
+    tw = tween_new(a, b, SECOND, Curve.Elastic, Shape.InOut);
+    assert(tw.value() == a, "before it starts a tween reads exactly `from`");
+    _ = tw.advance(SECOND);
+    assert(tw.done(), "one full duration finishes it");
+    assert(tw.value() == b, "and it lands on exactly `to`, not near it");
+  }
+}
+
+// ⚠ THE CONTROL for the endpoints: the other spelling of a linear
+// interpolation misses — and for the far-apart pair it does not merely miss,
+// it answers zero.
+fn test_the_other_interpolation_spelling_misses() {
+  a = 1e17;
+  b = 1.0;
+  naive = a + (b - a) * 1.0;
+  assert(naive != b, "`a + (b−a)·t` is expected to miss at t = 1");
+  assert(naive == 0.0, "and for this pair it loses `b` completely");
+  assert(lerp(a, b, 1.0) == b, "while `lerp` lands on it");
+  assert(lerp(a, b, 0.0) == a, "at both ends");
+}
+
+// Progress reaches 1.0 and STAYS there — the difference from a one-shot timer,
+// which disarms at its boundary and reads zero again afterwards.
+fn test_progress_reaches_one_and_stays() {
+  tw = tween_new(0.0, 1.0, SECOND);
+  assert(tw.progress() == 0.0, "it starts at zero");
+  _ = tw.advance(SECOND / 2 ?? 0);
+  assert(tw.progress() == 0.5, "half the duration is exactly half way");
+  _ = tw.advance(SECOND);
+  assert(tw.progress() == 1.0, "and it reaches exactly one");
+  _ = tw.advance(SECOND * 10);
+  assert(tw.progress() == 1.0, "…and stays there however long it is fed");
+  assert(tw.value() == 1.0, "so the value stays at the end, not back at the start");
+}
+
+// Time never runs backwards, and a paused consumer handing down nothing cannot
+// creep.
+fn test_non_positive_time_is_dropped() {
+  tw = tween_new(0.0, 1.0, SECOND);
+  _ = tw.advance(SECOND / 4 ?? 0);
+  before = tw.value();
+  for _ in 0..100 { _ = tw.advance(0); }
+  for _ in 0..100 { _ = tw.advance(-50000); }
+  assert(tw.value() == before, "zero and negative time moved it");
+}
+
+// A delay holds it at the start without finishing it, then it runs normally.
+fn test_a_delay_holds_it_at_the_start() {
+  tw = tween_new(5.0, 9.0, SECOND);
+  tw.delay(SECOND);
+  assert(!tw.done(), "a delayed tween has not finished");
+  _ = tw.advance(SECOND);
+  assert(tw.value() == 5.0, "the whole delay passed and it has not moved");
+  assert(!tw.done(), "and it is still not finished");
+  _ = tw.advance(SECOND / 2 ?? 0);
+  assert(tw.value() == 7.0, "then it runs: half of 5 → 9 is 7");
+  over = tw.advance(SECOND);
+  assert(tw.done() && tw.value() == 9.0, "and it arrives");
+  assert(over == (SECOND / 2 ?? 0), "with the unused half handed back");
+}
+
+// A duration of zero is INSTANT, not unarmed — the deliberate divergence from
+// `fixstep`'s `Timer`, where a zero total means nothing is running.
+fn test_a_zero_duration_is_instant() {
+  tw = tween_new(2.0, 8.0, 0);
+  assert(tw.done(), "a zero-duration tween is already finished");
+  assert(tw.value() == 8.0, "and reads its destination");
+  assert(tw.advance(1234) == 1234, "it consumes no time at all");
+}
+
+// Rewind runs the same tween again, delay and all.
+fn test_rewind_runs_it_again() {
+  tw = tween_new(0.0, 4.0, SECOND);
+  _ = tw.advance(SECOND);
+  assert(tw.done(), "it finished once");
+  tw.rewind();
+  assert(!tw.done(), "and rewind put it back");
+  assert(tw.value() == 0.0, "at the start");
+  _ = tw.advance(SECOND / 2 ?? 0);
+  assert(tw.value() == 2.0, "running the same way as before");
+}

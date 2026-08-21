@@ -2,11 +2,11 @@
 # Regenerate: make examples-index    Verified in CI: check_doc_drift.sh examples-index
 # Every worked-example tag defined in this repo: where it lives + its git blob link.
 # tag	file:line	fn	blob_url
-@GFX-001	graphics/tests/worked-examples.loft:34	test_a_colour_carries_an_alpha_byte	https://github.com/loft-lang/loft-libs-graphics/blob/main/graphics/tests/worked-examples.loft#L34
-@GFX-002	graphics/tests/worked-examples.loft:64	test_solid_primitives_store_alpha_rather_than_applying_it	https://github.com/loft-lang/loft-libs-graphics/blob/main/graphics/tests/worked-examples.loft#L64
-@GFX-003	graphics/tests/worked-examples.loft:93	test_zero_from_get_pixel_is_a_colour_not_a_bound	https://github.com/loft-lang/loft-libs-graphics/blob/main/graphics/tests/worked-examples.loft#L93
-@GFX-004	graphics/tests/worked-examples.loft:121	test_spans_are_half_open_and_never_normalised	https://github.com/loft-lang/loft-libs-graphics/blob/main/graphics/tests/worked-examples.loft#L121
-@GFX-005	graphics/tests/worked-examples.loft:159	test_save_png_reads_its_colour_type_off_the_pixels	https://github.com/loft-lang/loft-libs-graphics/blob/main/graphics/tests/worked-examples.loft#L159
+@GFX-001	graphics/tests/worked-examples.loft:35	test_a_colour_carries_an_alpha_byte	https://github.com/loft-lang/loft-libs-graphics/blob/main/graphics/tests/worked-examples.loft#L35
+@GFX-002	graphics/tests/worked-examples.loft:65	test_solid_primitives_store_alpha_rather_than_applying_it	https://github.com/loft-lang/loft-libs-graphics/blob/main/graphics/tests/worked-examples.loft#L65
+@GFX-003	graphics/tests/worked-examples.loft:94	test_zero_from_get_pixel_is_a_colour_not_a_bound	https://github.com/loft-lang/loft-libs-graphics/blob/main/graphics/tests/worked-examples.loft#L94
+@GFX-004	graphics/tests/worked-examples.loft:122	test_spans_are_half_open_and_never_normalised	https://github.com/loft-lang/loft-libs-graphics/blob/main/graphics/tests/worked-examples.loft#L122
+@GFX-005	graphics/tests/worked-examples.loft:160	test_save_png_reads_its_colour_type_off_the_pixels	https://github.com/loft-lang/loft-libs-graphics/blob/main/graphics/tests/worked-examples.loft#L160
 @GRM-001	gridmesh/tests/worked-examples.loft:30	test_dirty_rebuild_cycle	https://github.com/loft-lang/loft-libs-graphics/blob/main/gridmesh/tests/worked-examples.loft#L30
 @GRM-002	gridmesh/tests/worked-examples.loft:62	test_owned_versus_halo	https://github.com/loft-lang/loft-libs-graphics/blob/main/gridmesh/tests/worked-examples.loft#L62
 @GRM-003	gridmesh/tests/worked-examples.loft:90	test_indices_survive_a_removal	https://github.com/loft-lang/loft-libs-graphics/blob/main/gridmesh/tests/worked-examples.loft#L90
@@ -19,3 +19,11 @@
 @SHP-001	shapes/tests/worked-examples.loft:17	test_touching_is_not_overlapping	https://github.com/loft-lang/loft-libs-graphics/blob/main/shapes/tests/worked-examples.loft#L17
 @SHP-002	shapes/tests/worked-examples.loft:57	test_depth_says_how_far_not_which_way	https://github.com/loft-lang/loft-libs-graphics/blob/main/shapes/tests/worked-examples.loft#L57
 @SHP-003	shapes/tests/worked-examples.loft:102	test_circle_is_not_its_bounding_box	https://github.com/loft-lang/loft-libs-graphics/blob/main/shapes/tests/worked-examples.loft#L102
+@STG-001	stage/tests/worked-examples.loft:20	test_origin_is_what_a_node_is_anchored_by	https://github.com/loft-lang/loft-libs-graphics/blob/main/stage/tests/worked-examples.loft#L20
+@STG-002	stage/tests/worked-examples.loft:38	test_a_parent_must_already_exist	https://github.com/loft-lang/loft-libs-graphics/blob/main/stage/tests/worked-examples.loft#L38
+@STG-003	stage/tests/worked-examples.loft:54	test_compose_is_the_callers_to_run	https://github.com/loft-lang/loft-libs-graphics/blob/main/stage/tests/worked-examples.loft#L54
+@STG-004	stage/tests/worked-examples.loft:71	test_the_batcher_never_reorders	https://github.com/loft-lang/loft-libs-graphics/blob/main/stage/tests/worked-examples.loft#L71
+@STG-005	stage/tests/worked-examples.loft:101	test_a_release_belongs_to_the_press	https://github.com/loft-lang/loft-libs-graphics/blob/main/stage/tests/worked-examples.loft#L101
+@STG-006	stage/tests/worked-examples.loft:118	test_a_click_falls_through_a_hole	https://github.com/loft-lang/loft-libs-graphics/blob/main/stage/tests/worked-examples.loft#L118
+@STG-007	stage/tests/worked-examples.loft:133	test_a_clip_inherits_and_intersects	https://github.com/loft-lang/loft-libs-graphics/blob/main/stage/tests/worked-examples.loft#L133
+@STG-008	stage/tests/worked-examples.loft:157	test_ambient_motion_is_free_and_visual_only	https://github.com/loft-lang/loft-libs-graphics/blob/main/stage/tests/worked-examples.loft#L157

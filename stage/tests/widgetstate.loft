@@ -1,0 +1,206 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN145 D1 — the four widget states, driven by a REPLAYED pointer stream.
+//
+// The stream is data, so the gate is a recording rather than a script of calls:
+// every expected state below was worked out by hand from the event list, and a
+// failure prints the whole sequence rather than one cell.
+//
+// ⚠ The pointer path needed no new seam — `press` / `release` / `pointer_move`
+// take coordinates and read no device, which is the constraint @PLN144 `A4` was
+// built under.  (The KEY half is the `input` package's `input_tick_from_state`,
+// cleared by `D0b`.)
+use stage;
+
+const MOVE = 0;
+const DOWN = 1;
+const UP   = 2;
+
+struct Ev { e_kind: integer, e_x: float, e_y: float }
+
+fn ev(k: integer, x: float, y: float) -> Ev { Ev { e_kind: k, e_x: x, e_y: y } }
+
+fn name_of(s: UiState) -> text {
+  match s {
+    Normal   => "Normal",
+    Over     => "Over",
+    Down     => "Down",
+    Disabled => "Disabled",
+  }
+}
+
+// Two buttons, side by side: A over x 0..10, B over x 20..30.
+fn two_buttons(st: Stage) -> integer {
+  a = st.node_add(-1, Place { pl_w: 10.0, pl_h: 10.0 });
+  _ = st.node_add(-1, Place { pl_w: 10.0, pl_h: 10.0, pl_x: 20.0 });
+  st.compose();
+  a
+}
+
+// Apply one event; answer the node it fired, or -1.
+fn apply(st: Stage, e: const Ev) -> integer {
+  if e.e_kind == MOVE { st.pointer_move(e.e_x, e.e_y); return -1; }
+  if e.e_kind == DOWN { _ = st.press(e.e_x, e.e_y); return -1; }
+  st.click(e.e_x, e.e_y)
+}
+
+fn the_stream() -> vector<Ev> {
+  [ev(MOVE, 5.0, 5.0),      // 1  onto A
+   ev(DOWN, 5.0, 5.0),      // 2  press A
+   ev(MOVE, 25.0, 5.0),     // 3  drag off A, across B
+   ev(UP,   25.0, 5.0),     // 4  release away — must NOT fire
+   ev(MOVE, 5.0, 5.0),      // 5  back onto A
+   ev(DOWN, 5.0, 5.0),      // 6  press A again
+   ev(MOVE, 6.0, 6.0),      // 7  drift one pixel, still inside
+   ev(UP,   6.0, 6.0)]      // 8  release inside — MUST fire
+}
+
+// THE GATE.  Eight events, and the exact state of both buttons after each.
+fn test_a_replayed_stream_drives_the_exact_state_sequence() {
+  // Hand-computed from the stream above.  B is `Normal` at step 3 because a
+  // press in flight suppresses `Over` everywhere — dragging across a neighbour
+  // must not light it up.
+  want_a = ["Over", "Down", "Normal", "Normal", "Over", "Down", "Down", "Over"];
+  want_b = ["Normal", "Normal", "Normal", "Over", "Normal", "Normal", "Normal", "Normal"];
+
+  st = stage_new();
+  a = two_buttons(st);
+  b = a + 1;
+  fired: vector<integer> = [];
+  for e in the_stream() {
+    fired += [apply(st, e)];
+    k = e#index;
+    got_a = name_of(st.ui_state(a));
+    got_b = name_of(st.ui_state(b));
+    assert(got_a == (want_a[k] ?? ""), "step {k + 1}: A is {got_a}, expected {want_a[k] ?? \"\"}");
+    assert(got_b == (want_b[k] ?? ""), "step {k + 1}: B is {got_b}, expected {want_b[k] ?? \"\"}");
+  }
+  assert((fired[3] ?? 0) == -1, "step 4 released away from A and must NOT fire");
+  assert((fired[7] ?? 0) == a, "step 8 released inside A and MUST fire");
+}
+
+// ⚠⚠ THE INVARIANT: a node reads `Down` exactly when a release at the current
+// pointer would fire it.  Swept over five release positions — the picture and
+// the click come from one predicate, so they cannot disagree.
+fn test_down_means_exactly_that_a_release_would_fire() {
+  xs = [5.0, 9.5, 11.0, 25.0, 100.0];
+  ys = [5.0, 9.5, 5.0,  5.0,  100.0];
+  downs = 0;
+  fires = 0;
+  for i in 0..len(xs) {
+    st = stage_new();
+    a = two_buttons(st);
+    _ = st.press(5.0, 5.0);                       // always press A's middle
+    px = xs[i] ?? 0.0;
+    py = ys[i] ?? 0.0;
+    st.pointer_move(px, py);
+    looks_down = st.ui_state(a) == UiState.Down;
+    did_fire = st.click(px, py) == a;
+    assert(looks_down == did_fire,
+           "at ({px}, {py}) the button looked {name_of(st.ui_state(a))} but firing was {did_fire}");
+    if looks_down { downs = downs + 1; }
+    if did_fire { fires = fires + 1; }
+  }
+  // ⚠ The control: the sweep must contain BOTH answers, or the equivalence above
+  // is satisfied by everything being false.
+  assert(downs == 2, "two of the five positions are inside A, got {downs}");
+  assert(fires == 2, "and exactly those two fire");
+}
+
+// ⚠⚠ ON TOUCH THERE IS NO `Over` — replayed on the SAME stream, so what changes
+// is only what is SHOWN, never what fires.
+fn test_touch_never_shows_over_and_fires_the_same() {
+  mouse_fired: vector<integer> = [];
+  st_m = stage_new();
+  a_m = two_buttons(st_m);
+  for e in the_stream() { mouse_fired += [apply(st_m, e)]; }
+  assert(a_m == 0, "both runs build the same scene, so the node ids line up");
+
+  touch_fired: vector<integer> = [];
+  st_t = stage_new();
+  a_t = two_buttons(st_t);
+  st_t.set_pointer(POINTER_TOUCH);
+  overs = 0;
+  for e in the_stream() {
+    touch_fired += [apply(st_t, e)];
+    if st_t.ui_state(a_t) == UiState.Over { overs = overs + 1; }
+    if st_t.ui_state(a_t + 1) == UiState.Over { overs = overs + 1; }
+  }
+
+  assert(overs == 0, "a touch stream showed `Over` {overs} times");
+  assert(len(mouse_fired) == len(touch_fired), "same stream, same length");
+  for i in 0..len(mouse_fired) {
+    assert((mouse_fired[i] ?? 0) == (touch_fired[i] ?? 0),
+           "step {i + 1} fired differently on touch");
+  }
+  assert((touch_fired[7] ?? 0) == a_t, "and the touch DID fire on the last step");
+
+  // ⚠ The control: the same stream on a MOUSE does show `Over`, so the zero
+  // above is the pointer kind and not a stream that never hovers.
+  mouse_overs = 0;
+  st_c = stage_new();
+  a_c = two_buttons(st_c);
+  for e in the_stream() {
+    _ = apply(st_c, e);
+    if st_c.ui_state(a_c) == UiState.Over { mouse_overs = mouse_overs + 1; }
+  }
+  // Steps 1, 5 and 8 — onto A, back onto A, and after the release clears the
+  // capture with the pointer still on it.
+  assert(mouse_overs == 3, "the mouse run shows Over three times, got {mouse_overs}");
+}
+
+// Leaving and coming back RE-ARMS: the capture is held the whole time, so the
+// press is not lost by drifting off and back.
+fn test_leaving_and_returning_re_arms() {
+  st = stage_new();
+  a = two_buttons(st);
+  _ = st.press(5.0, 5.0);
+  assert(st.ui_state(a) == UiState.Down, "pressed");
+  st.pointer_move(50.0, 50.0);
+  assert(st.ui_state(a) == UiState.Normal, "away, so not armed");
+  assert(st.capture() == a, "…but the press is still held");
+  st.pointer_move(5.0, 5.0);
+  assert(st.ui_state(a) == UiState.Down, "back inside, armed again");
+  assert(st.click(5.0, 5.0) == a, "and it fires");
+}
+
+// `Disabled` outranks the other three, and refuses to fire.
+fn test_a_disabled_node_never_fires_and_always_looks_disabled() {
+  st = stage_new();
+  a = two_buttons(st);
+  st.set_enabled(a, false);
+  assert(!st.enabled(a), "it is off");
+
+  st.pointer_move(5.0, 5.0);
+  assert(st.ui_state(a) == UiState.Disabled, "hovering it does not make it Over");
+  _ = st.press(5.0, 5.0);
+  assert(st.ui_state(a) == UiState.Disabled, "pressing it does not make it Down");
+  assert(st.click(5.0, 5.0) == -1, "and it does not fire");
+
+  st.set_enabled(a, true);
+  st.pointer_move(5.0, 5.0);
+  assert(st.ui_state(a) == UiState.Over, "and it comes back");
+}
+
+// `release` is untouched by D1 — it still answers who took the press, whether or
+// not the pointer is still there.  `click` is the other door.
+fn test_release_still_answers_the_captured_node() {
+  st = stage_new();
+  a = two_buttons(st);
+  _ = st.press(5.0, 5.0);
+  assert(st.release(50.0, 50.0) == a, "release names the node that took the press");
+
+  _ = st.press(5.0, 5.0);
+  assert(st.click(50.0, 50.0) == -1, "while click names the node that FIRES");
+}
+
+// A press on nothing captures nothing, and a release then fires nothing.
+fn test_pressing_empty_space_fires_nothing() {
+  st = stage_new();
+  a = two_buttons(st);
+  _ = st.press(50.0, 50.0);
+  assert(st.capture() == -1, "nothing was under the pointer");
+  assert(st.ui_state(a) == UiState.Normal, "and no button is lit");
+  assert(st.click(5.0, 5.0) == -1, "releasing over a button does not fire it");
+}

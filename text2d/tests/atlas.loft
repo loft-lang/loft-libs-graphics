@@ -1,0 +1,104 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN145 B1 — the glyph atlas, and the property the whole arc exists for:
+// CHANGING WHAT A LABEL SAYS COSTS NOTHING.
+//
+// `create_text_texture` bakes one GPU texture per string, per size, per colour, so
+// a score that ticks uploads a texture every frame — which is why Brick Buster
+// pre-baked digits 0-9 and one texture per level numeral.  A sheet is written once
+// and a new string only re-lays-out quads over it.  `atlas_writes` counts sheet
+// changes, which is exactly what a GL consumer uploads on.
+use text2d;
+use graphics;
+
+fn ink(cv: const graphics::Canvas, colour: integer) -> integer {
+  n = 0;
+  for v in cv.data { if v == colour { n = n + 1; } }
+  n
+}
+
+// THE GATE.  Six hundred different strings over one digit set: the sheet is
+// written ten times — once per distinct glyph — and never again.
+fn test_a_changing_label_costs_no_writes() {
+  at = text2d::atlas_new(1, 64);
+  digits = ["0","1","2","3","4","5","6","7","8","9"];
+  // warm the sheet with every glyph the run will use
+  for d in digits { _ = at.layout(d, 0, 0); }
+  after_warm = at.atlas_writes();
+  assert(after_warm == 10, "ten distinct digits are ten writes, got {after_warm}");
+
+  for i in 0..600 {
+    a = digits[i % 10] ?? "0";
+    b = digits[(i / 10 ?? 0) % 10] ?? "0";
+    c = digits[(i / 100 ?? 0) % 10] ?? "0";
+    _ = at.layout("{a}{b}{c}", 0, 0);
+  }
+  assert(at.atlas_writes() == after_warm,
+         "600 relayouts wrote to the sheet {at.atlas_writes() - after_warm} times — expected 0");
+  assert(at.atlas_glyph_count() == 10, "and it still holds ten glyphs");
+}
+
+// A glyph new to the sheet costs exactly one write, and only the first time.
+fn test_a_new_glyph_costs_one_write() {
+  at = text2d::atlas_new(1, 64);
+  _ = at.layout("A", 0, 0);
+  assert(at.atlas_writes() == 1, "one glyph, one write");
+  _ = at.layout("A", 0, 0);
+  assert(at.atlas_writes() == 1, "the same glyph again writes nothing");
+  _ = at.layout("AB", 0, 0);
+  assert(at.atlas_writes() == 2, "B is new, so exactly one more");
+}
+
+// Layout places one quad per character at the same pitch the direct blitter uses.
+fn test_layout_places_one_quad_per_character() {
+  at = text2d::atlas_new(1, 64);
+  qs = at.layout("ABC", 10, 20);
+  assert(len(qs) == 3, "three characters, three quads");
+  assert((qs[0] ?? text2d::Quad { q_x: -1, q_y: -1, q_cell: -1 }).q_x == 10, "first at x");
+  q1 = qs[1] ?? text2d::Quad { q_x: -1, q_y: -1, q_cell: -1 };
+  q2 = qs[2] ?? text2d::Quad { q_x: -1, q_y: -1, q_cell: -1 };
+  assert(q1.q_x == 16 and q2.q_x == 22, "pitch is 6 = glyph 5 plus a 1-pixel gap");
+  assert(q1.q_y == 20, "y is the line's y");
+}
+
+// THE BASELINE.  Blitting from the sheet must give the same pixels as blitting
+// direct — one bit-walk, two paths, and they may not drift.
+fn test_the_sheet_reproduces_the_direct_blit() {
+  s = "HELLO 42";
+  direct = graphics::canvas(80, 16, 0xff000000);
+  _ = text2d::write_text(direct, s, 2, 3, 0xffffffff, 1);
+
+  at = text2d::atlas_new(1, 64);
+  viaatlas = graphics::canvas(80, 16, 0xff000000);
+  text2d::draw_quads(viaatlas, at, at.layout(s, 2, 3), 0xffffffff);
+
+  same = true;
+  for i in 0..len(direct.data) { if direct.data[i] != viaatlas.data[i] { same = false; } }
+  assert(same, "the atlas path draws exactly what the direct path draws");
+  assert(ink(direct, 0xffffffff) > 0, "and it is not two blank canvases agreeing");
+}
+
+// A full sheet refuses rather than corrupting: the quad carries -1 and draws
+// nothing, so a caller sees a gap instead of another glyph's pixels.
+fn test_a_full_sheet_refuses() {
+  at = text2d::atlas_new(1, 2);
+  _ = at.layout("AB", 0, 0);
+  qs = at.layout("C", 0, 0);
+  q = qs[0] ?? text2d::Quad { q_x: 0, q_y: 0, q_cell: 0 };
+  assert(q.q_cell == -1, "the third glyph has no cell");
+  cv = graphics::canvas(16, 16, 0xff000000);
+  text2d::draw_quads(cv, at, qs, 0xffffffff);
+  assert(ink(cv, 0xffffffff) == 0, "and it draws nothing rather than the wrong glyph");
+}
+
+// Scale is a property of the sheet, so a scaled sheet reproduces the scaled blit.
+fn test_the_sheet_honours_its_scale() {
+  at = text2d::atlas_new(2, 64);
+  viaatlas = graphics::canvas(64, 32, 0xff000000);
+  text2d::draw_quads(viaatlas, at, at.layout("7", 1, 1), 0xffffffff);
+  direct = graphics::canvas(64, 32, 0xff000000);
+  _ = text2d::write_text(direct, "7", 1, 1, 0xffffffff, 2);
+  assert(ink(viaatlas, 0xffffffff) == ink(direct, 0xffffffff) and ink(direct, 0xffffffff) > 0,
+         "same ink at scale 2");
+}

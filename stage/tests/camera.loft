@@ -1,0 +1,115 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN144 P2 — the camera, and the two scroll modes as ONE mechanism.
+//
+// Riding left and right across a world is a camera pan; a background that lags is
+// the same pan at a smaller factor.  Flat scrolling is every factor at 1.0, and
+// that is proved here as a degenerate case rather than maintained as a second path.
+use stage;
+use graphics;
+
+fn shot(st: const stage::Stage) -> graphics::Canvas {
+  cv = graphics::canvas(64, 32, 0xff000000);
+  st.render_stage(cv);
+  cv
+}
+fn same(a: const graphics::Canvas, b: const graphics::Canvas) -> boolean {
+  for i in 0..len(a.data) { if a.data[i] != b.data[i] { return false; } }
+  true
+}
+
+// FLAT MODE IS THE DEGENERATE CASE: with every factor 1.0, panning the camera is
+// pixel-identical to having placed every node that much further left.
+fn test_a_pan_equals_moving_every_node() {
+  panned = stage::stage_new();
+  _ = panned.node_add(-1, stage::Place { pl_x: 30.0, pl_y: 10.0, pl_w: 8.0, pl_h: 8.0,
+                                         pl_colour: 0x00ff00 });
+  _ = panned.node_add(-1, stage::Place { pl_x: 45.0, pl_y: 4.0, pl_w: 6.0, pl_h: 12.0,
+                                         pl_colour: 0x0000ff });
+  panned.compose();
+  panned.set_camera(12.0, 3.0);
+
+  byhand = stage::stage_new();
+  _ = byhand.node_add(-1, stage::Place { pl_x: 18.0, pl_y: 7.0, pl_w: 8.0, pl_h: 8.0,
+                                         pl_colour: 0x00ff00 });
+  _ = byhand.node_add(-1, stage::Place { pl_x: 33.0, pl_y: 1.0, pl_w: 6.0, pl_h: 12.0,
+                                         pl_colour: 0x0000ff });
+  byhand.compose();
+
+  assert(same(shot(panned), shot(byhand)),
+         "a pan of (12,3) draws exactly what placing the nodes 12 left and 3 up draws");
+}
+
+// A layer feels its OWN share of the pan: half the factor, half the movement.
+fn test_a_layer_moves_by_its_factor() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_w: 4.0, pl_h: 4.0, pl_layer: 0 });
+  _ = st.node_add(-1, stage::Place { pl_w: 4.0, pl_h: 4.0, pl_layer: 1 });
+  st.set_parallax(0, 0.5);
+  st.set_parallax(1, 1.0);
+  st.compose();
+  st.set_camera(20.0, 8.0);
+  back = st.cam_offset(0);
+  front = st.cam_offset(1);
+  assert(back.p_x == -10.0 and back.p_y == -4.0, "half factor, half the pan");
+  assert(front.p_x == -20.0 and front.p_y == -8.0, "full factor, all of it");
+}
+
+// A layer with no factor set behaves as 1.0 — the world plane, without ceremony.
+fn test_an_unset_layer_is_the_world_plane() {
+  st = stage::stage_new();
+  st.set_camera(7.0, 0.0);
+  assert(st.parallax_of(3) == 1.0, "unset layers are 1.0");
+  assert(st.cam_offset(3).p_x == -7.0, "and move with the world");
+}
+
+// ⚠ THE PROPERTY THE DESIGN TURNS ON: a pure camera move re-uploads NOTHING.
+// Baking the camera into node positions would rewrite every node and re-upload the
+// whole instance buffer on every scrolled frame.
+fn test_a_camera_move_does_not_dirty_the_buffer() {
+  st = stage::stage_new();
+  for i in 0..8 {
+    _ = st.node_add(-1, stage::Place { pl_x: (i * 4) as float, pl_w: 3.0, pl_h: 3.0 });
+  }
+  st.compose();
+  before = st.pack_instances();
+  for i in 0..100 { st.set_camera((i * 3) as float, 0.0); }
+  after = st.pack_instances();
+  assert(len(before) == len(after), "the buffer is the same size");
+  differs = false;
+  for i in 0..len(before) { if before[i] != after[i] { differs = true; } }
+  assert(!differs, "and 100 camera moves changed not one float of it");
+}
+
+// ⚠ PICKING UN-APPLIES THE CAMERA PER LAYER.  One screen point is a different
+// world point in each layer, so a single inverse picks the wrong thing the moment
+// a layer lags.
+fn test_picking_un_applies_the_camera_per_layer() {
+  st = stage::stage_new();
+  back = st.node_add(-1, stage::Place { pl_x: 0.0, pl_y: 0.0, pl_w: 10.0, pl_h: 10.0,
+                                        pl_layer: 0 });
+  front = st.node_add(-1, stage::Place { pl_x: 40.0, pl_y: 0.0, pl_w: 10.0, pl_h: 10.0,
+                                         pl_layer: 1 });
+  st.set_parallax(0, 0.5);
+  st.compose();
+  st.set_camera(20.0, 0.0);
+  // back  is drawn at 0  - 20*0.5 = -10 .. 0   -> screen x 5 misses it
+  // front is drawn at 40 - 20*1.0 =  20 .. 30  -> screen x 25 hits it
+  assert(st.pick(25.0, 5.0) == front, "the front layer is where its own factor puts it");
+  assert(st.pick(-5.0, 5.0) == back, "and the lagging layer where ITS factor puts it");
+  assert(st.pick(5.0, 5.0) == -1, "between them, nothing");
+}
+
+// Parallax TRANSLATES; it never resizes.  Distance-as-smaller is the depth cue's
+// job, which scales about the origin and keeps a sprite's feet planted.
+fn test_parallax_does_not_resize() {
+  st = stage::stage_new();
+  n = st.node_add(-1, stage::Place { pl_w: 10.0, pl_h: 10.0, pl_layer: 0 });
+  st.set_parallax(0, 0.25);
+  st.compose();
+  st.set_camera(100.0, 0.0);
+  b = st.bounds_of(n);
+  assert(b.b_x1 - b.b_x0 > 9.99 and b.b_x1 - b.b_x0 < 10.01,
+         "the node is still 10 wide at any parallax");
+}

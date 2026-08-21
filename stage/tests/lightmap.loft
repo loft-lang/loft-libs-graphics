@@ -1,0 +1,259 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN144 L2 — the light-map composite pass.
+//
+// What L1 cannot do: light that falls ACROSS the scene rather than across the
+// sprites.  The world draws, one multiply composite lights every pixel of it
+// including the gaps between sprites, and the HUD draws after, unlit.
+//
+// ⚠ THE EXPECTATIONS ARE GENERATED, NOT TYPED.  A curve hand-computed per pixel
+// is not a gate anyone maintains, so these read the falloff from the SAME symbol
+// the renderer and the shader use.  What is hand-computed is the floor, the
+// ceiling and the shape — monotonic, bounded, and never under its floor.
+use stage;
+use graphics;
+
+EPS = 0.000001;
+fn near(a: float, b: float) -> boolean { a - b < EPS and b - a < EPS }
+fn red_of(cv: const graphics::Canvas, x: integer, y: integer) -> integer {
+  (cv.get_pixel(x, y) >> 16) & 255
+}
+fn differing(a: const graphics::Canvas, b: const graphics::Canvas) -> integer {
+  n = 0;
+  for i in 0..len(a.data) { if (a.data[i] ?? 0) != (b.data[i] ?? 0) { n = n + 1; } }
+  n
+}
+
+// A white slab covering the whole canvas, so a pixel's red channel reads the
+// light level directly.
+fn slab(st: stage::Stage, layer: integer) -> integer {
+  st.node_add(-1, stage::Place { pl_w: 200.0, pl_h: 40.0, pl_colour: 0xffffff,
+                                 pl_layer: layer })
+}
+
+// ── the degenerate case ──────────────────────────────────────────────────────
+
+// ⚠ THE MAP IS OFF UNTIL ASKED.  With it off the scene is exactly what L1 drew,
+// byte for byte — so a game that wants light across its SPRITES keeps it.
+fn test_the_map_is_off_by_default_and_l1_is_untouched() {
+  a = stage::stage_new();
+  a.set_ambient(0.5);
+  _ = a.add_light(50.0, 20.0, 100.0, 0xffffff, 1.0);
+  _ = slab(a, 0);
+  a.compose();
+  assert(!a.light_map(), "off by default");
+  ca = graphics::canvas(200, 40, 0xff000000);
+  a.render_view(0, ca);
+
+  b = stage::stage_new();
+  b.set_ambient(0.5);
+  _ = b.add_light(50.0, 20.0, 100.0, 0xffffff, 1.0);
+  _ = slab(b, 0);
+  b.compose();
+  cb = graphics::canvas(200, 40, 0xff000000);
+  b.render_view(0, cb);
+  assert(differing(ca, cb) == 0, "two unlit-map stages agree");
+
+  // And turning it on must actually CHANGE something, or this proves nothing.
+  b.set_light_map(true);
+  cc = graphics::canvas(200, 40, 0xff000000);
+  b.render_view(0, cc);
+  assert(differing(ca, cc) > 0, "the map is not a no-op");
+}
+
+// ── the point of the phase: light falls ACROSS a sprite ──────────────────────
+
+// ⚠ THIS IS WHAT L1 CANNOT DO.  One sprite, one light near its left end: the
+// near end is brighter than the far end.  Per-sprite lighting gives the whole
+// slab ONE value, so it fails this by construction.
+fn test_light_falls_across_a_single_sprite() {
+  st = stage::stage_new();
+  st.set_ambient(0.0);
+  st.set_light_map(true);
+  _ = st.add_light(0.0, 20.0, 200.0, 0xffffff, 1.0);
+  _ = slab(st, 0);
+  st.compose();
+  cv = graphics::canvas(200, 40, 0xff000000);
+  st.render_view(0, cv);
+  near_end = red_of(cv, 0, 20);
+  mid     = red_of(cv, 100, 20);
+  far_end = red_of(cv, 199, 20);
+  assert(near_end > mid and mid > far_end,
+         "one sprite, a gradient across it: {near_end} > {mid} > {far_end}");
+  assert(near_end == 255, "at the light itself, full");
+}
+
+// ⚠ AND IT LIGHTS THE GAPS.  A fullscreen composite reaches the background
+// between sprites, which is the reason it earns a pass at all — a per-sprite
+// tint cannot touch a pixel no sprite covers.
+fn test_the_composite_lights_the_background_too() {
+  st = stage::stage_new();
+  st.set_ambient(0.0);
+  st.set_light_map(true);
+  _ = st.add_light(10.0, 20.0, 200.0, 0xffffff, 1.0);
+  // A small sprite, so most of the canvas is bare background.
+  _ = st.node_add(-1, stage::Place { pl_w: 4.0, pl_h: 4.0, pl_colour: 0xffffff,
+                                     pl_x: 150.0, pl_y: 30.0 });
+  st.compose();
+  cv = graphics::canvas(200, 40, 0xff404040);
+  st.render_view(0, cv);
+  assert(red_of(cv, 12, 20) > red_of(cv, 190, 20),
+         "bare background is lit, and falls off with distance");
+}
+
+// ── the invariant: monotonic, and never under its floor ──────────────────────
+
+// ⚠ THE GATE THE PLAN ASKS FOR, and it is a PROPERTY rather than a table:
+// along a ray from the light the level never rises, and never drops below the
+// floor the ambient sets.  Hand-computing a curve per pixel is not a gate
+// anyone maintains; this is.
+fn test_the_falloff_along_a_ray_is_monotonic_and_floored() {
+  st = stage::stage_new();
+  floor = 0.25;
+  st.set_ambient(floor);
+  st.set_light_map(true);
+  _ = st.add_light(0.0, 0.0, 100.0, 0xffffff, 1.0);
+  prev = 2.0;
+  for i in 0..40 {
+    d = (i as float) * 5.0;            // out to 195, well past the radius
+    lv = st.light_level_at(d, 0.0);
+    assert(lv <= prev + EPS, "step {i} at d={d} rose: {lv} after {prev}");
+    assert(lv >= floor - EPS, "step {i} at d={d} went under the floor: {lv}");
+    assert(lv <= 1.0 + EPS, "step {i} at d={d} went over the ceiling: {lv}");
+    prev = lv;
+  }
+  assert(near(st.light_level_at(500.0, 0.0), floor),
+         "far away it IS the floor, exactly");
+  assert(near(st.light_level_at(0.0, 0.0), 1.0),
+         "and at the light it is the ceiling");
+}
+
+// ⚠ GENERATED FROM THE SAME SYMBOL THE RENDERER USES.  Not a second table of
+// numbers to keep in step — if the curve is retuned, this test retunes with it,
+// which is the whole point of the technique.
+fn test_the_level_agrees_with_the_shared_reach_function() {
+  st = stage::stage_new();
+  st.set_ambient(0.1);
+  st.set_light_map(true);
+  l = stage::StageLight { lt_x: 30.0, lt_y: 40.0, lt_r: 120.0,
+                          lt_colour: 0xffffff, lt_power: 1.0 };
+  _ = st.add_light(l.lt_x, l.lt_y, l.lt_r, l.lt_colour, l.lt_power);
+  for i in 0..12 {
+    px = (i as float) * 13.0;
+    want = 0.1 + stage::light_reach(l, px, 40.0);
+    if want > 1.0 { want = 1.0; }
+    got = st.light_level_at(px, 40.0);
+    assert(near(got, want), "x={px}: composite {got} vs reach {want}");
+  }
+}
+
+// ── the HUD draws after, unlit ───────────────────────────────────────────────
+
+// ⚠ THE COMMENT BECOMES A TEST.  "The HUD draws after, unlit" is only true if
+// its pixels are BIT-IDENTICAL with the light on and off — anything less and a
+// dark room quietly dims the health bar.
+fn test_the_hud_is_bit_identical_with_the_light_on_and_off() {
+  lit = stage::stage_new();
+  lit.set_hud_layer(10);
+  lit.set_light_map(true);
+  lit.set_ambient(0.0);
+  _ = lit.add_light(20.0, 20.0, 60.0, 0xffffff, 1.0);
+  _ = slab(lit, 0);                                     // world
+  _ = lit.node_add(-1, stage::Place { pl_w: 20.0, pl_h: 10.0, pl_x: 100.0,
+                                      pl_y: 5.0, pl_colour: 0x40e080,
+                                      pl_layer: 10 });  // HUD
+  lit.compose();
+  ca = graphics::canvas(200, 40, 0xff000000);
+  lit.render_view(0, ca);
+
+  dark = stage::stage_new();
+  dark.set_hud_layer(10);
+  dark.set_light_map(true);
+  dark.set_ambient(0.0);                                // NO light at all
+  _ = slab(dark, 0);
+  _ = dark.node_add(-1, stage::Place { pl_w: 20.0, pl_h: 10.0, pl_x: 100.0,
+                                       pl_y: 5.0, pl_colour: 0x40e080,
+                                       pl_layer: 10 });
+  dark.compose();
+  cb = graphics::canvas(200, 40, 0xff000000);
+  dark.render_view(0, cb);
+
+  // The world differs — one is lit, one is not.
+  assert(ca.get_pixel(20, 30) != cb.get_pixel(20, 30), "the world DID change");
+  // The HUD does not, anywhere in its rect.
+  moved = 0;
+  for y in 5..15 {
+    for x in 100..120 {
+      if ca.get_pixel(x, y) != cb.get_pixel(x, y) { moved = moved + 1; }
+    }
+  }
+  assert(moved == 0, "{moved} HUD pixels moved when the light changed");
+  assert(ca.get_pixel(105, 8) == 0xff40e080, "and the HUD is its own colour, undimmed");
+}
+
+// ── the two models do not stack ──────────────────────────────────────────────
+
+// ⚠ ONE LIGHTING MODEL AT A TIME.  With the map on, a sprite is packed with its
+// RAW material and the map does the lighting — otherwise every sprite would be
+// lit twice and a torch-lit mob would come out darker than the floor it stands on.
+fn test_the_map_replaces_per_sprite_lighting() {
+  st = stage::stage_new();
+  st.set_ambient(0.5);
+  _ = st.add_light(0.0, 0.0, 100.0, 0xffffff, 1.0);
+  n = st.node_add(-1, stage::Place { pl_w: 8.0, pl_h: 8.0, pl_colour: 0xc03030,
+                                     pl_x: 60.0, pl_y: 0.0 });
+  st.compose();
+  assert(st.lit_colour(n) != 0xc03030, "with the map OFF, L1 tints the sprite");
+  st.set_light_map(true);
+  assert(st.lit_colour(n) == 0xc03030,
+         "with the map ON the sprite is raw material — got {st.lit_colour(n)}");
+}
+
+// ── order independence ──────────────────────────────────────────────────────
+
+// A multiply composite after the scene cannot depend on the order the scene was
+// drawn in, so it does not fight A3a's *never reorder*.
+fn test_the_composite_is_order_independent() {
+  one = stage::stage_new();
+  one.set_light_map(true);
+  one.set_ambient(0.2);
+  _ = one.add_light(30.0, 20.0, 120.0, 0xffffff, 1.0);
+  _ = one.node_add(-1, stage::Place { pl_w: 60.0, pl_h: 20.0, pl_x: 0.0,
+                                      pl_y: 10.0, pl_colour: 0xffffff, pl_depth: 1.0 });
+  _ = one.node_add(-1, stage::Place { pl_w: 60.0, pl_h: 20.0, pl_x: 40.0,
+                                      pl_y: 10.0, pl_colour: 0x8080ff, pl_depth: 0.0 });
+  one.compose();
+  c1 = graphics::canvas(200, 40, 0xff000000);
+  one.render_view(0, c1);
+
+  two = stage::stage_new();          // the same scene, inserted the other way up
+  two.set_light_map(true);
+  two.set_ambient(0.2);
+  _ = two.add_light(30.0, 20.0, 120.0, 0xffffff, 1.0);
+  _ = two.node_add(-1, stage::Place { pl_w: 60.0, pl_h: 20.0, pl_x: 40.0,
+                                      pl_y: 10.0, pl_colour: 0x8080ff, pl_depth: 0.0 });
+  _ = two.node_add(-1, stage::Place { pl_w: 60.0, pl_h: 20.0, pl_x: 0.0,
+                                      pl_y: 10.0, pl_colour: 0xffffff, pl_depth: 1.0 });
+  two.compose();
+  c2 = graphics::canvas(200, 40, 0xff000000);
+  two.render_view(0, c2);
+  assert(differing(c1, c2) == 0, "{differing(c1, c2)} pixels depended on insertion order");
+}
+
+// ── the shader reads the same constant ───────────────────────────────────────
+
+// ⚠ ONE HOME FOR THE CURVE.  The composite shader takes the falloff as a
+// UNIFORM fed from `LIGHT_FALLOFF` — the same symbol `light_reach` uses — rather
+// than a number baked into its text.  Baking it would be a second copy, and
+// interpolating it is worse than it looks: loft renders `2.0` as `2`, which GLSL
+// takes as an int and refuses.
+fn test_the_composite_shader_takes_the_falloff_as_a_uniform() {
+  src = stage::composite_shader_source();
+  assert(src.contains("uniform float uFalloff"), "the shader declares the uniform");
+  assert(src.contains("uniform float uFloor"), "and the floor it must never undercut");
+  // The exponent the curve is raised to must BE the uniform — a number here
+  // would be a second copy of the curve, free to drift from `light_reach`.
+  assert(src.contains("uFalloff)"), "the exponent is the uniform, not a literal");
+  assert(near(stage::LIGHT_FALLOFF, 1.0), "the curve is linear today");
+}

@@ -1,0 +1,181 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The easing curves — eleven shapes, three directions, and ONE place that
+// decides what happens at the ends.
+//
+// ── ⚠⚠ WHY THIS IS ONE FUNCTION AND NOT THIRTY-THREE ────────────
+//
+// An easing set is normally written out as `ease_quad_in`, `ease_quad_out`,
+// `ease_quad_in_out`, … — thirty-three functions, each of which has to land on
+// **exactly** 0 at `t = 0` and **exactly** 1 at `t = 1`.  That is thirty-three
+// independent chances to get an endpoint wrong, and getting one wrong is
+// SILENT: a curve that answers 0.999999 at the end leaves whatever it was
+// driving a hair short of its target, for ever, with nothing to report.
+//
+// ⚠ It is not a hypothetical.  The textbook exponential ease is
+// `2^(10(t−1))`, which answers **0.0009765625 at t = 0** rather than zero —
+// every library that ships it patches the hole with an `if t == 0` special
+// case, and that special case is the thirty-three-chances problem in its
+// natural habitat.  The textbook sine ease has the same hole at the other
+// end: `1 − cos(t·π/2)` at `t = 1` is `0.9999999999999999`, because
+// `cos(π/2)` in binary floating point is `6.1e−17` and not zero.
+//
+// So the endpoints are decided in **one** place — `curve_at`, the clamped
+// accessor that every direction reads the curve through:
+//
+//   1. `curve_at` CLAMPS — outside `(0, 1)` it answers 0 or 1 and never
+//      consults the curve at all.  Every one of the thirty-three combinations
+//      is exact at both ends because none of them is asked.
+//   2. Only the **In** direction of each curve is written down.  `Out` and
+//      `InOut` are REFLECTIONS of it:
+//
+//          out(t)   = 1 − in(1 − t)
+//          inout(t) = in(2t)/2                for t < ½
+//                   = 1 − in(2 − 2t)/2        for t ≥ ½
+//
+//      so eleven curves cover thirty-three, and a new curve is one arm of one
+//      match rather than three functions.
+//
+// ⚠ Rule 1 is what makes the contract exact; rule 2 is what keeps the file
+// short enough to read.  They are independent, and the test suite gates them
+// separately — `curves.loft` asserts that the raw sine curve MISSES 1.0 while
+// `ease` hits it, so the clamp is proven load-bearing rather than decorative.
+//
+// ⚠⚠ **And the clamp has to sit under the reflections, not in front of them.**
+// The first cut of this file clamped `ease`'s own `t` instead, which looks
+// equivalent and is not: rule 2 evaluates the curve at `1 − t` and at `2 − 2t`,
+// so an in-out at exactly the midpoint asks the raw curve for `in(1)` — the
+// very value that misses.  It answered `0.5000000000000001`, and the test that
+// caught it is `test_out_and_inout_are_exact_reflections_of_in`.  A guard in
+// front of three derivations is three chances to bypass it; one underneath
+// them is none.
+//
+// ── ⚠ WHAT THE REFLECTION COSTS, STATED RATHER THAN HIDDEN ──────
+//
+// Penner's originals tune `back` and `elastic` with a SECOND constant for
+// their in-out variants, so a hand-written `ease_back_in_out` overshoots
+// harder than the reflection of `ease_back_in` does.  This file does not:
+// `InOut` is the reflection, always, and the two overshooting curves are
+// therefore gentler in the middle than their textbook namesakes.  That is a
+// deliberate trade — one rule in one place against thirty-three hand-tuned
+// functions — and a consumer who needs the sharper overshoot raises the
+// amplitude at the call site.
+//
+// ── WHAT IS NOT HERE ────────────────────────────────────────────
+//
+// **No time, no state, no value.**  A curve maps `[0, 1]` to roughly `[0, 1]`
+// and knows nothing about durations or what is being animated.  `tween.loft`
+// owns both.
+
+// Which shape the curve has.
+//
+// ⚠ `Back` and `Elastic` leave `[0, 1]` on purpose — they overshoot and come
+// back — so a consumer clamping the RESULT of an ease is undoing the effect it
+// asked for.  Every other curve stays inside.
+pub enum Curve {
+    Linear,
+    Quad, Cubic, Quart, Quint,
+    Sine, Expo, Circ,
+    Back, Elastic, Bounce,
+}
+
+// Which direction the curve runs: slow at the start, slow at the end, or both.
+pub enum Shape { In, Out, InOut }
+
+const HALF_PI  = 1.5707963267948966;    // π/2
+const ELASTIC_P = 2.0943951023931953;   // 2π/3 — elastic's period
+const BACK_C1  = 1.70158;               // the classic overshoot constant
+
+// `2^-10` and `1 − 2^-10`: what an un-normalised exponential curve answers at
+// `t = 0`, and the span that divides it back out.  See the header.
+const EXPO_ZERO = 0.0009765625;
+const EXPO_SPAN = 0.9990234375;
+
+const BOUNCE_N  = 7.5625;
+const BOUNCE_B1 = 0.36363636363636365;  // 1     / 2.75
+const BOUNCE_B2 = 0.7272727272727273;   // 2     / 2.75
+const BOUNCE_B3 = 0.9090909090909091;   // 2.5   / 2.75
+const BOUNCE_S2 = 0.5454545454545454;   // 1.5   / 2.75
+const BOUNCE_S3 = 0.8181818181818182;   // 2.25  / 2.75
+const BOUNCE_S4 = 0.9545454545454546;   // 2.625 / 2.75
+
+// Ease `t` — the entry point, and the three reflections of the header's rule 2.
+//
+// ⚠ There is no clamp HERE on purpose; every arm reads the curve through
+// `curve_at`, which is where the endpoints are decided.  See the header for
+// why in front of the reflections is the wrong side of them.
+pub fn ease(c: Curve, s: Shape, t: float) -> float {
+    match s {
+        In    => curve_at(c, t),
+        Out   => 1.0 - curve_at(c, 1.0 - t),
+        InOut => {
+            if t < 0.5 { curve_at(c, t * 2.0) * 0.5 }
+            else       { 1.0 - curve_at(c, (1.0 - t) * 2.0) * 0.5 }
+        },
+    }
+}
+
+// The curve, clamped — **the one place all thirty-three combinations get their
+// endpoints from.**
+//
+// ⚠ **Clamped, not trusted.**  `t <= 0` answers exactly 0.0 and `t >= 1`
+// exactly 1.0 without consulting the curve, which is what makes the endpoints
+// exact — including for the two curves whose textbook definitions miss them.
+//
+// ⚠ A `null` progress (a NaN) is neither `<= 0.0` nor `>= 1.0`, so it reaches
+// the curve and comes back null.  That is deliberate: an unanswerable progress
+// must not silently read as "finished".
+pub fn curve_at(c: Curve, t: float) -> float {
+    if t <= 0.0 { return 0.0; }
+    if t >= 1.0 { return 1.0; }
+    curve_in(c, t)
+}
+
+// The **In** direction of each curve, raw — the eleven definitions everything
+// else is reflected from.
+//
+// ⚠ **Public so it can be gated, not because it is the door.**  It is NOT
+// clamped: `curve_in(Sine, 1.0)` is `0.9999999999999999`, which is exactly the
+// hole `ease` exists to close.  Reach for `ease`.
+pub fn curve_in(c: Curve, t: float) -> float {
+    match c {
+        Linear  => t,
+        Quad    => t * t,
+        Cubic   => t * t * t,
+        Quart   => t * t * t * t,
+        Quint   => t * t * t * t * t,
+        Sine    => 1.0 - cos(t * HALF_PI),
+        // Normalised so it starts at zero rather than at 2^-10 — the header's
+        // first example.
+        Expo    => ((pow2(10.0 * t - 10.0) - EXPO_ZERO) / EXPO_SPAN)?,
+        Circ    => 1.0 - (sqrt(1.0 - t * t) ?? 0.0),
+        Back    => (BACK_C1 + 1.0) * t * t * t - BACK_C1 * t * t,
+        Elastic => -pow2(10.0 * t - 10.0) * sin((t * 10.0 - 10.75) * ELASTIC_P),
+        Bounce  => 1.0 - bounce(1.0 - t),
+    }
+}
+
+// `2^x`, with the nullable discharged — `pow` answers `float?`.
+fn pow2(x: float) -> float {
+    pow(2.0, x) ?? 0.0
+}
+
+// The four parabolic hops, written in the direction they are natural in.
+//
+// ⚠ Bounce is the one curve whose textbook form is the OUT direction, so
+// `curve_in` reflects THIS rather than the other way round — which is why the
+// eleven-curve table still holds.
+fn bounce(t: float) -> float {
+    if t < BOUNCE_B1 { return BOUNCE_N * t * t; }
+    if t < BOUNCE_B2 {
+        b = t - BOUNCE_S2;
+        return BOUNCE_N * b * b + 0.75;
+    }
+    if t < BOUNCE_B3 {
+        b = t - BOUNCE_S3;
+        return BOUNCE_N * b * b + 0.9375;
+    }
+    b = t - BOUNCE_S4;
+    BOUNCE_N * b * b + 0.984375
+}

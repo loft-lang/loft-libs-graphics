@@ -1,0 +1,107 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN145 B0 — text that draws with NO font file, NO native rasteriser and NO GL.
+//
+// That is the whole gate, and it is a consumer outcome rather than a unit test:
+// `dryopea/src/hud.loft` draws its digits as RECTANGLES and `picker.loft` shipped
+// with no labels, both because the only text path needed all three.  Every
+// assertion below runs under plain `loft test`.
+use text2d;
+use graphics;
+
+fn ink(cv: const graphics::Canvas, colour: integer) -> integer {
+  n = 0;
+  for v in cv.data { if v == colour { n = n + 1; } }
+  n
+}
+
+// THE GATE: a known string puts a known, non-zero amount of ink on the canvas,
+// with nothing loaded.
+fn test_text_draws_with_nothing_loaded() {
+  cv = graphics::canvas(64, 16, 0xff000000);
+  w = text2d::write_text(cv, "HELLO 123", 1, 1, 0xffffffff, 1);
+  assert(ink(cv, 0xffffffff) > 0, "the string put ink on the canvas");
+  expect = text2d::text_width("HELLO 123", 1);
+  assert(w == expect, "the drawn width matches the measured one");
+}
+
+// A blank string draws nothing and measures zero — the degenerate case proved.
+fn test_an_empty_string_is_zero() {
+  cv = graphics::canvas(16, 16, 0xff000000);
+  _ = text2d::write_text(cv, "", 0, 0, 0xffffffff, 1);
+  assert(ink(cv, 0xffffffff) == 0, "nothing drawn");
+  assert(text2d::text_width("", 1) == 0, "and nothing measured");
+}
+
+// Width is exact: n glyphs of 5, with a 1-pixel gap after all but the last.
+//   "AB"  -> 5 + 1 + 5      = 11
+//   "ABC" -> 5 + 1 + 5 + 1 + 5 = 17
+fn test_width_is_exact() {
+  assert(text2d::text_width("A", 1) == 5, "one glyph is 5 wide");
+  assert(text2d::text_width("AB", 1) == 11, "two glyphs and one gap");
+  assert(text2d::text_width("ABC", 1) == 17, "three glyphs and two gaps");
+  assert(text2d::text_width("AB", 2) == 22, "scale multiplies the whole run");
+  assert(text2d::line_height(1) == 7 and text2d::line_height(3) == 21, "line height scales");
+}
+
+// Scale 2 quadruples the ink: every lit pixel becomes a 2x2 block, exactly.
+fn test_scale_quadruples_the_ink() {
+  a = graphics::canvas(64, 32, 0xff000000);
+  _ = text2d::write_text(a, "42", 0, 0, 0xffffffff, 1);
+  b = graphics::canvas(64, 32, 0xff000000);
+  _ = text2d::write_text(b, "42", 0, 0, 0xffffffff, 2);
+  assert(ink(b, 0xffffffff) == ink(a, 0xffffffff) * 4,
+         "scale 2 is exactly 4x the ink: {ink(a, 0xffffffff)} -> {ink(b, 0xffffffff)}");
+}
+
+// ⚠ A DIGIT IS THE CASE dryopea COULD NOT DRAW.  Each of 0-9 must put ink down,
+// and they must not all be the same shape — a face that drew one blob for every
+// digit would pass a coverage test and be useless.
+fn test_every_digit_is_drawn_and_distinct() {
+  digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+  seen: vector<integer> = [];
+  for d in digits {
+    cv = graphics::canvas(8, 8, 0xff000000);
+    _ = text2d::write_text(cv, d, 0, 0, 0xffffffff, 1);
+    n = ink(cv, 0xffffffff);
+    assert(n > 0, "digit {d} drew nothing");
+    seen += [n];
+  }
+  // '1' is the thinnest and '8' among the fattest; if the face were one blob these
+  // would be equal.
+  assert((seen[1] ?? 0) < (seen[8] ?? 0), "'1' must carry less ink than '8'");
+}
+
+// Lowercase folds to uppercase rather than vanishing — the documented compromise.
+fn test_lowercase_folds_rather_than_vanishing() {
+  lower = graphics::canvas(16, 16, 0xff000000);
+  _ = text2d::write_text(lower, "a", 0, 0, 0xffffffff, 1);
+  upper = graphics::canvas(16, 16, 0xff000000);
+  _ = text2d::write_text(upper, "A", 0, 0, 0xffffffff, 1);
+  assert(ink(lower, 0xffffffff) > 0, "lowercase draws something");
+  assert(ink(lower, 0xffffffff) == ink(upper, 0xffffffff), "and it is the uppercase form");
+}
+
+// An unknown character reserves its width instead of collapsing the run, so a
+// string never changes length because one glyph was missing.
+fn test_an_unknown_glyph_keeps_its_width() {
+  cv = graphics::canvas(64, 16, 0xff000000);
+  w = text2d::write_text(cv, "A~B", 0, 0, 0xffffffff, 1);
+  expect2 = text2d::text_width("A~B", 1);
+  assert(w == expect2, "the run is three glyphs wide either way");
+}
+
+// Centring puts the run's own width in the middle of the box.
+fn test_centred_text_is_centred() {
+  cv = graphics::canvas(32, 16, 0xff000000);
+  _ = text2d::write_centred(cv, "A", 0, 0, 32, 16, 0xffffffff, 1);
+  // 5 wide in a 32 box -> starts at 13; 7 tall in 16 -> starts at 4.
+  found = false;
+  for y in 0..16 {
+    for x in 0..32 {
+      if cv.get_pixel(x, y) == 0xffffffff and x < 13 { found = true; }
+    }
+  }
+  assert(!found, "no ink left of the centred start column");
+}

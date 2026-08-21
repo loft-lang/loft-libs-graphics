@@ -1,0 +1,255 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN144 L1 — light sampled per sprite, applied as tint.
+//
+// The whole feature for a flat-lit 2-D game, and deliberately first: it rides
+// A5's tint attribute, so it costs no pass, needs no framebuffer, and cannot
+// disturb draw order.  L2 is only worth its pass when light must fall ACROSS the
+// scene rather than across the sprites.
+use stage;
+use graphics;
+
+EPS = 0.000001;
+fn near(a: float, b: float) -> boolean { a - b < EPS and b - a < EPS }
+fn count_of(cv: const graphics::Canvas, want: integer) -> integer {
+  n = 0;
+  for v in cv.data { if v == want { n = n + 1; } }
+  n
+}
+
+// A mob standing at (x, y): 10 wide, 20 tall, origin at its FEET.
+fn mob_at(st: stage::Stage, x: float, y: float) -> integer {
+  st.node_add(-1, stage::Place { pl_w: 10.0, pl_h: 20.0, pl_ox: 5.0, pl_oy: 20.0,
+                                 pl_x: x, pl_y: y, pl_colour: 0xc03030 })
+}
+
+// ── the degenerate case first ────────────────────────────────────────────────
+
+// ⚠ AN UNLIT SCENE IS UNTOUCHED.  Ambient is 1.0 and there are no lights, so a
+// game that never asks for light cannot be dimmed by this feature existing.
+fn test_no_lights_is_the_material_unchanged() {
+  st = stage::stage_new();
+  n = mob_at(st, 100.0, 200.0);
+  st.compose();
+  assert(near(st.ambient(), 1.0), "ambient starts fully lit");
+  assert(st.light_count() == 0, "and there are no lights");
+  assert(st.lit_colour(n) == 0xc03030, "so the colour is the material, exactly");
+}
+
+// Dimming with no lights at all is the other degenerate case, and it is how a
+// night scene starts before a torch is put in it.
+fn test_ambient_alone_dims_everything_evenly() {
+  st = stage::stage_new();
+  a = mob_at(st, 0.0, 0.0);
+  b = mob_at(st, 900.0, 900.0);
+  st.set_ambient(0.5);
+  st.compose();
+  // 0xC03030 = (192,48,48); halved and rounded = (96,24,24).
+  assert(st.lit_colour(a) == 0x601818, "half light, hand-computed");
+  assert(st.lit_colour(b) == 0x601818, "and distance means nothing without a light");
+}
+
+// ── falloff, every value worked out by hand ──────────────────────────────────
+
+// ⚠ THE FALLOFF IS LINEAR IN THE RADIUS — `1 - d/r`, clamped.  Chosen because
+// this phase's gate is hand-computed values, and a curve nobody can hand-compute
+// is a gate nobody maintains.  L2 owns the question of a prettier curve, and its
+// own gate says so: expectations GENERATED from the constants the shader uses.
+fn test_the_falloff_is_hand_computed_at_every_distance() {
+  st = stage::stage_new();
+  st.set_ambient(0.0);
+  _ = st.add_light(100.0, 200.0, 100.0, 0xffffff, 1.0);
+  on   = mob_at(st, 100.0, 200.0);   // d = 0
+  half = mob_at(st, 150.0, 200.0);   // d = 50
+  edge = mob_at(st, 200.0, 200.0);   // d = 100, exactly the radius
+  past = mob_at(st, 250.0, 200.0);   // d = 150
+  st.compose();
+  assert(st.lit_colour(on) == 0xc03030, "standing on the light: the full material");
+  assert(st.lit_colour(half) == 0x601818, "half way out: exactly half");
+  assert(st.lit_colour(edge) == 0x000000, "at the radius the light has ended");
+  assert(st.lit_colour(past) == 0x000000, "and beyond it stays ended, never negative");
+}
+
+// Equal distance, equal light — in any direction.  A falloff that used only x,
+// or the bounding box, passes the horizontal cell and fails this one.
+fn test_two_sprites_at_equal_distance_take_equal_tint() {
+  st = stage::stage_new();
+  st.set_ambient(0.0);
+  _ = st.add_light(100.0, 200.0, 100.0, 0xffffff, 1.0);
+  east  = mob_at(st, 150.0, 200.0);
+  west  = mob_at(st, 50.0, 200.0);
+  south = mob_at(st, 100.0, 250.0);
+  north = mob_at(st, 100.0, 150.0);
+  st.compose();
+  assert(st.lit_colour(east) == 0x601818, "east");
+  assert(st.lit_colour(west) == st.lit_colour(east), "west matches");
+  assert(st.lit_colour(south) == st.lit_colour(east), "south matches");
+  assert(st.lit_colour(north) == st.lit_colour(east), "north matches");
+}
+
+// ── light COMPOSES with the material, it does not replace it ─────────────────
+
+// ⚠ A RED SPRITE UNDER A BLUE LIGHT GOES DARK, NOT BLUE.  Light multiplies the
+// material — overwriting it would throw away A5's tint, which is the attribute
+// this rides.  Hand-computed: (192,48,48) x (0,0,1) = (0,0,48).
+fn test_light_composes_with_the_material_tint() {
+  st = stage::stage_new();
+  st.set_ambient(0.0);
+  _ = st.add_light(100.0, 200.0, 100.0, 0x0000ff, 1.0);
+  n = mob_at(st, 100.0, 200.0);
+  st.compose();
+  assert(st.lit_colour(n) == 0x000030,
+         "red under blue is nearly black — got {st.lit_colour(n)}");
+}
+
+// ⚠ TWO LIGHTS CANNOT OVERFLOW PAST THE MATERIAL.  Unclamped, 2.0 x 192 wraps
+// and a doubly-lit sprite comes out DARK — the classic brightness bug, and the
+// one everyone finds by standing between two torches.
+fn test_overlapping_lights_clamp_instead_of_wrapping() {
+  st = stage::stage_new();
+  st.set_ambient(0.0);
+  _ = st.add_light(100.0, 200.0, 100.0, 0xffffff, 1.0);
+  _ = st.add_light(100.0, 200.0, 100.0, 0xffffff, 1.0);
+  n = mob_at(st, 100.0, 200.0);
+  st.compose();
+  assert(st.lit_colour(n) == 0xc03030,
+         "two full lights is the material, not more and not wrapped");
+}
+
+// ── sampled at the ORIGIN — the footprint, not the artwork ───────────────────
+
+// ⚠ THE SAMPLE POINT IS THE SPRITE'S ORIGIN, the same point P1 sorts on.  Two
+// mobs standing on one tile must take the same light however tall their artwork
+// is; sample the corner instead and a tall sprite is lit as though it stood
+// further away, which is the 2.5-D wrong picture in another form.
+fn test_light_is_sampled_at_the_footprint_not_the_artwork() {
+  st = stage::stage_new();
+  st.set_ambient(0.0);
+  _ = st.add_light(100.0, 200.0, 100.0, 0xffffff, 1.0);
+  short = st.node_add(-1, stage::Place { pl_w: 10.0, pl_h: 20.0, pl_ox: 5.0,
+                                         pl_oy: 20.0, pl_x: 150.0, pl_y: 200.0,
+                                         pl_colour: 0xc03030 });
+  tall  = st.node_add(-1, stage::Place { pl_w: 10.0, pl_h: 60.0, pl_ox: 5.0,
+                                         pl_oy: 60.0, pl_x: 150.0, pl_y: 200.0,
+                                         pl_colour: 0xc03030 });
+  st.compose();
+  o1 = st.world_origin(short);
+  o2 = st.world_origin(tall);
+  assert(near(o1.p_x, o2.p_x) and near(o1.p_y, o2.p_y),
+         "both stand on the same spot, whatever their height");
+  assert(st.lit_colour(short) == 0x601818, "the short one, hand-computed at d=50");
+  assert(st.lit_colour(tall) == st.lit_colour(short),
+         "and the tall one takes exactly the same light");
+}
+
+// ── it rides A5's attribute: no pass, no reorder ─────────────────────────────
+
+// ⚠ LIGHT MUST NOT DISTURB THE DRAW.  It is a colour, not a pass — so the batch
+// count, the draw order and the geometry are all unchanged by lighting a scene.
+fn test_light_changes_no_batch_and_no_order() {
+  st = stage::stage_new();
+  _ = mob_at(st, 100.0, 200.0);
+  _ = mob_at(st, 140.0, 200.0);
+  _ = mob_at(st, 180.0, 200.0);
+  st.compose();
+  runs_before = len(st.batches());
+  order_before = "";
+  for i in st.order() { order_before += "{i},"; }
+
+  st.set_ambient(0.2);
+  _ = st.add_light(100.0, 200.0, 90.0, 0xffe0a0, 1.0);
+  st.compose();
+  order_after = "";
+  for i in st.order() { order_after += "{i},"; }
+  assert(len(st.batches()) == runs_before,
+         "lighting adds no run — {len(st.batches())} vs {runs_before}");
+  assert(order_after == order_before, "and reorders nothing");
+}
+
+// ⚠ BUT IT DOES DIRTY THE BUFFER, unlike the camera.  A light changes what is
+// IN the instance data, so honesty here matters: a moving torch re-packs every
+// frame, and that is exactly the cost L2's pass exists to take over.
+fn test_a_light_dirties_the_buffer_where_a_camera_does_not() {
+  st = stage::stage_new();
+  _ = mob_at(st, 100.0, 200.0);
+  st.compose();
+  _ = st.sync_instances();
+  st.set_camera(50.0, 0.0);
+  assert(!st.sync_instances(), "a camera move re-packs nothing");
+  l = st.add_light(100.0, 200.0, 100.0, 0xffffff, 1.0);
+  assert(st.sync_instances(), "adding a light does re-pack");
+  st.move_light(l, 120.0, 200.0);
+  assert(st.sync_instances(), "and so does moving one");
+  st.set_ambient(0.5);
+  assert(st.sync_instances(), "and changing the ambient");
+}
+
+// ── one home: both render paths agree ────────────────────────────────────────
+
+// ⚠ THE LIT COLOUR IS DERIVED ONCE and both paths read it.  P6 shipped a defect
+// that was exactly this shape the other way round — a fact re-derived per path
+// and validated only where the derivations happened to coincide.
+fn test_both_render_paths_agree_about_the_light() {
+  st = stage::stage_new();
+  st.set_ambient(0.0);
+  // ⚠ THE LIGHT IS PLACED SO THE LIT COLOUR DIFFERS FROM THE MATERIAL.  An
+  // earlier version stood the sprite ON the light, where the two are equal — so
+  // a render path that ignored lighting entirely still matched, and the test
+  // proved nothing.  The control is what exposed that; the assertion below now
+  // makes it impossible to drift back.
+  _ = st.add_light(52.0, 3.0, 100.0, 0xffffff, 1.0);   // d = 50, reach 0.5
+  n = st.node_add(-1, stage::Place { pl_x: 2.0, pl_y: 3.0, pl_w: 5.0, pl_h: 4.0,
+                                     pl_colour: 0xc03030 });
+  st.compose();
+  want = st.lit_colour(n);
+  assert(want == 0x601818, "half-lit, hand-computed — got {want}");
+  assert(want != 0xc03030, "and it is NOT the raw material, or this proves nothing");
+  cv = graphics::canvas(16, 16, 0xff000000);
+  st.render_stage(cv);
+  assert(count_of(cv, 0xff000000 | want) == 20,
+         "the software path paints the LIT colour over its 5x4");
+
+  f = st.pack_instances();
+  // The packed rgba is premultiplied and alpha is 1, so it is the lit colour
+  // divided by 255 — the same number the software path used.
+  r = ((f[stage::OFF_RGBA] ?? 0.0f) as float) * 255.0 + 0.5;
+  assert((r as integer) == ((want >> 16) & 255),
+         "and the instance buffer carries the same red: {r as integer}");
+}
+
+// ⚠ A LIGHT OUT OF RANGE CONTRIBUTES NOTHING — it must not SUBTRACT.  Unclamped,
+// `1 - d/r` goes negative past the radius, and a distant lamp then darkens what
+// a nearby one lit: the sprite at 250 is half-lit by B and 250 units outside A,
+// where the raw falloff is -4.  With one light the final clamp hides it, so this
+// is the cell that catches it — and the control that removed the clamp passed
+// every other test in this file.
+fn test_a_light_out_of_range_does_not_subtract() {
+  st = stage::stage_new();
+  st.set_ambient(0.0);
+  _ = st.add_light(0.0, 200.0, 50.0, 0xffffff, 1.0);     // far away, tiny radius
+  _ = st.add_light(300.0, 200.0, 100.0, 0xffffff, 1.0);  // the one that lights it
+  n = mob_at(st, 250.0, 200.0);                          // d = 250 from A, 50 from B
+  st.compose();
+  assert(st.lit_colour(n) == 0x601818,
+         "lit by B alone, undimmed by A — got {st.lit_colour(n)}");
+}
+
+// ⚠ THE REACH ITSELF IS BOUNDED, and this is where that is gated — `lit_colour`
+// skips a zero contribution as work avoided, so a negative reach would never
+// show through it.  The invariant is `light_reach`'s, so it is tested on
+// `light_reach`: past the radius it answers exactly 0, never a negative that
+// would let a distant lamp DARKEN what a near one lit.
+fn test_the_reach_is_bounded_at_both_ends() {
+  l = stage::StageLight { lt_x: 0.0, lt_y: 0.0, lt_r: 100.0,
+                          lt_colour: 0xffffff, lt_power: 1.0 };
+  assert(near(stage::light_reach(l, 0.0, 0.0), 1.0), "at the centre, full");
+  assert(near(stage::light_reach(l, 50.0, 0.0), 0.5), "half way, half");
+  assert(near(stage::light_reach(l, 100.0, 0.0), 0.0), "at the radius, nothing");
+  assert(near(stage::light_reach(l, 500.0, 0.0), 0.0),
+         "and far beyond it is still nothing, NOT -4: got {stage::light_reach(l, 500.0, 0.0)}");
+  z = stage::StageLight { lt_x: 0.0, lt_y: 0.0, lt_r: 0.0,
+                          lt_colour: 0xffffff, lt_power: 1.0 };
+  assert(near(stage::light_reach(z, 0.0, 0.0), 0.0),
+         "a radius of zero reaches nothing, and does not divide by it");
+}

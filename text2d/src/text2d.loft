@@ -1,0 +1,462 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// text2d — text that always draws.  @PLN144/@PLN145 arc B.
+//
+// ⚠ WHY A BUILT-IN FACE EXISTS AT ALL.  `graphics::write_text` needs three things
+// at once: a GL context, the native rasteriser, and a font FILE.  Under `loft
+// test` the rasteriser answers *"native function not loaded"*, so a repo that
+// tests its UI headlessly answers by having no text — and two shipped surfaces in
+// `dryopea` did exactly that: `hud.loft` draws its digits as RECTANGLES and
+// `picker.loft` shipped without labels, each having reached that conclusion on its
+// own.  A face baked in as data needs none of the three.
+//
+// This is a FALLBACK, and the word is load-bearing: its job is that text is never
+// invisible, not that it is beautiful.  A real typeface arrives through the asset
+// pack (@PLN146 F5/F6).
+use graphics;
+use face;
+
+// Where the glyph for `code` starts in `face_rows`, or -1 if there is none.
+// Lowercase folds to uppercase — see the note in `face.loft`.
+fn glyph_at(code: integer) -> integer {
+  c = code;
+  if c >= 97 and c <= 122 { c = c - 32; }
+  codes = face::face_codes();
+  lo = 0;
+  hi = len(codes) - 1;
+  while lo <= hi {
+    mid = (lo + hi) / 2 ?? 0;
+    at = codes[mid] ?? -1;
+    if at == c { return mid * face::GLYPH_H; }
+    if at < c { lo = mid + 1; } else { hi = mid - 1; }
+  }
+  -1
+}
+
+// Blit one codepoint's glyph with its top-left at (x, y).  Shared by the direct
+// blitter and by the atlas, so the bit-walk has ONE home and the two can never
+// disagree about what a glyph looks like.
+pub fn blit_glyph(cv: graphics::Canvas, code: integer, x: integer, y: integer,
+                  colour: integer, scale: integer) {
+  at = glyph_at(code);
+  if at < 0 { return; }
+  rows = face::face_rows();
+  for ry in 0..face::GLYPH_H {
+    bits = rows[at + ry] ?? 0;
+    for rx in 0..face::GLYPH_W {
+      if (bits & (1 << (face::GLYPH_W - 1 - rx))) != 0 {
+        for sy in 0..scale {
+          for sx in 0..scale {
+            cv.set_pixel(x + rx * scale + sx, y + ry * scale + sy, colour);
+          }
+        }
+      }
+    }
+  }
+}
+
+// Width in pixels of `s` at scale 1, INCLUDING the single-pixel gap after every
+// glyph but the last.  Exact — the caller can centre with it and be right.
+pub fn text_width(s: text, scale: integer) -> integer {
+  n = 0;
+  for _c in s { n = n + 1; }
+  if n == 0 { return 0; }
+  (n * (face::GLYPH_W + 1) - 1) * scale
+}
+
+// Height of one line at `scale`.
+pub fn line_height(scale: integer) -> integer { face::GLYPH_H * scale }
+
+// ⚠ NAMED `write_text`, NOT `draw_text`.  `graphics` already has `draw_text` as a
+// METHOD on `Canvas`, and a method spelling outranks a library's free function of
+// the same name (loft#940) — so a bare `draw_text(cv, …)` here resolves to the
+// seven-parameter GL one and fails at the call site with an arity error that names
+// neither library.  A distinct verb costs nothing and is reachable.
+//
+// Draw `s` with its top-left at (x, y).  Answers the width drawn, so a caller can
+// lay out the next run without measuring twice.
+//
+// ⚠ Iterates CHARACTERS, not bytes.  `len(text)` counts characters and an indexed
+// read is bytes, so a byte loop truncates multi-byte text silently — the trap the
+// strict-index lint exists for.  A character with no glyph draws a blank of the
+// same width rather than being skipped, so a string never changes length because
+// one character was missing.
+pub fn write_text(cv: graphics::Canvas, s: text, x: integer, y: integer,
+                 colour: integer, scale: integer) -> integer {
+  sc = if scale < 1 { 1 } else { scale };
+  rows = face::face_rows();
+  pen = x;
+  for ch in s {
+    blit_glyph(cv, ch as integer, pen, y, colour, sc);
+    pen = pen + (face::GLYPH_W + 1) * sc;
+  }
+  pen - x - sc
+}
+
+// Draw `s` centred in the box (bx, by, bw, bh).  The commonest thing a HUD wants,
+// and the commonest place an off-by-one lands.
+pub fn write_centred(cv: graphics::Canvas, s: text, bx: integer, by: integer,
+                    bw: integer, bh: integer, colour: integer, scale: integer) -> integer {
+  w = text_width(s, scale);
+  h = line_height(scale);
+  write_text(cv, s, bx + (bw - w) / 2 ?? 0, by + (bh - h) / 2 ?? 0, colour, scale)
+}
+
+// ── B1: the glyph atlas ──────────────────────────────────────────────────────
+//
+// The point of an atlas here is not speed at the blit — it is that changing what a
+// label SAYS costs nothing.  `create_text_texture` bakes one GPU texture per string
+// per size per colour, so a score that ticks uploads a texture every frame, and
+// Brick Buster pre-baked digits 0-9 and one texture per level numeral to avoid it.
+// A glyph sheet is written once; a new string only re-lays-out quads over it.
+
+pub struct Atlas {
+  a_cv: graphics::Canvas,
+  a_codes: vector<integer>,   // codepoint held in each cell, in cell order
+  a_scale: integer,
+  a_cols: integer,
+  a_next: integer,            // the next free cell
+  a_writes: integer,          // how many times the SHEET changed — the gate reads this
+}
+
+// One glyph placed on a line: where it goes, and which cell it comes from.
+pub struct Quad {
+  q_x: integer,
+  q_y: integer,
+  q_cell: integer,
+}
+
+// A sheet with room for `capacity` glyphs at `scale`.  Shelf-packed in a grid,
+// which is enough for a fixed-width face — a proportional one would want a real
+// packer, and would still not change what the caller sees.
+pub fn atlas_new(scale: integer, capacity: integer) -> Atlas {
+  sc = if scale < 1 { 1 } else { scale };
+  cap = if capacity < 1 { 1 } else { capacity };
+  // ⚠ The sheet holds exactly `capacity`, not the next multiple of a row width.
+  // Rounding up would have made `atlas_new(1, 2)` hold sixteen — a caller asking
+  // for a small sheet and silently getting a large one is the kind of generosity
+  // that hides a full-sheet path until a consumer meets it.
+  cols = if cap < 16 { cap } else { 16 };
+  rows = (cap + cols - 1) / cols ?? 1;
+  if rows < 1 { rows = 1; }
+  Atlas {
+    a_cv: graphics::canvas(cols * face::GLYPH_W * sc, rows * face::GLYPH_H * sc, 0),
+    a_codes: [], a_scale: sc, a_cols: cols, a_next: 0, a_writes: 0,
+  }
+}
+
+pub fn atlas_glyph_count(self: const Atlas) -> integer { self.a_next }
+
+// How many times the sheet has been WRITTEN.  A GL consumer uploads on exactly
+// these, so a caller can assert that a changing label costs no upload — which is
+// the property the whole arc exists for.
+pub fn atlas_writes(self: const Atlas) -> integer { self.a_writes }
+
+// The cell holding `code`, rasterising it on first use.  -1 when the sheet is full.
+pub fn atlas_cell(self: Atlas, code: integer) -> integer {
+  c = code;
+  if c >= 97 and c <= 122 { c = c - 32; }
+  for i in 0..len(self.a_codes) {
+    if (self.a_codes[i] ?? -1) == c { return i; }
+  }
+  cap = (self.a_cv.width / (face::GLYPH_W * self.a_scale) ?? 1)
+      * (self.a_cv.height / (face::GLYPH_H * self.a_scale) ?? 1);
+  if self.a_next >= cap { return -1; }
+  cell = self.a_next;
+  cx = (cell % self.a_cols ?? 0) * face::GLYPH_W * self.a_scale;
+  cy = (cell / self.a_cols ?? 0) * face::GLYPH_H * self.a_scale;
+  blit_glyph(self.a_cv, c, cx, cy, 0xffffffff, self.a_scale);
+  self.a_codes += [c];
+  self.a_next = cell + 1;
+  self.a_writes = self.a_writes + 1;
+  cell
+}
+
+// Lay a string out over the sheet.  Answers one quad per character; NOTHING is
+// written to the sheet unless a character is new to it.
+pub fn layout(self: Atlas, s: text, x: integer, y: integer) -> vector<Quad> {
+  out: vector<Quad> = [];
+  pen = x;
+  for ch in s {
+    cell = atlas_cell(self, ch as integer);
+    out += [Quad { q_x: pen, q_y: y, q_cell: cell }];
+    pen = pen + (face::GLYPH_W + 1) * self.a_scale;
+  }
+  out
+}
+
+// Blit laid-out quads from the sheet onto a canvas.
+pub fn draw_quads(cv: graphics::Canvas, atlas: const Atlas, quads: const vector<Quad>,
+                  colour: integer) {
+  gw = face::GLYPH_W * atlas.a_scale;
+  gh = face::GLYPH_H * atlas.a_scale;
+  for q in quads {
+    if q.q_cell < 0 { continue; }
+    sx = (q.q_cell % atlas.a_cols ?? 0) * gw;
+    sy = (q.q_cell / atlas.a_cols ?? 0) * gh;
+    for py in 0..gh {
+      for px in 0..gw {
+        if atlas.a_cv.get_pixel(sx + px, sy + py) != 0 {
+          cv.set_pixel(q.q_x + px, q.q_y + py, colour);
+        }
+      }
+    }
+  }
+}
+
+
+// ── B1m: the metrics seam ────────────────────────────────────────────────────
+//
+// This package has no GL context and no font file, so it cannot measure a real
+// face itself.  The consumer measures ONCE at startup through whichever backend
+// resolved and hands the numbers over; everything a layout needs is derived
+// here.  That keeps `text2d` headless — the property `B0` exists for — while
+// still serving a game that ships a real TTF.
+
+// What the consumer measured.
+//
+// ⚠ `m_mono` IS A FACT ABOUT THE FACE THAT RESOLVED, not the one that was asked
+// for.  Requesting `DejaVuSansMono.ttf` gives a fixed-pitch face on the desktop
+// and a PROPORTIONAL fallback in the browser, because the browser resolves the
+// base name to a CSS family it does not know.  Only a measurement can tell.
+pub struct Metrics {
+    // ⚠ THE ADVANCE IS IN 1/64 PIXEL, and a whole-pixel field is what this
+    // replaces.  DejaVu Sans Mono at 16 px advances 9.6 px, which truncates to
+    // 9 — and the error is per CHARACTER, so it accumulates: a 60-character
+    // line comes out 36 px short.  Under-estimating is the dangerous direction,
+    // because a fit check then believes more fits than does and the text
+    // overflows the box it was just proved to fit, silently.
+    //
+    // 1/64 is the unit fonts are hinted in, and it keeps the residual under one
+    // pixel over any line a panel can hold.
+    m_adv64: integer,        // advance in 1/64 px
+    m_line_h: integer,       // line height in whole px
+    m_mono: boolean,         // is the resolved face actually fixed-pitch?
+}
+
+// Build metrics from two runs the consumer measured: `n` copies of a WIDE
+// character and `n` copies of a NARROW one.
+//
+// ⚠ THE TWO RUNS ARE THE WHOLE INSTRUMENT, and one width cannot replace them.
+// Ten M's are ten M's in any font, so a single measurement gives the advance of
+// an M and nothing about whether the face is fixed-pitch.  Two same-length,
+// opposite-width strings answer it in one comparison.
+//
+// The advance is taken from the WIDE run: under fixed pitch the two agree, and
+// when they do not, the wider one is the safe basis for a fits-in-the-box
+// question — it over-estimates rather than overflowing.
+pub fn metrics_measured(wide_run: float, narrow_run: float, n: integer,
+                        line_h: integer) -> Metrics {
+    if n <= 0 {
+        return Metrics { m_adv64: 0, m_line_h: line_h, m_mono: false };
+    }
+    Metrics { m_adv64: ((wide_run * 64.0 / (n as float)) ?? 0.0) as integer,
+              m_line_h: line_h,
+              m_mono: wide_run == narrow_run }
+}
+
+// The built-in face's own metrics, so a layout written against this seam works
+// with no font file at all — the property `B0` exists for, carried forward.
+pub fn metrics_builtin(scale: integer) -> Metrics {
+    Metrics { m_adv64: (face::GLYPH_W + 1) * scale * 64,
+              m_line_h: line_height(scale),
+              m_mono: true }
+}
+
+// The advance in 1/64 px, as measured.
+pub fn advance64(self: const Metrics) -> integer { self.m_adv64 }
+
+// The advance in whole pixels, for a caller that wants to show it.
+//
+// ⚠ DERIVED, NOT A SECOND FIELD.  One quantity stored twice is how two numbers
+// describing one distance drift apart the moment either is edited.
+pub fn advance(self: const Metrics) -> integer { (self.m_adv64 + 32) / 64 ?? 0 }
+
+pub fn height(self: const Metrics) -> integer { self.m_line_h }
+
+pub fn is_mono(self: const Metrics) -> boolean { self.m_mono }
+
+// The ADVANCE width of `s` — what to reserve a box by.
+//
+// ⚠ ROUNDED UP.  The residual is a fraction of a pixel per character, and the
+// safe direction to spend it is outwards: an over-estimate reserves a pixel too
+// many and the text still fits, an under-estimate spills out of a box that was
+// just measured as fitting.  Exact under fixed pitch, an over-estimate
+// otherwise — the same reason the advance comes from the wide run.
+//
+// Distinct from `text_width`, which is the built-in face's INK extent: the two
+// differ by the one trailing gap the ink extent leaves off, and they answer
+// different questions — centre by the ink, reserve by the advance.
+pub fn width(self: const Metrics, s: text) -> integer {
+    (len(s) * self.m_adv64 + 63) / 64 ?? 0
+}
+
+pub fn fits(self: const Metrics, s: text, px: integer) -> boolean {
+    width(self, s) <= px
+}
+
+// The longest prefix of `s` that fits in `px`, with ".." marking the cut.
+//
+// ⚠ AN UNTOUCHED STRING COMES BACK UNTOUCHED, so a caller cannot tell "fitted"
+// from "never measured" by looking for the marker — it appears only when
+// something was actually removed.
+//
+// ".." rather than a single "…": the ellipsis is one code point but several
+// bytes, and a marker whose own width is ambiguous is the wrong thing to measure
+// a truncation with.
+//
+// ⚠ CUTS BY CHARACTERS.  This shipped in B1m as `s[0..keep]`, a BYTE range given
+// a character count — safe, because loft snaps a byte cut outward to a character
+// boundary, but wrong: a non-ASCII label came back shorter than it needed to be.
+// B2's `take_chars` is the cure and the trap is the same one wrapping has.
+pub fn fit_text(self: const Metrics, s: text, px: integer) -> text {
+    if self.m_adv64 <= 0 { return s; }
+    if width(self, s) <= px { return s; }
+    adv = advance(self);
+    if adv <= 0 { return s; }
+    // Room for the marker itself.  Below that there is no honest answer, so it
+    // gives back as much as fits and no marker.
+    keep = (px / adv ?? 0) - 2;
+    if keep <= 0 {
+        room = px / adv ?? 0;
+        if room <= 0 { return ""; }
+        return take_chars(s, room);
+    }
+    take_chars(s, keep) + ".."
+}
+
+
+// ── B2: wrapping and alignment ───────────────────────────────────────────────
+//
+// ⚠ `len(text)` COUNTS CHARACTERS; `s[a..b]` SLICES BYTES.  `"héllo"[0..5]` is
+// `"héll"` — four characters, not five.  loft snaps a byte cut outward to a
+// character boundary, so the failure is not mojibake but something quieter: a
+// break computed as a character count and applied as a byte range fits FEWER
+// characters than it measured, silently, and only in text that is not ASCII.
+// Everything here counts and cuts in characters for that reason.
+
+pub const ALIGN_LEFT: integer = 0;
+pub const ALIGN_CENTRE: integer = 1;
+pub const ALIGN_RIGHT: integer = 2;
+
+// The first `n` CHARACTERS of `s`.  The cure for the trap above, and public
+// because every caller that slices text by a measured count needs it.
+pub fn take_chars(s: text, n: integer) -> text {
+    if n <= 0 { return ""; }
+    out = "";
+    k = 0;
+    for c in s {
+        if k >= n { break; }
+        out += c;
+        k = k + 1;
+    }
+    out
+}
+
+// How many characters of `s` fit in `px`.
+//
+// Computed rather than searched: a width is `ceil(chars * adv64 / 64)`, which is
+// monotonic in the count, so the largest count that fits is a division.  Never
+// answers zero — see `wrap`.
+fn chars_fitting(self: const Metrics, s: text, px: integer) -> integer {
+    if self.m_adv64 <= 0 { return len(s); }
+    k = (px * 64) / self.m_adv64 ?? 0;
+    if k < 1 { k = 1; }
+    if k > len(s) { k = len(s); }
+    k
+}
+
+// Break `s` into lines that each fit `px`, greedily, on measured advances.
+//
+// ⚠ A LINE ALWAYS TAKES AT LEAST ONE CHARACTER.  In a box narrower than the
+// narrowest glyph the alternatives are an infinite loop or dropping the text,
+// and a line that overflows and says so is better than either.
+//
+// ⚠ AND THE RESULTING TABLE IS PER TARGET.  Native measures a real TTF, the
+// browser measures whatever family resolved, so the same string breaks in
+// different places.  The invariant that travels is self-consistency: every line
+// here fits the box THESE metrics measured.
+pub fn wrap(self: const Metrics, s: text, px: integer) -> vector<text> {
+    lines: vector<text> = [];
+    line = "";
+    word = "";
+    for c in s {
+        if c == '\n' {
+            lines += [flush_word(self, line, word, px, lines)];
+            // `flush_word` returns the line it could not place; a hard break
+            // ends the line whatever is left on it.
+            line = "";
+            word = "";
+            continue;
+        }
+        if c == ' ' {
+            line = place(self, line, word, px, lines);
+            word = "";
+            continue;
+        }
+        word += c;
+    }
+    line = place(self, line, word, px, lines);
+    // ⚠ The open line is pushed unless it is empty AND something was already
+    // pushed: a hard break that consumed the whole word leaves nothing open, and
+    // a trailing blank line is a real one to a caller drawing carets or counting
+    // height.  An EMPTY document still gets its single empty line.
+    if line != "" or len(lines) == 0 { lines += [line]; }
+    lines
+}
+
+// Put `word` onto `line`, pushing completed lines into `lines`, and answer the
+// line that is still open.
+fn place(self: const Metrics, line: text, word: text, px: integer,
+         lines: vector<text>) -> text {
+    if word == "" { return line; }
+    cand = if line == "" { word } else { line + " " + word };
+    if width(self, cand) <= px { return cand; }
+    open = line;
+    if open != "" {
+        lines += [open];
+        open = "";
+    }
+    // The word alone, hard-broken if it cannot fit even on an empty line.
+    rest = word;
+    while width(self, rest) > px {
+        k = chars_fitting(self, rest, px);
+        lines += [take_chars(rest, k)];
+        rest = drop_chars(rest, k);
+    }
+    rest
+}
+
+// The line `flush_word` leaves open is always empty — an explicit break ends the
+// line — but the words before it still have to be placed.
+fn flush_word(self: const Metrics, line: text, word: text, px: integer,
+              lines: vector<text>) -> text {
+    place(self, line, word, px, lines)
+}
+
+// Everything after the first `n` CHARACTERS.
+fn drop_chars(s: text, n: integer) -> text {
+    out = "";
+    k = 0;
+    for c in s {
+        if k >= n { out += c; }
+        k = k + 1;
+    }
+    out
+}
+
+// Where to start drawing `line` inside a box at `bx` of width `bw`.
+//
+// ⚠ A LINE WIDER THAN ITS BOX STARTS AT THE BOX.  Centring or right-aligning it
+// arithmetically would push its beginning off the left edge, where it cannot be
+// clipped back into view — overflow to the right is recoverable, overflow to the
+// left loses the start of the text.
+pub fn align_x(self: const Metrics, line: text, bx: integer, bw: integer,
+               align: integer) -> integer {
+    slack = bw - width(self, line);
+    if slack <= 0 { return bx; }
+    if align == ALIGN_CENTRE { return bx + (slack / 2 ?? 0); }
+    if align == ALIGN_RIGHT { return bx + slack; }
+    bx
+}

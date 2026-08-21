@@ -1,0 +1,149 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN145 C1 — sequencing, and the one number that makes it exact: the
+// LEFTOVER a link hands to the next.
+//
+// `fixstep`'s `Timer` throws its overshoot away on purpose — a one-shot's
+// residue means nothing afterwards.  A chain's residue means everything, and
+// the control below computes what throwing it away would have cost.
+use tween;
+
+const SECOND = 3000000;
+const LINK   = 210000;    // 0.07 s — chosen because no ordinary frame divides it
+const LINKS  = 10;
+const TOTAL  = 2100000;   // 0.70 s
+
+fn chain_of(n: integer, each: integer) -> Track {
+  tr = track_new(Play.Chain);
+  for _ in 0..n { tr.add(tween_new(0.0, 1.0, each)); }
+  tr
+}
+
+// How many frames of `frame` units it takes to finish.
+fn frames_to_finish(tr: Track, frame: integer) -> integer {
+  f = 0;
+  while !tr.done() {
+    _ = tr.advance(frame);
+    f = f + 1;
+    if f > 10000 { return f; }        // the harness must not hang on a bug
+  }
+  f
+}
+
+// THE GATE.  Ten links of 0.07 s take 0.70 s of wall time, and the frame rate
+// does not get a say — bar the single partial frame at the end of the whole
+// chain when the rate does not divide it.
+fn test_a_chain_keeps_exact_time_at_every_frame_rate() {
+  at60 = frames_to_finish(chain_of(LINKS, LINK), 50000);
+  assert(at60 == 42, "60 Hz: 2 100 000 / 50 000 = 42 frames, got {at60}");
+
+  at30 = frames_to_finish(chain_of(LINKS, LINK), 100000);
+  assert(at30 == 21, "30 Hz: the same 0.70 s, in 21 frames, got {at30}");
+
+  at24 = frames_to_finish(chain_of(LINKS, LINK), 125000);
+  assert(at24 == 17, "24 Hz: 16.8 frames, so 17 — got {at24}");
+
+  // The 24 Hz cell overruns by ONE frame for the whole chain, not per link.
+  over = at24 * 125000 - TOTAL;
+  assert(over == 25000, "the overrun is {over} units — under one frame");
+  assert(over < 125000, "and strictly less than a frame, for ten links");
+}
+
+// ⚠ THE CONTROL.  A chain whose links dropped their overshoot — which is what
+// building one on a one-shot timer gives you — runs long, and by an amount
+// that depends on the frame rate.  This computes that model directly, so the
+// gate above is measured against the alternative rather than against itself.
+fn test_discarding_the_leftover_would_run_long_and_vary_by_rate() {
+  rates = [50000, 100000, 125000];
+  answers: vector<integer> = [];
+  for frame in rates {
+    f = 0;
+    for _ in 0..LINKS {
+      spent = 0;
+      while spent < LINK { spent = spent + frame; f = f + 1; }
+    }
+    answers += [f];
+  }
+  d60 = answers[0] ?? 0;
+  d30 = answers[1] ?? 0;
+  d24 = answers[2] ?? 0;
+  assert(d60 == 50, "discarding costs 50 frames at 60 Hz, not 42");
+  assert(d30 == 30, "and 30 at 30 Hz — a full second for a 0.70 s chain");
+  assert(d24 == 20, "and 20 at 24 Hz");
+  // 30 frames of 1/30 s is 1.0 s against a true 0.70 s: 43 % long.
+  assert(d30 * 100000 == SECOND, "the 30 Hz cell runs a whole second");
+  assert(d30 * 100000 > TOTAL, "which is longer than the chain actually is");
+}
+
+// A chain runs its links in order, and each one really does move — the link
+// lives inside the track's own vector, so this also gates that advancing it
+// through the collection reaches the stored record rather than a copy.
+fn test_a_chain_runs_its_links_in_order() {
+  tr = track_new(Play.Chain);
+  tr.add(tween_new(0.0, 10.0, SECOND));
+  tr.add(tween_new(100.0, 200.0, SECOND));
+
+  assert(tr.active() == 0, "it starts on the first link");
+  _ = tr.advance(SECOND / 2 ?? 0);
+  assert(tr.value_at(0) == 5.0, "the first link moved to its half-way point");
+  assert(tr.value_at(1) == 100.0, "and the second has not started");
+
+  _ = tr.advance(SECOND / 2 ?? 0);
+  assert(tr.active() == 1, "the first link finished, so the second is active");
+  assert(tr.value_at(0) == 10.0, "and the first is parked on its end value");
+
+  // Three quarters of a second lands the second link three quarters along —
+  // which is only true if the first link handed over its unused time.
+  _ = tr.advance((SECOND * 3) / 4 ?? 0);
+  assert(tr.value_at(1) == 175.0, "the second link is at 175, got {tr.value_at(1)}");
+  assert(!tr.done(), "and the chain is not finished yet");
+
+  spare = tr.advance(SECOND);
+  assert(tr.done(), "one more second finishes it");
+  assert(tr.value_at(1) == 200.0, "on its exact end value");
+  assert(spare == (SECOND * 3) / 4 ?? 0, "handing back what it did not use");
+}
+
+// One stream of time, every link at once.
+fn test_a_group_runs_its_links_together() {
+  tr = track_new(Play.Parallel);
+  tr.add(tween_new(0.0, 10.0, SECOND));
+  tr.add(tween_new(0.0, 20.0, SECOND * 2));
+
+  _ = tr.advance(SECOND);
+  assert(tr.value_at(0) == 10.0, "the short link finished");
+  assert(tr.value_at(1) == 10.0, "and the long one is half way");
+  assert(!tr.done(), "so the group is not done");
+
+  spare = tr.advance(SECOND * 2);
+  assert(tr.done(), "now every link has finished");
+  // ⚠ The group's leftover is the SMALLEST of its links'.  The short link had
+  // two spare seconds; the long one had one.  Reporting the short link's would
+  // run an enclosing chain a second too far.
+  assert(spare == SECOND, "the group's leftover is the slowest link's: {spare}");
+}
+
+// An empty track is finished, and hands every unit straight back — which is
+// what lets a chain step over one without stalling.
+fn test_an_empty_track_passes_time_straight_through() {
+  tr = track_new(Play.Chain);
+  assert(tr.done(), "an empty chain has nothing left to do");
+  assert(tr.advance(12345) == 12345, "and consumes none of the time");
+
+  gr = track_new(Play.Parallel);
+  assert(gr.done(), "the same for an empty group");
+  assert(gr.advance(12345) == 12345, "which is what makes them composable");
+}
+
+// Rewind puts every link back, so a track can be replayed.
+fn test_rewind_replays_the_whole_track() {
+  tr = chain_of(3, SECOND);
+  _ = tr.advance(SECOND * 5);
+  assert(tr.done(), "it ran to the end");
+  tr.rewind();
+  assert(!tr.done(), "rewind put it back");
+  assert(tr.active() == 0, "on its first link");
+  assert(tr.value_at(2) == 0.0, "with the last link at its start again");
+  assert(frames_to_finish(tr, SECOND) == 3, "and it runs the same length again");
+}

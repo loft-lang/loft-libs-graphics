@@ -1,0 +1,181 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Worked examples for the `stage` library (@PLN141).  Each `test_*` below
+// demonstrates a contract the signature cannot state; the function documents
+// itself by CITING the tag with `// Example: @STG-00N`, and the doc-drift gate
+// fails if a citation goes dangling.  Distinct from the assertion suite in
+// `stage.loft`.
+//
+// Everything here is floats in and floats out, so the type checker sees none of
+// it.  What a caller gets wrong is WHICH POINT a node is anchored by, that the
+// tree is an ordered array rather than a graph, and that reading a world
+// transform before composing answers a stale one rather than an error.
+use stage;
+use graphics;
+
+EPS = 0.0001;
+fn close(a: float, b: float) -> boolean { a - b < EPS and b - a < EPS }
+
+// @STG-001 — a node is anchored by its ORIGIN, not by its top-left corner.
+// `pl_ox`/`pl_oy` name a point in the node's own units, and `compose` places
+// exactly that point at (`pl_x`, `pl_y`) — whatever the rotation and scale are.
+// Put the origin at a sprite's feet and the sprite STANDS UP from where it was
+// placed, which is what lets a 2-D scene present a 3-D world: the footprint
+// decides where it sits and the artwork decides nothing.  Move the origin and the
+// node pivots about the new point rather than sliding, so the same `pl_x`/`pl_y`
+// mean a different picture — the commonest surprise in this library.
+fn test_origin_is_what_a_node_is_anchored_by() {
+  st = stage::stage_new();
+  feet = st.node_add(-1, stage::Place { pl_x: 50.0, pl_y: 80.0, pl_ox: 8.0, pl_oy: 16.0,
+                                        pl_rot: 0.7, pl_sx: 2.0, pl_sy: 3.0 });
+  st.compose();
+  at = st.world_origin(feet);
+  assert(close(at.p_x, 50.0) and close(at.p_y, 80.0),
+         "the origin lands on (pl_x, pl_y) under any rotation and scale");
+}
+
+// @STG-002 — the tree is a FLAT ARRAY and a parent must already exist.  A child
+// names its parent by index, and `node_add` REFUSES a forward reference by
+// answering -1 rather than accepting it.  That is not bookkeeping: `compose` is a
+// single forward pass, so a child sitting before its parent would read a world
+// transform that had not been written yet and produce a plausible wrong frame —
+// the kind of bug that looks like an art problem.  Build parents first and the
+// invariant holds by construction.
+fn test_a_parent_must_already_exist() {
+  st = stage::stage_new();
+  assert(st.node_add(3, stage::Place {}) == -1, "a forward parent reference is refused");
+  root = st.node_add(-1, stage::Place { pl_x: 1.0 });
+  child = st.node_add(root, stage::Place { pl_x: 2.0 });
+  assert(root == 0 and child == 1, "indices are assigned in insertion order");
+  assert(st.node_count() == 2, "a refused add appends nothing");
+}
+
+// @STG-003 — a world transform is DERIVED, and reading one before `compose` gives
+// the identity rather than an error.  Mutating a node is cheap precisely because
+// nothing recomputes on write; the cost is that `compose` is the caller's to run,
+// once per frame, after the last mutation.  Skip it and the frame renders the
+// PREVIOUS state — every node in the right relative place, the whole scene one
+// step behind, which reads as input lag rather than as a missing call.
+fn test_compose_is_the_callers_to_run() {
+  st = stage::stage_new();
+  n = st.node_add(-1, stage::Place { pl_x: 10.0, pl_y: 20.0 });
+  before = st.world_origin(n);
+  assert(close(before.p_x, 0.0) and close(before.p_y, 0.0),
+         "before compose, the world transform is still the identity");
+  st.compose();
+  after = st.world_origin(n);
+  assert(close(after.p_x, 10.0) and close(after.p_y, 20.0), "compose derives it");
+}
+
+// @STG-004 — the batcher merges ADJACENT runs and never sorts, and the cost of
+// that is real.  2-D correctness is painter's algebra: overlapping translucent
+// draws must composite in call order, so gathering every command of one atlas
+// together would be faster and would draw the wrong picture.  The consequence a
+// caller must plan for is that interleaving two atlases sprite-by-sprite gives
+// ONE INSTANCE PER RUN — four sprites, four draws.  That is a PACKING problem and
+// the cure is upstream: sprites that draw near each other must share a page.
+// Batching cannot fix it without reordering, and reordering is the one thing it
+// may not do.
+fn test_the_batcher_never_reorders() {
+  st = stage::stage_new();
+  a = stage::Place { pl_w: 4.0, pl_h: 4.0, pl_atlas: 1 };
+  b = stage::Place { pl_w: 4.0, pl_h: 4.0, pl_atlas: 2 };
+  _ = st.node_add(-1, a);
+  _ = st.node_add(-1, b);
+  _ = st.node_add(-1, a);
+  _ = st.node_add(-1, b);
+  st.compose();
+  assert(len(st.batches()) == 4,
+         "interleaved atlases stay four runs — gathering them would reorder the frame");
+
+  grouped = stage::stage_new();
+  _ = grouped.node_add(-1, a);
+  _ = grouped.node_add(-1, a);
+  _ = grouped.node_add(-1, b);
+  _ = grouped.node_add(-1, b);
+  grouped.compose();
+  assert(len(grouped.batches()) == 2, "the same four sprites, packed well, are two runs");
+}
+
+// @STG-005 — a release belongs to the node that took the PRESS, not to whatever
+// is under the pointer now.  This is the half of input routing that a hit test
+// alone does not give you, and leaving it out produces two bugs that both read as
+// "the button is broken": it fires when you press it and slide away, and it fails
+// to fire when you press it and drift a single pixel.  `release` therefore answers
+// the CAPTURED node wherever the pointer went, and `released_on` is the separate
+// question a button actually asks — did the release land back on me.
+fn test_a_release_belongs_to_the_press() {
+  st = stage::stage_new();
+  btn = st.node_add(-1, stage::Place { pl_w: 10.0, pl_h: 10.0 });
+  st.compose();
+  assert(st.press(5.0, 5.0) == btn, "the press lands");
+  assert(st.release(900.0, 900.0) == btn, "the release still belongs to it");
+  assert(!st.released_on(btn, 900.0, 900.0), "but it did not release ON it — no fire");
+  assert(st.press(5.0, 5.0) == btn and st.released_on(btn, 6.0, 6.0), "this one fires");
+}
+
+// @STG-006 — a sprite is mostly holes, so picking samples its ALPHA and a click
+// over a transparent texel reaches what is behind.  A node with no mask is solid,
+// which is what a panel or a tile wants; give a node a mask and its shape becomes
+// its art rather than its rectangle.  You can see through the tree, so you can
+// click through it.
+fn test_a_click_falls_through_a_hole() {
+  st = stage::stage_new();
+  behind = st.node_add(-1, stage::Place { pl_w: 40.0, pl_h: 40.0 });
+  holed = st.add_mask(2, 2, [255, 255, 255, 0]);
+  front = st.node_add(-1, stage::Place { pl_w: 40.0, pl_h: 40.0, pl_mask: holed });
+  st.compose();
+  assert(st.pick(5.0, 5.0) == front, "the opaque quadrant is the front node");
+  assert(st.pick(35.0, 35.0) == behind, "the hole reaches what is behind");
+}
+
+// @STG-007 — a clip INHERITS and INTERSECTS, and a clip region is sized but
+// invisible.  Nesting two clippers gives the overlap of the two, never the inner
+// one alone: a panel inside a scrolling list is bounded by both, which is what
+// makes a scroll view composable.  The idiom for the region itself is `pl_clips`
+// with a size and `pl_visible: false` — it needs a rectangle to define the bound
+// and no paint of its own.  ⚠ The bound is AXIS-ALIGNED: a rotated clipper clips
+// to its bounding box, because a hardware scissor is axis-aligned and there is no
+// honest way to pretend otherwise.
+fn test_a_clip_inherits_and_intersects() {
+  st = stage::stage_new();
+  outer = st.node_add(-1, stage::Place { pl_w: 20.0, pl_h: 20.0, pl_clips: true,
+                                         pl_visible: false });
+  inner = st.node_add(outer, stage::Place { pl_x: 10.0, pl_y: 10.0, pl_w: 30.0,
+                                            pl_h: 30.0, pl_clips: true,
+                                            pl_visible: false });
+  _ = st.node_add(inner, stage::Place { pl_w: 60.0, pl_h: 60.0, pl_colour: 0x00ff00 });
+  st.compose();
+  cv = graphics::canvas(48, 48, 0xff000000);
+  st.render_stage(cv);
+  n = 0;
+  for v in cv.data { if v == 0xff00ff00 { n = n + 1; } }
+  assert(n == 100, "the overlap of (0,0)-(20,20) and (10,10)-(40,40) is 10x10");
+}
+
+// @STG-008 — ambient motion costs NOTHING per frame, and that is a design
+// constraint rather than an optimisation.  A tuft's phase is derived from where it
+// stands and its motion from one clock, so a field of five hundred is a buffer
+// uploaded once plus a uniform that ticks; storing and stepping a phase would
+// rewrite all five hundred every frame.  Two consequences a caller should expect:
+// neighbours are out of step (a field looks like a field rather than like the
+// ground moving), and sway is VISUAL ONLY — a swaying tree keeps its depth, its
+// bounds and its hit area, because one that re-sorted as it swayed would flicker
+// past its neighbours and grass that dodged the pointer would be worse than grass
+// that ignored it.
+fn test_ambient_motion_is_free_and_visual_only() {
+  st = stage::stage_new();
+  a = st.node_add(-1, stage::Place { pl_x: 0.0, pl_w: 2.0, pl_h: 6.0, pl_sway: 4.0 });
+  b = st.node_add(-1, stage::Place { pl_x: 9.0, pl_w: 2.0, pl_h: 6.0, pl_sway: 4.0 });
+  st.compose();
+  before = st.pack_instances();
+  st.set_time(1.4);
+  after = st.pack_instances();
+  for i in 0..len(before) { assert(before[i] == after[i], "the clock rewrites nothing"); }
+  assert(st.sway_of(a) != st.sway_of(b), "and neighbours are out of step");
+  bounds = st.bounds_of(a);
+  st.set_time(2.9);
+  moved = st.bounds_of(a);
+  assert(bounds.b_x0 == moved.b_x0, "the footprint never moves with the sway");
+}

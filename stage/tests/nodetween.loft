@@ -1,0 +1,205 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN145 C2 — a tween bound to a node property.
+//
+// THE GATE is a PARALLEL RUN, the same shape `draw_list.loft` uses for A2: the
+// tween-driven scene and a hand-moved one both exist, and are compared pixel for
+// pixel every frame rather than one being swapped in and eyeballed.
+//
+// ⚠ The numbers are chosen so the HAND side needs no library call at all: 64 px
+// over 800 000 us sampled every 100 000 us is exactly 8 px per frame, and every
+// progress `k/8` is exact in binary.  A hand path that reached for `lerp` or
+// `ease` would be comparing the tween against itself.
+use stage;
+use graphics;
+
+const DUR  = 800000;     // us
+const STEP = 100000;     // us — eight frames
+const FAR  = 64.0;       // px — so each frame is exactly 8 px
+
+fn canvas_equal(a: const graphics::Canvas, b: const graphics::Canvas) -> boolean {
+  if a.width != b.width or a.height != b.height { return false; }
+  for i in 0..len(a.data) {
+    if a.data[i] != b.data[i] { return false; }
+  }
+  true
+}
+
+fn differing(a: const graphics::Canvas, b: const graphics::Canvas) -> integer {
+  n = 0;
+  for i in 0..len(a.data) { if a.data[i] != b.data[i] { n = n + 1; } }
+  n
+}
+
+fn mover(st: Stage) -> integer {
+  st.node_add(-1, Place { pl_w: 8.0, pl_h: 8.0, pl_colour: 0xc03030 })
+}
+
+fn shot(st: Stage) -> graphics::Canvas {
+  st.compose();
+  cv = graphics::canvas(96, 16, 0xff000000);
+  st.render_stage(cv);
+  cv
+}
+
+// THE GATE.  Eight frames of a tweened `x`, byte-identical to eight frames of a
+// hand-moved one.
+fn test_a_tweened_property_draws_what_a_hand_moved_one_draws() {
+  auto = stage_new();
+  a = mover(auto);
+  auto.tween_prop(a, Prop.X, FAR, DUR);
+
+  hand = stage_new();
+  h = mover(hand);
+
+  ink = 0;
+  for k in 1..=8 {
+    auto.advance(STEP);
+    // The hand side: k frames of 8 px, computed here and written straight in.
+    hand.set_prop(h, Prop.X, (k * 8) as float);
+
+    ca = shot(auto);
+    ch = shot(hand);
+    assert(canvas_equal(ca, ch),
+           "frame {k} differs in {differing(ca, ch)} pixels — tween x is {auto.prop_of(a, Prop.X)}, hand is {hand.prop_of(h, Prop.X)}");
+    for v in ca.data { if v == 0xffc03030 { ink = ink + 1; } }
+  }
+  assert(auto.prop_of(a, Prop.X) == FAR, "and it lands exactly on 64");
+  assert(ink == 8 * 64, "each of the 8 frames drew an 8x8 sprite, got {ink}");
+}
+
+// ⚠ THE CONTROL for the gate: the comparison can FAIL.  One pixel of offset on
+// the hand side and the canvases part — so a green gate above is a statement
+// about the values, not about a comparison that never fires.
+fn test_the_pixel_comparison_can_fail() {
+  a_st = stage_new();
+  a_n = mover(a_st);
+  a_st.set_prop(a_n, Prop.X, 8.0);
+  b_st = stage_new();
+  b_n = mover(b_st);
+  b_st.set_prop(b_n, Prop.X, 9.0);
+  ca = shot(a_st);
+  cb = shot(b_st);
+  assert(!canvas_equal(ca, cb), "one pixel of offset must show");
+  assert(differing(ca, cb) == 16, "an 8x8 sprite moved by 1 px differs in 16 pixels, got {differing(ca, cb)}");
+}
+
+// ⚠ THE SWITCH, cell by cell.  Nine properties, and a write to one must move
+// that one and NOTHING else — the copy-paste failure a nine-arm match invites.
+fn test_each_property_writes_its_own_field_and_no_other() {
+  props = [Prop.X, Prop.Y, Prop.Rot, Prop.ScaleX, Prop.ScaleY,
+           Prop.OriginX, Prop.OriginY, Prop.Alpha, Prop.Depth];
+  assert(len(props) == 9, "nine properties");
+  for p in props {
+    st = stage_new();
+    n = mover(st);
+    before: vector<float> = [];
+    for q in props { before += [st.prop_of(n, q)]; }
+
+    st.set_prop(n, p, 0.375);          // a value no field holds by default
+
+    changed = 0;
+    for q in props {
+      now = st.prop_of(n, q);
+      was = before[q#index] ?? 0.0;
+      if now != was {
+        changed = changed + 1;
+        assert(q == p, "writing one property moved another one");
+        assert(now == 0.375, "and it landed on the value written");
+      }
+    }
+    assert(changed == 1, "exactly one field moved, {changed} did");
+  }
+}
+
+// ⚠⚠ AT MOST ONE TWEEN PER (NODE, PROPERTY) — a second REPLACES the first, so
+// one number never has two writers.
+fn test_a_second_tween_replaces_the_first() {
+  st = stage_new();
+  n = mover(st);
+  st.tween_prop(n, Prop.X, 64.0, DUR);
+  assert(st.tween_count() == 1, "one tween");
+  st.advance(400000);                       // half way: 32
+  assert(st.prop_of(n, Prop.X) == 32.0, "half way is 32, got {st.prop_of(n, Prop.X)}");
+
+  st.tween_prop(n, Prop.X, 0.0, 400000);    // now go back instead
+  assert(st.tween_count() == 1, "still ONE tween — the first was replaced, not joined");
+  st.advance(200000);                       // half of the new one: 32 → 16
+  assert(st.prop_of(n, Prop.X) == 16.0, "the new tween starts from 32, got {st.prop_of(n, Prop.X)}");
+  st.advance(200000);
+  assert(st.prop_of(n, Prop.X) == 0.0, "and lands on its own target");
+
+  // A tween on a DIFFERENT property of the same node is a different writer and
+  // coexists.
+  st.tween_prop(n, Prop.Y, 10.0, DUR);
+  st.tween_prop(n, Prop.X, 5.0, DUR);
+  assert(st.tween_count() == 2, "x and y are two tweens, got {st.tween_count()}");
+}
+
+// ⚠ A FINISHED TWEEN STOPS WRITING, so a later hand-set sticks instead of being
+// re-asserted every frame.
+fn test_a_finished_tween_releases_the_property() {
+  st = stage_new();
+  n = mover(st);
+  st.tween_prop(n, Prop.X, 64.0, DUR);
+  st.advance(DUR);
+  assert(!st.prop_tweening(n, Prop.X), "it has finished");
+  assert(st.prop_of(n, Prop.X) == 64.0, "on its end value");
+
+  st.set_prop(n, Prop.X, 5.0);
+  st.advance(STEP);
+  assert(st.prop_of(n, Prop.X) == 5.0,
+         "the finished tween must not write again — got {st.prop_of(n, Prop.X)}");
+}
+
+// `from` is read when the tween STARTS, so one begun mid-flight carries on from
+// where the property actually is.
+fn test_from_is_read_at_the_moment_it_starts() {
+  st = stage_new();
+  n = mover(st);
+  st.set_prop(n, Prop.X, 20.0);
+  st.tween_prop(n, Prop.X, 28.0, DUR);
+  st.advance(400000);
+  assert(st.prop_of(n, Prop.X) == 24.0, "half of 20→28 is 24, got {st.prop_of(n, Prop.X)}");
+}
+
+// Cancelling leaves the property where it had got to.
+fn test_cancel_leaves_the_value_where_it_is() {
+  st = stage_new();
+  n = mover(st);
+  st.tween_prop(n, Prop.X, 64.0, DUR);
+  st.advance(400000);
+  st.cancel_prop_tween(n, Prop.X);
+  assert(st.tween_count() == 0, "the tween is gone");
+  st.advance(DUR);
+  assert(st.prop_of(n, Prop.X) == 32.0, "and the value stayed at 32");
+}
+
+// ⚠ ONE CLOCK.  The same `advance` drives an animation sequence and a property
+// tween — which is the whole reason the binding lives here and takes MICROSECONDS
+// rather than `tween`'s own unit-agnostic count.
+fn test_one_advance_drives_both_the_sequence_and_the_tween() {
+  st = stage_new();
+  q = st.add_sequence(0, 8, 10.0, LOOP);       // 8 frames at 10 fps = 0.8 s
+  n = st.node_add(-1, Place { pl_w: 8.0, pl_h: 8.0, pl_seq: q, pl_cols: 4 });
+  st.tween_prop(n, Prop.X, 64.0, DUR);         // 0.8 s, the same span
+
+  for _ in 0..4 { st.advance(STEP); }
+  assert(st.frame_of(n) == 4, "four ticks in, the sequence is on frame 4");
+  assert(st.prop_of(n, Prop.X) == 32.0, "and the tween is half way");
+
+  for _ in 0..4 { st.advance(STEP); }
+  assert(st.frame_of(n) == 0, "a full loop returns to frame 0");
+  assert(st.prop_of(n, Prop.X) == 64.0, "and the tween has arrived");
+}
+
+// A tween on a node index that does not exist is dropped, not stored.
+fn test_a_bad_node_index_is_refused() {
+  st = stage_new();
+  _ = mover(st);
+  st.tween_prop(99, Prop.X, 5.0, DUR);
+  st.tween_prop(-1, Prop.X, 5.0, DUR);
+  assert(st.tween_count() == 0, "neither was kept");
+  assert(st.prop_of(99, Prop.X) == 0.0, "and reading one answers the zero");
+}

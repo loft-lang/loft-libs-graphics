@@ -1,0 +1,99 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN144 A4 — picking and input routing, on a hand-computed table.
+//
+// Two things here are not what a rect test gives you, and both are the point: a
+// point over a sprite's HOLE resolves to what is behind it, and a release goes to
+// the node that took the PRESS wherever the pointer has drifted to.
+use stage;
+
+fn solid(x: float, y: float, w: float, h: float) -> stage::Place {
+  stage::Place { pl_x: x, pl_y: y, pl_w: w, pl_h: h }
+}
+
+// The topmost node wins, and "topmost" means LAST — the same order that draws.
+fn test_the_last_node_drawn_is_the_one_picked() {
+  st = stage::stage_new();
+  under = st.node_add(-1, solid(0.0, 0.0, 20.0, 20.0));
+  over  = st.node_add(-1, solid(10.0, 10.0, 20.0, 20.0));
+  st.compose();
+  assert(st.pick(5.0, 5.0) == under, "only the lower node covers (5,5)");
+  assert(st.pick(25.0, 25.0) == over, "only the upper node covers (25,25)");
+  assert(st.pick(15.0, 15.0) == over, "where they overlap, the LAST one wins");
+  assert(st.pick(50.0, 50.0) == -1, "nothing covers (50,50)");
+}
+
+// The rect is half-open in the same direction the draw list is: a point exactly on
+// the far edge is outside, so abutting nodes never both claim a pixel.
+fn test_the_rect_is_half_open() {
+  st = stage::stage_new();
+  a = st.node_add(-1, solid(0.0, 0.0, 10.0, 10.0));
+  b = st.node_add(-1, solid(10.0, 0.0, 10.0, 10.0));
+  st.compose();
+  assert(st.pick(9.99, 5.0) == a, "just inside a");
+  assert(st.pick(10.0, 5.0) == b, "the shared edge belongs to b, not to both");
+}
+
+// Under rotation the inverse has to be real.  A quarter turn about the origin:
+// the node occupies local x in 0..20, y in 0..10, which in world space is
+// x in -10..0, y in 0..20.  So (-5, 5) is inside and (5, 5) is not.
+fn test_picking_under_rotation() {
+  st = stage::stage_new();
+  n = st.node_add(-1, stage::Place { pl_w: 20.0, pl_h: 10.0,
+                                     pl_rot: 1.5707963267948966 });
+  st.compose();
+  assert(st.pick(-5.0, 5.0) == n, "inside the rotated rect");
+  assert(st.pick(5.0, 5.0) == -1, "outside it — the un-rotated rect would say inside");
+  l = st.to_local(n, -5.0, 5.0);
+  assert(l.p_x > 4.9 and l.p_x < 5.1 and l.p_y > 4.9 and l.p_y < 5.1,
+         "to_local inverts the affine: got ({l.p_x}, {l.p_y}) want (5, 5)");
+}
+
+// ⚠ THE ONE A RECT TEST CANNOT DO.  A mask with a hole in the middle: a click
+// there falls THROUGH to the node behind, because you can see through it.
+fn test_a_click_falls_through_a_hole() {
+  st = stage::stage_new();
+  behind = st.node_add(-1, solid(0.0, 0.0, 40.0, 40.0));
+  // 2x2 mask: opaque except the bottom-right quadrant.
+  holed = st.add_mask(2, 2, [255, 255, 255, 0]);
+  front = st.node_add(-1, stage::Place { pl_w: 40.0, pl_h: 40.0, pl_mask: holed });
+  st.compose();
+  assert(st.pick(5.0, 5.0) == front, "the opaque quadrant belongs to the front node");
+  assert(st.pick(35.0, 35.0) == behind, "the HOLE lets the click reach what is behind");
+  assert(st.pick(35.0, 5.0) == front, "top-right is opaque");
+}
+
+// A node with no mask is solid — the right default for a panel or a tile.
+fn test_no_mask_means_solid() {
+  st = stage::stage_new();
+  n = st.node_add(-1, solid(0.0, 0.0, 10.0, 10.0));
+  st.compose();
+  assert(st.pick(1.0, 1.0) == n and st.pick(9.0, 9.0) == n, "every point inside hits");
+}
+
+// ⚠ CAPTURE.  Press on a node, drift off it, release: the release still belongs
+// to the node that was pressed.  Without this a button fires when you press and
+// slide away, and never fires when you press and drift a pixel.
+fn test_a_release_belongs_to_the_press() {
+  st = stage::stage_new();
+  btn = st.node_add(-1, solid(0.0, 0.0, 10.0, 10.0));
+  st.compose();
+  assert(st.press(5.0, 5.0) == btn, "the press lands on the button");
+  assert(st.capture() == btn, "and is held");
+  assert(st.release(500.0, 500.0) == btn, "the release belongs to it even far away");
+  assert(st.capture() == -1, "and the hold is let go");
+  assert(!st.released_on(btn, 500.0, 500.0), "but it did NOT release ON the button");
+  assert(st.press(5.0, 5.0) == btn and st.released_on(btn, 6.0, 6.0),
+         "pressed and released on it — this is the one that fires");
+}
+
+// A press that hits nothing captures nothing, and its release says so.
+fn test_a_press_on_nothing_captures_nothing() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, solid(0.0, 0.0, 10.0, 10.0));
+  st.compose();
+  assert(st.press(50.0, 50.0) == -1, "the press misses");
+  assert(st.capture() == -1, "nothing is held");
+  assert(st.release(5.0, 5.0) == -1, "and the release reports nothing, not the node under it");
+}

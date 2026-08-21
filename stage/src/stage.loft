@@ -1,0 +1,2727 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// stage — a retained 2-D scene: the tree a game mutates instead of a frame loop
+// it draws.  @PLN144 arc A.
+//
+// ⚠ THE TREE IS FLAT.  Nodes live in one `vector<StageNode>` and a child names its
+// parent by INDEX, never by reference.  Two reasons, and the second is why it
+// stays that way even though a pointer tree reads more naturally:
+//
+//   * a parent holding its children while a child points back is a dependency
+//     cycle in loft's ownership model, and
+//   * a flat array IS the instance buffer the batched renderer wants, so the
+//     shape that avoids the cycle is also the shape `A3` needs.
+//
+// The invariant that makes composition one forward pass: **a parent always has a
+// lower index than its children**.  `node_add` enforces it rather than trusting
+// it, because a single out-of-order insert would make `compose` read a parent's
+// world transform before it was written — and produce a *plausible* wrong answer
+// rather than an error.
+
+use graphics;
+use tween;
+
+// A node's local placement, plus the world affine `compose` derives for it.
+//
+// ⚠ NAMED `StageNode` AND NOT `Node`, because a type name is GLOBAL across the
+// dependency graph and `mesh3d` — which `graphics` pulls in — already publishes a
+// `Node` for its 3-D scene.  The compiler refuses the collision outright rather
+// than resolving it silently, which is the good outcome; the cost of finding it
+// after publishing would have been a rename nobody can make.
+//
+// The affine is 2x3 and is applied as
+//     x' = a*lx + c*ly + tx
+//     y' = b*lx + d*ly + ty
+// which is the layout the instanced draw path consumes unchanged.
+pub struct StageNode {
+    nd_parent: integer,      // index of the parent, or -1 for a root
+    nd_x: float,             // where the ORIGIN lands, in the parent's space
+    nd_y: float,
+    nd_rot: float,           // radians; +ve turns +x toward +y
+    nd_sx: float,
+    nd_sy: float,
+    // ⚠ THE SPRITE OCCUPIES LOCAL [0, w] x [0, h].  The origin is a POINT INSIDE
+    // that box which lands on (x, y) — it is not the box's corner.  Put it at
+    // (w/2, h) and the sprite stands up from its feet, centred on where it was
+    // placed.  The two readings coincide only at (0, 0), which is why every test
+    // written before the depth cue could not tell them apart.
+    nd_ox: float,
+    nd_oy: float,
+    nd_w: float,
+    nd_h: float,
+    nd_colour: integer,
+    nd_visible: boolean,
+    nd_atlas: integer,
+    nd_u0: float,
+    nd_v0: float,
+    nd_u1: float,
+    nd_v1: float,
+    nd_alpha: float,
+    nd_mask: integer,        // index into `st_masks`, or -1 for solid
+    nd_clips: boolean,       // does this node clip its own subtree?
+    nd_clipped: boolean,     // derived: is anything clipping it?
+    nd_cx0: float,           // derived: the effective clip, world axis-aligned
+    nd_cy0: float,
+    nd_cx1: float,
+    nd_cy1: float,
+    nd_key: text,            // the mob kind, e.g. "orc" — resolution starts here
+    nd_action: text,         // what it is doing, e.g. "walk"
+    nd_facing: float,        // where it points, in radians; kept in BOTH models
+    nd_mirror: boolean,      // side-on: is it drawn flipped side to side?
+    nd_seq: integer,         // index into `st_seqs`, or -1 for a still sprite
+    nd_elapsed: integer,     // MICROSECONDS into the sequence — see `advance`
+    nd_cols: integer,        // the atlas grid this node's cells live in
+    nd_rows: integer,
+    nd_sway: float,          // ambient sway amplitude in pixels; 0 is still
+    nd_phase: float,         // derived from POSITION, so neighbours are out of step
+    nd_cue: float,           // derived: 0 at the near plane, 1 at the far one
+    nd_layer: integer,       // ordering BAND — outranks depth entirely
+    nd_depth: float,         // distance INTO the screen; larger draws first
+    nd_disabled: boolean,    // D1: refuses to fire, and reads `Disabled`
+    nd_focusable: boolean,   // D2: can hold the keyboard, and joins the tab order
+    nd_a: float,             // derived world affine — read after `compose`
+    nd_b: float,
+    nd_c: float,
+    nd_d: float,
+    nd_tx: float,
+    nd_ty: float,
+}
+
+// Everything one ordering band carries: how much of the camera it feels, what
+// atmosphere stands in front of it, and how far out of focus it is.
+//
+// ⚠ ONE RECORD, NOT THREE PARALLEL VECTORS.  Parallax lived in a bare
+// `vector<float>` and fog and blur were about to join it as siblings — which is
+// exactly the shape that put a sequence's name on another sequence's cells in
+// P5: every list stays well-formed on its own and only the correspondence goes
+// wrong, silently.  A layer's facts travel together.
+pub struct Layer {
+    ly_parallax: float,      // 1.0 is the world plane; below lags, above leads
+    ly_fog: integer,         // packed 0xRRGGBB the layer fades toward
+    ly_density: float,       // 0 is clear, 1 is entirely the fog colour
+    ly_blur: integer,        // radius in pixels; 0 is sharp
+}
+
+// A way of LOOKING at the stage: a camera and the screen rect it paints into.
+//
+// ⚠ A VIEW IS PRESENTATION, NEVER WORLD.  The scene cannot tell how many are
+// looking at it — which is the split this phase exists to enforce: the world is
+// deterministic and shared, the presentation is local and free.  Window size,
+// camera and ambient motion may differ per viewer and must be allowed to.
+pub struct View {
+    vw_cam_x: float,
+    vw_cam_y: float,
+    vw_x: integer,           // the screen rect this view paints into
+    vw_y: integer,
+    vw_w: integer,           // 0 or less means unbounded — the whole target
+    vw_h: integer,
+}
+
+// A point light: where it stands, how far it reaches, and what colour it casts.
+//
+// ⚠ IT LIVES IN WORLD SPACE, like everything else the app places.  A light is
+// not attached to a node, so moving a torch-bearer means moving the light too —
+// deliberate, because a light parented to a sprite would inherit that sprite's
+// rotation and scale, and neither means anything to a point light.
+// ⚠ `StageLight`, not `Light`: a TYPE name is global across every package in the
+// build, and `mesh3d` — pulled in by `graphics` — already publishes a `Light`.
+// The compiler refusing is the good outcome; after publishing, this rename is one
+// nobody can make.  Same reason the node is `StageNode`.
+pub struct StageLight {
+    lt_x: float,
+    lt_y: float,
+    lt_r: float,             // radius; the reach is 0 at exactly this distance
+    lt_colour: integer,      // packed 0xRRGGBB
+    lt_power: float,         // intensity multiplier; 1.0 is full at the centre
+}
+
+pub struct Stage {
+    st_nodes: vector<StageNode>,
+    st_masks: vector<Mask>,
+    st_capture: integer,      // the node holding the press, or -1
+    st_order: vector<integer>,   // draw order, derived by `compose`
+    st_cue: boolean,             // is the depth cue on?
+    st_cue_near: float,
+    st_cue_far: float,
+    st_cue_scale: float,         // scale at the FAR end; 1.0 at the near end
+    st_cue_haze: float,          // haze at the FAR end, 0..1
+    st_haze_colour: integer,     // what distance fades toward
+    st_lights: vector<StageLight>,    // L1: sampled per sprite, folded into the tint
+    st_ambient: float,           // 1.0 is fully lit, which is the unlit default
+    st_light_map: boolean,       // L2: light per PIXEL instead of per sprite
+    st_hud_layer: integer,       // layers at or above this draw AFTER, unlit
+    st_views: vector<View>,      // at least one; view 0 is the unsplit camera
+    st_layers: vector<Layer>,    // per-layer facts; a missing layer is the plain one
+    st_uploads: integer,         // instance-buffer uploads — the gate reads this
+    st_dirty: boolean,           // does the instance buffer need rewriting?
+    st_time: float,              // ambient clock — a uniform, never a rewrite
+    st_seqs: vector<Sequence>,   // animation sequences, referenced by index
+    st_proj: integer,            // TOP_DOWN or SIDE_ON — it picks the facing model
+    st_tweens: vector<NodeTween>,   // C2: at most one per (node, property)
+    // D1: where the pointer is, what kind it is, and what it is over.
+    st_ptr_x: float,
+    st_ptr_y: float,
+    st_pointer: integer,         // POINTER_MOUSE or POINTER_TOUCH
+    st_hover: integer,           // node under the pointer, or -1
+    // D2: the keyboard, the fields it edits, and a clipboard of our own.
+    st_focus: integer,           // node holding the keyboard, or -1
+    st_fields: vector<NodeField>,
+    st_clip: text,
+}
+
+// LOOP wraps, ONCE stops on the last frame, PINGPONG reverses at both ends.
+pub const LOOP: integer = 0;
+pub const ONCE: integer = 1;
+pub const PINGPONG: integer = 2;
+
+// A run of atlas cells played at a rate.
+//
+// ⚠ THE NAME LIVES HERE, not in a list beside `st_seqs`.  A parallel vector that
+// only the naming registrar appended to drifted the moment a caller mixed
+// `add_sequence` with `add_named_sequence`, and every later name then pointed at
+// somebody else's cells — silently, because both lists were individually
+// well-formed.  One home per fact; the test that caught it is kept.
+pub struct Sequence {
+    q_first: integer,        // first cell in the atlas
+    q_count: integer,
+    q_fps: float,
+    q_mode: integer,
+    q_name: text,            // "" for an unnamed sequence
+}
+
+
+// An alpha mask: per-texel coverage, row-major, 0..255.
+//
+// A sprite is mostly holes, so a rect test answers the wrong question — you can
+// SEE through a tree, therefore you must be able to CLICK through it.  A node
+// without a mask is solid, which is the right default for a panel or a tile.
+pub struct Mask {
+    m_w: integer,
+    m_h: integer,
+    m_alpha: vector<integer>,
+}
+
+// Where to put a node, and how.  A struct rather than nine parameters because the
+// compiler said so — `too-many-parameters` fires at eight, and a caller's burden
+// is fixed by a struct where a reader's is fixed by an extracted function.
+//
+// ⚠ THE DEFAULTS ARE THE POINT, not convenience.  Scale defaults to 1.0 and not to
+// the zero an omitted field would otherwise take: a scale of 0 is a *meaningful*
+// value of the field's domain — it collapses the node to nothing — so an author
+// who writes `Place { pl_x: 10.0, pl_y: 20.0 }` and gets an invisible node has
+// been handed a legal answer to a question they did not ask.  That is exactly the
+// case `omitted-field-zero` exists to warn about, answered here at the declaration.
+pub struct Place {
+    pl_w: float = 0.0,       // size in the node's own units; 0 x 0 draws nothing
+    pl_h: float = 0.0,
+    pl_colour: integer = 0,  // packed 0xRRGGBB, as `DrawRect` carries
+    pl_visible: boolean = true,
+    pl_atlas: integer = 0,   // which texture page; a run may only merge within one
+    pl_u0: float = 0.0,      // the sprite's rect within that page
+    pl_v0: float = 0.0,
+    pl_u1: float = 1.0,
+    pl_v1: float = 1.0,
+    pl_alpha: float = 1.0,
+    pl_mask: integer = -1,   // index from `add_mask`, or -1 for solid
+    pl_clips: boolean = false,  // clip this node's subtree to its own bounds
+    pl_key: text = "",          // the mob kind; "" opts out of by-name resolution
+    pl_seq: integer = -1,       // from `add_sequence`; -1 is a still sprite
+    pl_cols: integer = 1,       // the atlas grid the cells are packed in
+    pl_rows: integer = 1,
+    pl_sway: float = 0.0,       // ambient sway amplitude, in pixels
+    pl_layer: integer = 0,      // background / world / UI are BANDS, not numbers
+    pl_depth: float = 0.0,      // distance INTO the screen: LARGER draws first, so
+                                // `depth = -y` puts a lower sprite in front. A 2.5-D
+                                // scene sets it from the footprint — a hex row, or a
+                                // projected height — never from the artwork
+    pl_x: float = 0.0,
+    pl_y: float = 0.0,
+    pl_rot: float = 0.0,     // radians; +ve turns +x toward +y
+    pl_sx: float = 1.0,
+    pl_sy: float = 1.0,
+    pl_ox: float = 0.0,      // the origin, in the node's own units
+    pl_oy: float = 0.0,
+}
+
+// A point, so a caller can ask where something ended up without unpacking six
+// floats.  `world_point` is the only honest way to check a transform: a matrix
+// means nothing except through what it does to a point.
+pub struct Bounds {
+    b_x0: float,
+    b_y0: float,
+    b_x1: float,
+    b_y1: float,
+}
+
+pub struct P2 {
+    p_x: float,
+    p_y: float,
+}
+
+pub fn stage_new() -> Stage {
+    Stage { st_nodes: [], st_masks: [], st_capture: -1, st_order: [],
+            st_cue: false, st_cue_near: 0.0, st_cue_far: 1.0,
+            st_cue_scale: 1.0, st_cue_haze: 0.0, st_haze_colour: 0x000000,
+            st_lights: [], st_ambient: 1.0, st_light_map: false,
+            st_hud_layer: HUD_NONE,
+            st_views: [View { vw_cam_x: 0.0, vw_cam_y: 0.0, vw_x: 0, vw_y: 0,
+                              vw_w: 0, vw_h: 0 }],
+            st_layers: [], st_uploads: 0, st_dirty: true,
+            st_time: 0.0, st_seqs: [], st_proj: TOP_DOWN, st_tweens: [],
+            st_ptr_x: 0.0, st_ptr_y: 0.0, st_pointer: POINTER_MOUSE, st_hover: -1,
+            st_focus: -1, st_fields: [], st_clip: "" }
+}
+
+pub fn node_count(self: const Stage) -> integer {
+    len(self.st_nodes)
+}
+
+// Add a node and answer its index.  `parent` is -1 for a root.
+//
+// ⚠ Refuses a forward parent reference by answering -1.  `compose` is a single
+// forward pass, so a child placed before its parent would read an unwritten world
+// transform — silently, and the frame would look almost right.
+// Example: @STG-002 — the tree is a flat array and a forward parent reference is
+// refused, because `compose` is a single forward pass that would otherwise read an
+// unwritten parent and answer plausibly.
+pub fn node_add(self: Stage, parent: integer, p: const Place) -> integer {
+    idx = len(self.st_nodes);
+    if parent >= idx or parent < -1 { return -1; }
+    self.st_nodes += [StageNode {
+        nd_parent: parent, nd_x: p.pl_x, nd_y: p.pl_y, nd_rot: p.pl_rot,
+        nd_sx: p.pl_sx, nd_sy: p.pl_sy, nd_ox: p.pl_ox, nd_oy: p.pl_oy,
+        nd_w: p.pl_w, nd_h: p.pl_h, nd_colour: p.pl_colour, nd_visible: p.pl_visible,
+        nd_atlas: p.pl_atlas, nd_u0: p.pl_u0, nd_v0: p.pl_v0, nd_u1: p.pl_u1,
+        nd_v1: p.pl_v1, nd_alpha: p.pl_alpha, nd_mask: p.pl_mask,
+        nd_key: p.pl_key, nd_action: "", nd_facing: 0.0, nd_mirror: false,
+        nd_seq: p.pl_seq, nd_elapsed: 0, nd_cols: p.pl_cols, nd_rows: p.pl_rows,
+        nd_sway: p.pl_sway, nd_phase: 0.0,
+        nd_cue: 0.0, nd_layer: p.pl_layer, nd_depth: p.pl_depth,
+        nd_clips: p.pl_clips, nd_clipped: false,
+        nd_cx0: 0.0, nd_cy0: 0.0, nd_cx1: 0.0, nd_cy1: 0.0,
+        nd_disabled: false, nd_focusable: false,
+        nd_a: 1.0, nd_b: 0.0, nd_c: 0.0, nd_d: 1.0, nd_tx: 0.0, nd_ty: 0.0,
+    }];
+    idx
+}
+
+// Derive every node's world affine in one forward pass.
+//
+// A node's local transform is  T(x, y) . R(rot) . S(sx, sy) . T(-ox, -oy), which
+// is what makes the ORIGIN the anchor: the local point (ox, oy) maps exactly to
+// (x, y), so a sprite whose origin sits at its feet stands up from where it is
+// placed.  World = parent's world composed with that.
+// Example: @STG-003 — deriving is the caller's to trigger; skipping it renders the
+// previous state, which reads as input lag rather than as a missing call.
+pub fn compose(self: Stage) {
+    for i in 0..len(self.st_nodes) {
+        n = self.st_nodes[i];
+        cs = cos(n.nd_rot);
+        sn = sin(n.nd_rot);
+        // The DEPTH CUE, if it is on: a node further away is drawn smaller.
+        //
+        // ⚠ It scales about the ORIGIN, which is why the feet stay planted while the
+        // sprite shrinks — a cue that moved the anchor would slide a mob off the tile
+        // it is standing on.  That falls out of the origin being the anchor rather
+        // than being arranged for.
+        // The sway phase comes from WHERE the node is, so two tufts a metre apart
+        // are out of step without either storing anything.  Derived once here, never
+        // per frame.
+        self.st_nodes[i].nd_phase = n.nd_x * 0.37 + n.nd_y * 0.11;
+        cue = cue_of(self, n.nd_depth);
+        self.st_nodes[i].nd_cue = cue;
+        k = 1.0 + (self.st_cue_scale - 1.0) * cue;
+        // ⚠ MIRRORING IS A NEGATED X SCALE, and it rides the transform that already
+        // exists rather than adding a pass.  Because the origin is the anchor, a
+        // flip about it leaves the footprint and the origin exactly where they
+        // were — verified, not assumed: P5's gate compares both against the
+        // unmirrored bounds.
+        mx = if n.nd_mirror { -1.0 } else { 1.0 };
+        la = cs * n.nd_sx * k * mx;
+        lb = sn * n.nd_sx * k * mx;
+        lc = -sn * n.nd_sy * k;
+        ld = cs * n.nd_sy * k;
+        // ... then place the ORIGIN at (x, y): t = (x, y) - A . (ox, oy).
+        ltx = n.nd_x - (la * n.nd_ox + lc * n.nd_oy);
+        lty = n.nd_y - (lb * n.nd_ox + ld * n.nd_oy);
+
+        if n.nd_parent < 0 {
+            self.st_nodes[i].nd_a = la;
+            self.st_nodes[i].nd_b = lb;
+            self.st_nodes[i].nd_c = lc;
+            self.st_nodes[i].nd_d = ld;
+            self.st_nodes[i].nd_tx = ltx;
+            self.st_nodes[i].nd_ty = lty;
+        } else {
+            p = self.st_nodes[n.nd_parent];
+            // W = P . L  — the parent's linear part acts on the child's, and on
+            // the child's translation before the parent's is added.
+            self.st_nodes[i].nd_a = p.nd_a * la + p.nd_c * lb;
+            self.st_nodes[i].nd_b = p.nd_b * la + p.nd_d * lb;
+            self.st_nodes[i].nd_c = p.nd_a * lc + p.nd_c * ld;
+            self.st_nodes[i].nd_d = p.nd_b * lc + p.nd_d * ld;
+            self.st_nodes[i].nd_tx = p.nd_a * ltx + p.nd_c * lty + p.nd_tx;
+            self.st_nodes[i].nd_ty = p.nd_b * ltx + p.nd_d * lty + p.nd_ty;
+        }
+
+        // The effective clip: what the parent already imposes, INTERSECTED with
+        // this node's own bounds when it clips.  Parents come first, so the
+        // parent's is written before a child reads it — the same invariant the
+        // transform pass rests on, doing a second job.
+        cl = false;
+        cx0 = 0.0;
+        cy0 = 0.0;
+        cx1 = 0.0;
+        cy1 = 0.0;
+        if n.nd_parent >= 0 {
+            pp = self.st_nodes[n.nd_parent];
+            cl = pp.nd_clipped;
+            cx0 = pp.nd_cx0;
+            cy0 = pp.nd_cy0;
+            cx1 = pp.nd_cx1;
+            cy1 = pp.nd_cy1;
+        }
+        if n.nd_clips {
+            b = bounds_of(self, i);
+            if !cl {
+                cl = true;
+                cx0 = b.b_x0; cy0 = b.b_y0; cx1 = b.b_x1; cy1 = b.b_y1;
+            } else {
+                if b.b_x0 > cx0 { cx0 = b.b_x0; }
+                if b.b_y0 > cy0 { cy0 = b.b_y0; }
+                if b.b_x1 < cx1 { cx1 = b.b_x1; }
+                if b.b_y1 < cy1 { cy1 = b.b_y1; }
+            }
+        }
+        self.st_nodes[i].nd_clipped = cl;
+        self.st_nodes[i].nd_cx0 = cx0;
+        self.st_nodes[i].nd_cy0 = cy0;
+        self.st_nodes[i].nd_cx1 = cx1;
+        self.st_nodes[i].nd_cy1 = cy1;
+    }
+    order_nodes(self);
+    self.st_dirty = true;
+}
+
+// Turn the depth cue on.  `near` and `far` are depths; a node at `far` is drawn at
+// `far_scale` of its size and hazed `far_haze` toward `haze_colour`, and one at
+// `near` is untouched.  Off by default, and off means an identical picture.
+//
+// This is the 2.5-D FEEL: distance reads as smaller and less distinct, which is
+// what separates a mob standing behind a wall from one standing in front of it
+// even when neither overlaps the other.  Real blur belongs to the per-layer pass;
+// a haze toward the fog colour costs one lerp and carries most of the effect.
+pub fn depth_cue(self: Stage, near: float, far: float, far_scale: float,
+                 far_haze: float, haze_colour: integer) {
+    self.st_cue = true;
+    self.st_cue_near = near;
+    self.st_cue_far = far;
+    self.st_cue_scale = far_scale;
+    self.st_cue_haze = far_haze;
+    self.st_haze_colour = haze_colour;
+}
+
+// How far through the cue a depth sits: 0 at the near plane, 1 at the far one,
+// clamped outside them so a stray depth cannot invert the effect.
+pub fn cue_of(self: const Stage, depth: float) -> float {
+    if !self.st_cue { return 0.0; }
+    span = self.st_cue_far - self.st_cue_near;
+    if span > -0.000001 and span < 0.000001 { return 0.0; }
+    t = (depth - self.st_cue_near) / span ?? 0.0;
+    if t < 0.0 { return 0.0; }
+    if t > 1.0 { return 1.0; }
+    t
+}
+
+// How hazed node `idx` is, 0..1 — what a renderer fades toward the haze colour.
+pub fn haze_of(self: const Stage, idx: integer) -> float {
+    if idx < 0 or idx >= len(self.st_nodes) { return 0.0; }
+    self.st_nodes[idx].nd_cue * self.st_cue_haze
+}
+
+// Derive the draw order: by LAYER first, then depth, then insertion.
+//
+// ⚠ STABLE, and that is the whole contract of the third key.  Two sprites on the
+// same footprint — a worker standing where another worker stands — must not swap
+// places from frame to frame, and a sort that broke ties arbitrarily would flicker
+// exactly there.  Bottom-up merge, because it is stable by construction rather
+// than by care.
+fn order_nodes(self: Stage) {
+    n = len(self.st_nodes);
+    src: vector<integer> = [];
+    for i in 0..n { src += [i]; }
+    width = 1;
+    while width < n {
+        dst: vector<integer> = [];
+        lo = 0;
+        while lo < n {
+            mid = lo + width;
+            hi = mid + width;
+            if mid > n { mid = n; }
+            if hi > n { hi = n; }
+            a = lo;
+            b = mid;
+            while a < mid or b < hi {
+                take_a = true;
+                if a >= mid { take_a = false; }
+                else if b < hi {
+                    ia = src[a] ?? 0;
+                    ib = src[b] ?? 0;
+                    take_a = !after(self, ia, ib);
+                }
+                if take_a { dst += [src[a] ?? 0]; a = a + 1; }
+                else { dst += [src[b] ?? 0]; b = b + 1; }
+            }
+            lo = hi;
+        }
+        src = dst;
+        width = width * 2;
+    }
+    self.st_order = src;
+}
+
+// Does node `x` sort AFTER node `y` — that is, draw on top of it?
+//
+// Layer ascending, then depth DESCENDING, then insertion.  ⚠ The direction of the
+// middle key is the one thing here that is easy to get backwards, and I did:
+// `depth` is distance INTO the screen, so a LARGER depth is further away and draws
+// FIRST.  That is what makes `depth = -y` work — a sprite lower on the screen has a
+// smaller depth, so it draws later and stands in front — and it is GameMaker's
+// convention, which is the vocabulary this model borrows throughout.
+fn after(self: const Stage, x: integer, y: integer) -> boolean {
+    a = self.st_nodes[x];
+    b = self.st_nodes[y];
+    if a.nd_layer != b.nd_layer { return a.nd_layer > b.nd_layer; }
+    if a.nd_depth != b.nd_depth { return a.nd_depth < b.nd_depth; }
+    x > y
+}
+
+// The draw order, derived by `compose`: indices, back to front.
+pub fn order(self: const Stage) -> vector<integer> { self.st_order }
+
+// A node's axis-aligned bounds in world space.
+// Example: @STG-007 — a clip inherits, intersects, and is axis-aligned.
+//
+// ⚠ AXIS-ALIGNED, so a ROTATED clipper clips to its bounding box rather than to
+// its turned rectangle.  A scissor is axis-aligned in hardware and there is no
+// honest way to make it otherwise; a rotated clip needs a stencil, which this arc
+// does not have.  Stated rather than discovered.
+pub fn bounds_of(self: const Stage, idx: integer) -> Bounds {
+    n = self.st_nodes[idx];
+    p0 = world_point(self, idx, 0.0, 0.0);
+    p1 = world_point(self, idx, n.nd_w, 0.0);
+    p2 = world_point(self, idx, 0.0, n.nd_h);
+    p3 = world_point(self, idx, n.nd_w, n.nd_h);
+    x0 = p0.p_x; x1 = p0.p_x; y0 = p0.p_y; y1 = p0.p_y;
+    if p1.p_x < x0 { x0 = p1.p_x; }  if p1.p_x > x1 { x1 = p1.p_x; }
+    if p2.p_x < x0 { x0 = p2.p_x; }  if p2.p_x > x1 { x1 = p2.p_x; }
+    if p3.p_x < x0 { x0 = p3.p_x; }  if p3.p_x > x1 { x1 = p3.p_x; }
+    if p1.p_y < y0 { y0 = p1.p_y; }  if p1.p_y > y1 { y1 = p1.p_y; }
+    if p2.p_y < y0 { y0 = p2.p_y; }  if p2.p_y > y1 { y1 = p2.p_y; }
+    if p3.p_y < y0 { y0 = p3.p_y; }  if p3.p_y > y1 { y1 = p3.p_y; }
+    Bounds { b_x0: x0, b_y0: y0, b_x1: x1, b_y1: y1 }
+}
+
+// Where a point in node `idx`'s own space lands in world space.  Valid after
+// `compose`; answers (0, 0) for an index that is not a node.
+pub fn world_point(self: const Stage, idx: integer, lx: float, ly: float) -> P2 {
+    if idx < 0 or idx >= len(self.st_nodes) { return P2 { p_x: 0.0, p_y: 0.0 }; }
+    n = self.st_nodes[idx];
+    P2 { p_x: n.nd_a * lx + n.nd_c * ly + n.nd_tx,
+         p_y: n.nd_b * lx + n.nd_d * ly + n.nd_ty }
+}
+
+// Where the node's ORIGIN is — the point A7's depth key sorts on.
+// Example: @STG-001 — a node is anchored by its origin, so a sprite whose origin
+// sits at its feet stands up from where it was placed.
+pub fn world_origin(self: const Stage, idx: integer) -> P2 {
+    if idx < 0 or idx >= len(self.st_nodes) { return P2 { p_x: 0.0, p_y: 0.0 }; }
+    n = self.st_nodes[idx];
+    world_point(self, idx, n.nd_ox, n.nd_oy)
+}
+
+
+// ── A2: the draw list ────────────────────────────────────────────────────────
+//
+// ⚠ THESE THREE TYPES ARE NOT NEW.  Their field names and types are copied
+// EXACTLY from `lavition_ui`, which produces `vector<DrawRect>` from
+// `panel_draw_list` today and is proven by a 12 k-line editor.  Matching a working
+// command shape rather than minting a rival one is the whole point: a game's UI
+// and an editor's UI have to reach the GPU by one path, or the batcher sees two.
+//
+// ⚠ AND THEY NEED ONE HOME, WHICH THEY DO NOT YET HAVE.  `lavition_ui` is
+// unpublished, so its `DrawRect` and this one are two nominal types with one
+// shape.  Until it is published (@PLN145 `D0`) the types cannot literally be
+// shared, and one of the two must eventually give — see the plan.
+pub struct UiRect {
+    r_x: integer,
+    r_y: integer,
+    r_w: integer,
+    r_h: integer,
+}
+
+// A packed 0xRRGGBB colour, as `lavition_ui` carries it.
+pub struct DrawRect {
+    dr_rect: UiRect,
+    dr_colour: integer,
+}
+
+pub struct DrawText {
+    dt_text: text,
+    dt_x: integer,
+    dt_y: integer,           // TOP of the line, which is what draw-a-texture wants
+    dt_colour: integer,
+}
+
+// Emit the scene as a flat command list, in index order.
+//
+// Index order IS the draw order for now: `A4` gives depth its own key, and doing
+// it here would be a second ordering rule to keep in step with that one.  A node
+// with no area emits nothing — a zero size is how a pure transform parent says it
+// is scaffolding rather than a thing to look at.
+pub fn draw_list(self: const Stage) -> vector<DrawRect> {
+    out: vector<DrawRect> = [];
+    for i in self.st_order {
+        n = self.st_nodes[i];
+        if !n.nd_visible { continue; }
+        if n.nd_w <= 0.0 or n.nd_h <= 0.0 { continue; }
+        // The origin is the anchor, so the rect starts there and extends by the
+        // node's size through its own scale — which is what `nd_a`/`nd_d` carry.
+        o = world_point(self, i, 0.0, 0.0);
+        far = world_point(self, i, n.nd_w, n.nd_h);
+        x0 = o.p_x;
+        y0 = o.p_y;
+        w = far.p_x - x0;
+        h = far.p_y - y0;
+        if w < 0.0 { x0 = far.p_x; w = -w; }
+        if h < 0.0 { y0 = far.p_y; h = -h; }
+        out += [DrawRect {
+            dr_rect: UiRect { r_x: x0 as integer, r_y: y0 as integer,
+                              r_w: w as integer, r_h: h as integer },
+            dr_colour: n.nd_colour,
+        }];
+    }
+    out
+}
+
+// Paint a command list onto a software canvas.
+//
+// ⚠ THE ALPHA BYTE IS ADDED HERE, and it has to be.  A `DrawRect` carries
+// 0xRRGGBB — `lavition_ui` says so, and keeps it a plain integer so it needs no
+// graphics dependency — while `graphics::Canvas` reads 0xAARRGGBB and treats a
+// missing top byte as FULLY TRANSPARENT.  That is graphics' own trap: the colour
+// looks right in the source and paints nothing.  One `| 0xff000000` at the
+// boundary is the whole fix, and it belongs at the boundary rather than in every
+// caller.
+//
+// Example: @GFX-001
+pub fn render(list: const vector<DrawRect>, cv: graphics::Canvas) {
+    for d in list {
+        cv.fill_rect(d.dr_rect.r_x, d.dr_rect.r_y, d.dr_rect.r_w, d.dr_rect.r_h,
+                     opaque(d.dr_colour));
+    }
+}
+
+// 0xRRGGBB -> 0xAARRGGBB, leaving an already-opaque colour alone.
+pub fn opaque(colour: integer) -> integer {
+    if (colour & 0xff000000) != 0 { return colour; }
+    colour | 0xff000000
+}
+
+
+// ── A3a: the batcher ─────────────────────────────────────────────────────────
+//
+// ⚠ MERGE ADJACENT RUNS ONLY — NEVER SORT.  2-D correctness is painter's algebra:
+// overlapping translucent draws must composite in call order, so a batcher may
+// merge *consecutive* commands that share state and must break on a change.  It
+// may not gather every command of one atlas together, however much cheaper that
+// would be, because that reorders the picture.
+//
+// The honest cost, and it is not small: a scene that interleaves two atlases
+// sprite-by-sprite degenerates to one instance per run.  That is a PACKING
+// problem, answered where the atlas is built — sprites that draw near each other
+// must share a page — and not something the batcher may fix by reordering.
+
+// One run of consecutive instances that share an atlas.
+pub struct Batch {
+    b_layer: integer,        // one run, one layer — so one camera offset
+    b_atlas: integer,
+    b_first: integer,        // index of the first instance in the packed buffer
+    b_count: integer,
+    b_clipped: boolean,      // the scissor this run needs, if any
+    b_cx0: float,
+    b_cy0: float,
+    b_cx1: float,
+    b_cy1: float,
+}
+
+// Floats per instance in the packed buffer: a 2x3 affine, the sprite's uv rect,
+// and a premultiplied-ready rgba.  The stride is public because a caller wiring
+// `gl_instance_attrib` needs it, and a wrong one fails as garbage geometry rather
+// than as an error.
+pub const INSTANCE_STRIDE: integer = 16;
+
+// Offsets within one instance, for the same reason.
+pub const OFF_AFFINE: integer = 0;   // a, b, c, d, tx, ty
+pub const OFF_CELL: integer = 6;     // frame, cols, rows, spare
+//
+// ⚠ A FRAME INDEX, NOT A UV RECT.  An animating sprite then dirties ONE float per
+// frame instead of four, and the shader derives the uv from the grid — which is
+// what keeps `A3`'s *upload only what changed* meaningful with a screen full of
+// walking mobs.  The grid is per-node and static, so it uploads once.
+pub const OFF_RGBA: integer = 10;    // r, g, b, a
+pub const OFF_SWAY: integer = 14;    // amplitude, phase — static, so the clock is a uniform
+
+// Split the visible nodes into runs, in scene order.
+// Example: @STG-004 — adjacent runs only, never sorted, and what the interleave
+// costs: four sprites across two atlases are four draws, cured by packing.
+pub fn batches(self: const Stage) -> vector<Batch> {
+    out: vector<Batch> = [];
+    idx = 0;
+    for i in self.st_order {
+        n = self.st_nodes[i];
+        if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { continue; }
+        // ⚠ A RUN IS (ATLAS, CLIP), not atlas alone.  A scissor change is a state
+        // change, so it breaks a batch exactly as a texture change does — grouping
+        // by atlas only would draw the second clip's content under the first's
+        // scissor.
+        last = len(out) - 1;
+        same = false;
+        if last >= 0 {
+            b = out[last];
+            same = b.b_layer == n.nd_layer and b.b_atlas == n.nd_atlas
+                   and b.b_clipped == n.nd_clipped
+                   and b.b_cx0 == n.nd_cx0 and b.b_cy0 == n.nd_cy0
+                   and b.b_cx1 == n.nd_cx1 and b.b_cy1 == n.nd_cy1;
+        }
+        if same {
+            out[last].b_count = out[last].b_count + 1;
+        } else {
+            out += [Batch { b_layer: n.nd_layer, b_atlas: n.nd_atlas, b_first: idx, b_count: 1,
+                            b_clipped: n.nd_clipped, b_cx0: n.nd_cx0,
+                            b_cy0: n.nd_cy0, b_cx1: n.nd_cx1, b_cy1: n.nd_cy1 }];
+        }
+        idx = idx + 1;
+    }
+    out
+}
+
+// Pack every visible node into one instance buffer, in the same order `batches`
+// counted.  The two walk the scene by the same rule, so a batch's `b_first` and
+// `b_count` index this buffer directly.
+pub fn pack_instances(self: const Stage) -> vector<single> {
+    out: vector<single> = [];
+    for i in self.st_order {
+        n = self.st_nodes[i];
+        if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { continue; }
+        // The affine already carries rotation and scale; the node's SIZE folds in
+        // here so the shader can keep drawing a unit quad.
+        out += [(n.nd_a * n.nd_w) as single];
+        out += [(n.nd_b * n.nd_w) as single];
+        out += [(n.nd_c * n.nd_h) as single];
+        out += [(n.nd_d * n.nd_h) as single];
+        o = world_point(self, i, 0.0, 0.0);
+        out += [o.p_x as single];
+        out += [o.p_y as single];
+        out += [frame_of(self, i) as single];
+        out += [n.nd_cols as single];
+        out += [n.nd_rows as single];
+        out += [0.0f];
+        // ⚠ PREMULTIPLIED.  Straight alpha under linear filtering darkens every
+        // anti-aliased edge, and this stack draws overlapping soft-edged sprites
+        // all day; the GL blend below is `(ONE, ONE_MINUS_SRC_ALPHA)` to match.
+        lc = lit_colour(self, i);
+        out += [((((lc >> 16) & 255) as float / 255.0) * n.nd_alpha) as single];
+        out += [((((lc >> 8) & 255) as float / 255.0) * n.nd_alpha) as single];
+        out += [(((lc & 255) as float / 255.0) * n.nd_alpha) as single];
+        out += [n.nd_alpha as single];
+        out += [n.nd_sway as single];
+        out += [n.nd_phase as single];
+    }
+    out
+}
+
+// ── A3b: submitting the batches ──────────────────────────────────────────────
+//
+// One `gl_draw_instanced` per run, drawing a unit quad transformed entirely by
+// per-instance data.  The vertex buffer never changes and never grows: a scene of
+// five thousand sprites uploads one quad and one instance buffer.
+
+VERT_2D = `
+#version 330 core
+layout (location = 0) in vec3 aQuad;    // the unit quad, 0..1
+layout (location = 1) in vec4 iAffine;  // a, b, c, d — size already folded in
+layout (location = 2) in vec2 iTrans;   // tx, ty — the node's origin, in pixels
+layout (location = 3) in vec4 iCell;   // frame, cols, rows, spare
+layout (location = 4) in vec4 iRGBA;
+layout (location = 5) in vec2 iSway;
+uniform vec2 uScreen;
+uniform vec2 uCam;
+uniform float uTime;
+out vec4 vColor;
+void main() {{
+  vec2 p = vec2(iAffine.x * aQuad.x + iAffine.z * aQuad.y + iTrans.x,
+                iAffine.y * aQuad.x + iAffine.w * aQuad.y + iTrans.y) + uCam;
+  p.x += iSway.x * sin(uTime + iSway.y);
+  // Pixel space to NDC, y DOWN — the same orientation the software canvas uses,
+  // so the two paths can be compared pixel for pixel rather than mirrored.
+  gl_Position = vec4(p.x / uScreen.x * 2.0 - 1.0, 1.0 - p.y / uScreen.y * 2.0, 0.0, 1.0);
+  vColor = iRGBA;
+}}
+`;
+
+// The light-map composite: one fullscreen quad multiplying the world pass by the
+// light standing at each pixel.
+//
+// ⚠ THE CURVE AND THE FLOOR ARRIVE AS UNIFORMS, from `LIGHT_FALLOFF` and the
+// stage's ambient — never baked into this text.  A number written here would be
+// a second copy of the curve, and retuning it would silently stop matching what
+// `light_reach` answers on the software path and in every gate.
+VERT_LIGHT = `
+#version 330 core
+layout (location = 0) in vec2 aPos;
+layout (location = 1) in vec2 aUV;
+out vec2 vUV;
+void main() {{
+  vUV = aUV;
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}}
+`;
+
+FRAG_LIGHT = `
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uScene;
+uniform vec2 uScreenL;
+uniform vec2 uCamL;
+uniform float uFloor;
+uniform float uFalloff;
+uniform int uCount;
+uniform vec4 uLights[32];     // x, y, radius, power
+uniform vec3 uLightCol[32];
+void main() {{
+  vec2 w = vUV * uScreenL - uCamL;
+  vec3 acc = vec3(uFloor);
+  for (int i = 0; i < uCount; ++i) {{
+    float r = uLights[i].z;
+    if (r <= 0.0) continue;
+    float a = 1.0 - distance(w, uLights[i].xy) / r;
+    if (a <= 0.0) continue;
+    a = pow(clamp(a, 0.0, 1.0), uFalloff) * uLights[i].w;
+    acc += uLightCol[i] * a;
+  }}
+  FragColor = vec4(texture(uScene, vUV).rgb * clamp(acc, 0.0, 1.0), 1.0);
+}}
+`;
+
+FRAG_2D = `
+#version 330 core
+in vec4 vColor;
+out vec4 FragColor;
+void main() {{ FragColor = vColor; }}
+`;
+
+// The GL objects a stage needs, built once.
+pub struct Painter {
+    pn_shader: integer,
+    pn_vao: integer,
+    pn_ivbo: integer,
+    pn_cap: integer,          // instances the buffer currently holds
+    pn_light: integer,        // L2's composite shader; 0 until first needed
+    pn_fbo: integer,          // the offscreen target the world pass draws into
+    pn_scene: integer,        // its colour attachment
+    pn_fw: integer,           // what size that target was made at
+    pn_fh: integer,
+}
+
+// Compile the shader and upload the unit quad.  Call once, after a window exists.
+pub fn painter_new() -> Painter {
+    quad: vector<single> = [
+        0.0f, 0.0f, 0.0f,  1.0f, 0.0f, 0.0f,  1.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f,  1.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f];
+    sh = graphics::gl_create_shader(VERT_2D, FRAG_2D);
+    vao = graphics::gl_upload_vertices(quad, 3);
+    Painter { pn_shader: sh, pn_vao: vao, pn_ivbo: 0, pn_cap: 0,
+              pn_light: 0, pn_fbo: 0, pn_scene: 0, pn_fw: 0, pn_fh: 0 }
+}
+
+// Draw the scene, one instanced call per run.  Answers the number of draw calls
+// issued, which is the half of the gate that pixels cannot see: a batch that fell
+// back to one draw per sprite would look identical and cost N.
+pub fn gl_render(self: Stage, p: Painter, screen_w: float, screen_h: float) -> integer {
+    floats = pack_instances(self);
+    if len(floats) == 0 { return 0; }
+    // ⚠ PACKED ONCE, DRAWN PER VIEW.  The upload decision goes through
+    // `sync_instances` so there is ONE answer to *when does the buffer get
+    // rewritten* — a second view is draw calls, never another upload.
+    changed = sync_instances(self);
+    if p.pn_ivbo == 0 {
+        p.pn_ivbo = graphics::gl_upload_instance_buffer(floats);
+        p.pn_cap = len(floats) / INSTANCE_STRIDE ?? 0;
+    } else {
+        if changed { graphics::gl_update_buffer(p.pn_ivbo, floats); }
+    }
+    // Premultiplied compositing, to match `pack_instances` and the software path.
+    graphics::gl_enable(graphics::GL_BLEND);
+    graphics::gl_blend_func(graphics::BLEND_ONE, graphics::BLEND_ONE_MINUS_SRC_ALPHA);
+    graphics::gl_use_shader(p.pn_shader);
+    graphics::gl_set_uniform_vec2(p.pn_shader, "uScreen", screen_w, screen_h);
+    graphics::gl_set_uniform_float(p.pn_shader, "uTime", self.st_time);
+    calls = 0;
+    // ⚠ THE SAME THREE PHASES AS THE SOFTWARE PATH — world, composite, HUD — so
+    // the two can be compared rather than merely believed.  With the map off,
+    // `st_hud_layer` is the no-HUD sentinel and this is one pass over everything.
+    if self.st_light_map {
+        ensure_light_target(p, screen_w as integer, screen_h as integer);
+        graphics::gl_bind_framebuffer(p.pn_fbo);
+        graphics::gl_clear(0);
+        calls = calls + gl_draw_band(self, p, screen_w, screen_h, 0 - HUD_NONE,
+                                     self.st_hud_layer);
+        graphics::gl_bind_framebuffer(0);
+        gl_composite(self, p, screen_w, screen_h);
+        calls = calls + 1;
+        graphics::gl_use_shader(p.pn_shader);
+        graphics::gl_set_uniform_vec2(p.pn_shader, "uScreen", screen_w, screen_h);
+        graphics::gl_set_uniform_float(p.pn_shader, "uTime", self.st_time);
+        calls = calls + gl_draw_band(self, p, screen_w, screen_h, self.st_hud_layer,
+                                     HUD_NONE);
+        graphics::gl_disable(graphics::GL_SCISSOR_TEST);
+        return calls;
+    }
+    calls = gl_draw_band(self, p, screen_w, screen_h, 0 - HUD_NONE, HUD_NONE);
+    graphics::gl_disable(graphics::GL_SCISSOR_TEST);
+    calls
+}
+
+// Draw every run whose layer is in `[lo, hi)`, for every view.
+//
+// ⚠ `_screen_w` is deliberately unread, and the pair is kept rather than
+// trimmed: only the HEIGHT is needed here, to flip the scissor's y (GL measures
+// it from the bottom and the screen from the top) — x does not flip.  Its
+// sibling `gl_composite` uses both, so *(screen_w, screen_h)* is the shape this
+// family of helpers takes; dropping one of two symmetric floats would leave a
+// bare positional float at three call sites that could take either dimension.
+fn gl_draw_band(self: const Stage, p: const Painter, _screen_w: float,
+                screen_h: float, lo: integer, hi: integer) -> integer {
+    calls = 0;
+    for v in 0..len(self.st_views) {
+        vp = view_at(self, v);
+        for b in batches(self) {
+            if b.b_layer < lo or b.b_layer >= hi { continue; }
+            // ⚠ A RUN STARTS PART-WAY INTO THE BUFFER, and there is no first-instance
+            // parameter to say so: `gl_draw_instanced` takes a count and nothing else,
+            // and the base-instance form that would (glDrawArraysInstancedBaseInstance)
+            // is GL 4.2 and is NOT in WebGL 2.  So the offset moves into the ATTRIBUTE
+            // POINTERS — re-bound per run at `b_first * INSTANCE_STRIDE` — which is the
+            // portable way and costs four calls per run rather than a wider draw call.
+            // One uniform pair per run, rather than N rewritten positions.
+            coff = view_offset(self, v, b.b_layer);
+            graphics::gl_set_uniform_vec2(p.pn_shader, "uCam", coff.p_x, coff.p_y);
+            base = b.b_first * INSTANCE_STRIDE;
+            graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 1, 4, INSTANCE_STRIDE, base + OFF_AFFINE);
+            graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 2, 2, INSTANCE_STRIDE, base + OFF_AFFINE + 4);
+            graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 3, 4, INSTANCE_STRIDE, base + OFF_CELL);
+            graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 4, 4, INSTANCE_STRIDE, base + OFF_RGBA);
+            graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 5, 2, INSTANCE_STRIDE, base + OFF_SWAY);
+            // The scissor is the view's rect intersected with the batch's clip —
+            // computed in one place so a view boundary and a clip boundary cannot
+            // be enforced by two different rules.
+            sc = scissor_of(self, v, b, coff);
+            if sc.b_x1 > sc.b_x0 and sc.b_y1 > sc.b_y0 {
+                graphics::gl_enable(graphics::GL_SCISSOR_TEST);
+                // Scissor is measured from the BOTTOM, the screen from the top.
+                graphics::gl_scissor(sc.b_x0 as integer,
+                                     (screen_h - sc.b_y1) as integer,
+                                     (sc.b_x1 - sc.b_x0) as integer,
+                                     (sc.b_y1 - sc.b_y0) as integer);
+            } else {
+                if vp.vw_w > 0 or b.b_clipped {
+                    // Nothing of this run is visible in this view.
+                    graphics::gl_enable(graphics::GL_SCISSOR_TEST);
+                    graphics::gl_scissor(0, 0, 0, 0);
+                } else {
+                    graphics::gl_disable(graphics::GL_SCISSOR_TEST);
+                }
+            }
+            graphics::gl_draw_instanced(p.pn_vao, 6, b.b_count);
+            calls = calls + 1;
+        }
+    }
+    calls
+}
+
+// Make (or remake) the offscreen colour target the world pass draws into.
+//
+// ⚠ It takes no `Stage`: an offscreen target is a Painter and a size, and
+// nothing about the scene changes it.  The parameter was there and unread.
+fn ensure_light_target(p: Painter, w: integer, h: integer) {
+    if p.pn_light == 0 {
+        p.pn_light = graphics::gl_create_shader(VERT_LIGHT, FRAG_LIGHT);
+    }
+    if p.pn_fbo != 0 and p.pn_fw == w and p.pn_fh == h { return; }
+    p.pn_scene = graphics::gl_create_color_texture(w, h);
+    if p.pn_fbo == 0 { p.pn_fbo = graphics::gl_create_framebuffer(); }
+    graphics::gl_framebuffer_texture(p.pn_fbo, 0, p.pn_scene);
+    p.pn_fw = w;
+    p.pn_fh = h;
+}
+
+// One fullscreen multiply: the world pass times the light standing at each pixel.
+//
+// ⚠ THE CURVE AND THE FLOOR GO IN AS UNIFORMS, from the same `LIGHT_FALLOFF` and
+// ambient the software path and every gate read.  Nothing about the falloff is
+// written in the shader's text.
+fn gl_composite(self: const Stage, p: const Painter, screen_w: float, screen_h: float) {
+    graphics::gl_disable(graphics::GL_SCISSOR_TEST);
+    graphics::gl_disable(graphics::GL_BLEND);
+    graphics::gl_use_shader(p.pn_light);
+    graphics::gl_bind_texture(p.pn_scene, 0);
+    graphics::gl_set_uniform_int(p.pn_light, "uScene", 0);
+    graphics::gl_set_uniform_vec2(p.pn_light, "uScreenL", screen_w, screen_h);
+    off = view_offset(self, 0, 0);
+    graphics::gl_set_uniform_vec2(p.pn_light, "uCamL", 0.0 - off.p_x, 0.0 - off.p_y);
+    graphics::gl_set_uniform_float(p.pn_light, "uFloor", self.st_ambient);
+    graphics::gl_set_uniform_float(p.pn_light, "uFalloff", LIGHT_FALLOFF);
+    n = len(self.st_lights);
+    if n > 32 { n = 32; }
+    graphics::gl_set_uniform_int(p.pn_light, "uCount", n);
+    for i in 0..n {
+        l = self.st_lights[i];
+        graphics::gl_set_uniform_vec4(p.pn_light, "uLights[{i}]", l.lt_x, l.lt_y,
+                                      l.lt_r, l.lt_power);
+        graphics::gl_set_uniform_vec3(p.pn_light, "uLightCol[{i}]",
+                                      ((l.lt_colour >> 16) & 255) as float / 255.0,
+                                      ((l.lt_colour >> 8) & 255) as float / 255.0,
+                                      (l.lt_colour & 255) as float / 255.0);
+    }
+    graphics::gl_draw_fullscreen_quad();
+    graphics::gl_enable(graphics::GL_BLEND);
+}
+
+// The screen rect a run may paint in: the view's own rect, intersected with the
+// batch's clip once that clip is moved by the same offset as its content.
+//
+// An unbounded rect is spelled as the whole target rather than as a flag, so the
+// intersection is arithmetic in every case and the unsplit stage is the
+// degenerate cell rather than a second path.
+pub fn scissor_of(self: const Stage, view: integer, b: const Batch, coff: const P2) -> Bounds {
+    vp = view_at(self, view);
+    x0 = 0.0;
+    y0 = 0.0;
+    x1 = 1000000.0;
+    y1 = 1000000.0;
+    if vp.vw_w > 0 and vp.vw_h > 0 {
+        x0 = vp.vw_x as float;
+        y0 = vp.vw_y as float;
+        x1 = (vp.vw_x + vp.vw_w) as float;
+        y1 = (vp.vw_y + vp.vw_h) as float;
+    }
+    if b.b_clipped {
+        if b.b_cx0 + coff.p_x > x0 { x0 = b.b_cx0 + coff.p_x; }
+        if b.b_cy0 + coff.p_y > y0 { y0 = b.b_cy0 + coff.p_y; }
+        if b.b_cx1 + coff.p_x < x1 { x1 = b.b_cx1 + coff.p_x; }
+        if b.b_cy1 + coff.p_y < y1 { y1 = b.b_cy1 + coff.p_y; }
+    }
+    Bounds { b_x0: x0, b_y0: y0, b_x1: x1, b_y1: y1 }
+}
+
+
+// ── A4: picking and input routing ────────────────────────────────────────────
+
+// Register an alpha mask and answer its index, for `Place.pl_mask`.
+pub fn add_mask(self: Stage, w: integer, h: integer, alpha: const vector<integer>) -> integer {
+    self.st_masks += [Mask { m_w: w, m_h: h, m_alpha: alpha }];
+    len(self.st_masks) - 1
+}
+
+// Take a screen point into node `idx`'s own space.
+//
+// The world affine is 2x2 plus a translation, so the inverse is closed form —
+// `det = a*d - c*b`, and no general 4x4 inversion is involved.  A degenerate node
+// (zero scale) has no inverse and answers its own origin rather than an infinity.
+pub fn to_local(self: const Stage, idx: integer, sx: float, sy: float) -> P2 {
+    if idx < 0 or idx >= len(self.st_nodes) { return P2 { p_x: 0.0, p_y: 0.0 }; }
+    n = self.st_nodes[idx];
+    det = n.nd_a * n.nd_d - n.nd_c * n.nd_b;
+    if det > -0.000001 and det < 0.000001 {
+        return P2 { p_x: n.nd_ox, p_y: n.nd_oy };
+    }
+    dx = sx - n.nd_tx;
+    dy = sy - n.nd_ty;
+    P2 { p_x: (n.nd_d * dx - n.nd_c * dy) / det ?? 0.0,
+         p_y: (n.nd_a * dy - n.nd_b * dx) / det ?? 0.0 }
+}
+
+// Is this screen point ON node `idx` — inside its rect AND, where it has a mask,
+// on a texel that is not a hole?
+pub fn hits(self: const Stage, idx: integer, sx: float, sy: float) -> boolean {
+    hits_in(self, 0, idx, sx, sy)
+}
+
+// Is the node's own texel at this LOCAL point solid?  Split out of `hits` so the
+// per-view test uses the same sampling rather than a second copy of it.
+fn solid_at(self: const Stage, idx: integer, u: float, v: float) -> boolean {
+    n = self.st_nodes[idx];
+    if n.nd_mask < 0 or n.nd_mask >= len(self.st_masks) { return true; }
+    // ⚠ Reached through a BOUNDED loop rather than `st_masks[n.nd_mask]`.  A
+    // vector element indexed by an arbitrary integer types as NULLABLE, where a
+    // loop variable narrows to non-null — so the direct form needs a `??` default,
+    // and a default `Mask` would mint a store record on every hit test.
+    solid = true;
+    for mi in 0..len(self.st_masks) {
+        if mi != n.nd_mask { continue; }
+        m = self.st_masks[mi];
+        if m.m_w <= 0 or m.m_h <= 0 { break; }
+        mx = ((u / n.nd_w ?? 0.0) * (m.m_w as float)) as integer;
+        my = ((v / n.nd_h ?? 0.0) * (m.m_h as float)) as integer;
+        if mx < 0 { mx = 0; }
+        if my < 0 { my = 0; }
+        if mx >= m.m_w { mx = m.m_w - 1; }
+        if my >= m.m_h { my = m.m_h - 1; }
+        cover: integer = m.m_alpha[my * m.m_w + mx] ?? 0;
+        solid = cover > 0;
+        break;
+    }
+    solid
+}
+
+// The topmost node under this screen point, or -1.
+// Example: @STG-006 — picking samples alpha, so a click falls through a hole.
+//
+// Walks the draw order BACKWARDS, so the node drawn last — the one on top — is
+// tested first, and insertion order breaks a tie the same way it does when
+// drawing.  One order, two consumers: a pick that disagreed with the picture
+// would be worse than no pick at all.
+pub fn pick(self: const Stage, sx: float, sy: float) -> integer {
+    pick_in(self, 0, sx, sy)
+}
+
+// A press picks, and REMEMBERS.
+pub fn press(self: Stage, sx: float, sy: float) -> integer {
+    hit = pick(self, sx, sy);
+    self.st_capture = hit;
+    // D1: the pointer is remembered so `ui_state` can answer without being told
+    // again where it is.
+    self.st_ptr_x = sx;
+    self.st_ptr_y = sy;
+    self.st_hover = hit;
+    // D2: a press moves the keyboard — onto the node if it can take it, and OFF
+    // whatever had it otherwise.  Clicking away is how a field is left.
+    if hit >= 0 and focusable(self, hit) { self.st_focus = hit; } else { self.st_focus = -1; }
+    hit
+}
+
+// A release answers the node that took the PRESS, wherever the pointer is now.
+// Example: @STG-005 — why a hit test alone is not input routing.
+//
+// ⚠ THE CAPTURE IS THE POINT, and it is the half everyone forgets.  Without it a
+// button fires when you press it and slide away, and never fires when you press it
+// and drift a pixel — both of which feel broken and neither of which a rect test
+// can explain.  A release with nothing captured answers -1.
+pub fn release(self: Stage, sx: float, sy: float) -> integer {
+    held = self.st_capture;
+    self.st_capture = -1;
+    self.st_ptr_x = sx;
+    self.st_ptr_y = sy;
+    self.st_hover = pick(self, sx, sy);
+    if held < 0 { return -1; }
+    held
+}
+
+// Did the release land on the node that was pressed?  A button fires only when
+// this is true; `release` still reports the captured node either way.
+pub fn released_on(self: const Stage, idx: integer, sx: float, sy: float) -> boolean {
+    idx >= 0 and hits(self, idx, sx, sy)
+}
+
+pub fn capture(self: const Stage) -> integer { self.st_capture }
+
+
+// ── D1: the four states a widget shows, and the one predicate under them ─────
+//
+// ⚠⚠ **THE INVARIANT: a node reads `Down` exactly when a release at the current
+// pointer would FIRE it.**  The state and the firing decision are derived from
+// the same test — `the press is captured here AND the pointer is still inside` —
+// so the picture cannot promise something the click does not do.  A kit that
+// stored a `pressed` flag beside the capture would have two facts about one
+// gesture, and the visible one drifts first.
+//
+// ⚠ **`press`-then-LEAVE-then-`release` must not fire**, and the capture is what
+// makes that expressible: A4 remembers who took the press, so a release
+// elsewhere can answer *nobody* rather than *whoever is under the pointer now*.
+// The reverse — pressing and drifting a pixel — must still fire, and does.
+//
+// ⚠⚠ **ON TOUCH THERE IS NO `Over`.**  A finger has no position until it
+// touches, so a widget whose only affordance is hover is INVISIBLE on a phone.
+// The kit cannot fix that for an author, but it can refuse to lie: under
+// `POINTER_TOUCH` `ui_state` never answers `Over`, so a layout tested headlessly
+// on a touch stream shows the same states the phone will.
+//
+// ⚠ The pointer path was already injectable — `press` / `release` take
+// coordinates and read no device — so a replay harness needs no new seam here.
+// (The KEY half is the `input` package's `input_tick_from_state`, which @PLN145
+// `D0b` measured and cleared; nothing in this file needs a second one.)
+
+// What a pointing device is.  A mouse hovers; a finger does not exist until it
+// touches.
+pub const POINTER_MOUSE: integer = 0;
+pub const POINTER_TOUCH: integer = 1;
+
+// The four states a widget node can be in.
+//
+// ⚠ `Disabled` outranks the other three: a node that cannot be used must not
+// look pressable even while the pointer is on it.
+pub enum UiState {
+    Normal,
+    Over,
+    Down,
+    Disabled,
+}
+
+// Say whether the pointer is a mouse or a finger.  Mouse is the default.
+pub fn set_pointer(self: Stage, kind: integer) {
+    self.st_pointer = if kind == POINTER_TOUCH { POINTER_TOUCH } else { POINTER_MOUSE };
+}
+
+pub fn pointer(self: const Stage) -> integer { self.st_pointer }
+
+// The pointer moved without a button.  A touch stream never sends this.
+pub fn pointer_move(self: Stage, sx: float, sy: float) {
+    self.st_ptr_x = sx;
+    self.st_ptr_y = sy;
+    self.st_hover = pick(self, sx, sy);
+}
+
+// The node the pointer is over, or -1.  Answers even under touch, where it is
+// the node the finger is ON — `ui_state` is what declines to call that `Over`.
+pub fn hovered(self: const Stage) -> integer { self.st_hover }
+
+// Take a node out of use, or put it back.
+pub fn set_enabled(self: Stage, idx: integer, on: boolean) {
+    if idx >= 0 {
+        if idx < len(self.st_nodes) { self.st_nodes[idx].nd_disabled = !on; }
+    }
+}
+
+pub fn enabled(self: const Stage, idx: integer) -> boolean {
+    if idx >= 0 {
+        if idx < len(self.st_nodes) { return !self.st_nodes[idx].nd_disabled; }
+    }
+    false
+}
+
+// Would a release right now fire this node?  THE predicate — `ui_state` and
+// `click` are both it, which is why they cannot disagree.
+fn armed_on(self: const Stage, idx: integer) -> boolean {
+    if idx < 0 or idx >= len(self.st_nodes) { return false; }
+    if self.st_nodes[idx].nd_disabled { return false; }
+    if self.st_capture != idx { return false; }
+    hits(self, idx, self.st_ptr_x, self.st_ptr_y)
+}
+
+// What this node looks like right now.
+pub fn ui_state(self: const Stage, idx: integer) -> UiState {
+    if idx < 0 or idx >= len(self.st_nodes) { return UiState.Normal; }
+    if self.st_nodes[idx].nd_disabled { return UiState.Disabled; }
+    if armed_on(self, idx) { return UiState.Down; }
+    // ⚠ A press in flight ANYWHERE suppresses `Over` everywhere: dragging off a
+    // button and across its neighbour must not light the neighbour up.
+    if self.st_capture >= 0 { return UiState.Normal; }
+    if self.st_pointer == POINTER_TOUCH { return UiState.Normal; }
+    if self.st_hover == idx { return UiState.Over; }
+    UiState.Normal
+}
+
+// The release door for a widget: answers the node that FIRES, or -1.
+//
+// ⚠ **Use this OR `release`, not both** — either ends the press.  `release`
+// answers *who took the press* and leaves the fired/not decision to the caller;
+// this answers the question a button actually asks.  It exists because combining
+// `release` with `released_on` by hand is where press-then-leave-then-release
+// goes wrong, and that is a mistake a library can simply not offer.
+pub fn click(self: Stage, sx: float, sy: float) -> integer {
+    held = self.st_capture;
+    self.st_ptr_x = sx;
+    self.st_ptr_y = sy;
+    fired = -1;
+    if armed_on(self, held) { fired = held; }
+    self.st_capture = -1;
+    self.st_hover = pick(self, sx, sy);
+    fired
+}
+
+// ── D2: focus, tab order, and an editable text field ────────────────────────
+//
+// ⚠⚠ **EVERY INDEX HERE IS A CHARACTER INDEX, AND NO BYTE INDEX EVER ENTERS.**
+// That is the whole answer to a trap this stack has now met three times:
+// `len(text)` counts CHARACTERS while `s[a..b]` slices BYTES, and loft snaps a
+// byte cut outward — so a count applied as a range fits FEWER characters than it
+// measured, silently, and only in text that is not ASCII.  A caret IS a count.
+// Storing it as a byte offset would put that trap inside the edit loop, where
+// every keystroke walks over it.
+//
+// ⚠ **ONE `splice` DOES EVERY EDIT.**  Insert, backspace, delete, replace the
+// selection and paste are all *"replace characters [from, to) with this"*.  Five
+// hand-written walks over the same string would be five chances to get the
+// character counting wrong; there is one, and every editing key routes through
+// it.
+//
+// ⚠⚠ **THE MODIFIER PROBLEM THIS PHASE WAS WARNED ABOUT DOES NOT EXIST.**
+// @PLN145 `D0b` measured that `input`'s `Bindings` cannot express a modifier —
+// an `ActionBinding` is a name and a list of key codes — and the plan therefore
+// asked whether this phase must carry a ctrl rule of its own.  It must not:
+// `graphics`'s EVENT QUEUE already delivers `gl_event_mods()` per event
+// (`MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_SUPER`).  A text field does not want
+// ACTIONS — it wants *this keystroke, with these modifiers, in this order* —
+// and that is exactly what the queue carries.  The two findings do not
+// conflict: a binding table is the wrong instrument for an editor, not a
+// broken one.
+//
+// ⚠ `key_event` takes `(key, mods)` as plain integers rather than reading the
+// queue itself, so the whole model is backend-independent and replayable.  That
+// also makes the Android question — NativeActivity delivers `KeyEvent`s and may
+// not deliver `EV_TEXT` — a question for `graphics` rather than for this file:
+// feed the text in from wherever it comes.
+//
+// ⚠ The clipboard is OURS, not the system's.  `graphics` exposes no clipboard at
+// all, so cut/copy/paste round-trips inside the program and says so rather than
+// pretending to reach the desktop.
+//
+// ⚠ **What is NOT here:** no undo, no multi-line, no word-wise motion, and no
+// IME *composition* state — `text_event` takes text that is already committed,
+// which is what `EV_TEXT` delivers.  And **no pixels**: the caret is a character
+// index, so turning it into an x-coordinate is `text2d`'s measurement
+// (`Metrics.width(take_chars(buf, caret))`) and stays with whoever draws.
+
+// One node's editable text.  Carried BESIDE the nodes rather than inside them,
+// so a scene full of sprites pays nothing for a feature two of them use.
+struct NodeField {
+    nf_node: integer,
+    nf_buf: text,
+    nf_caret: integer,      // CHARACTER index, in [0, len(buf)]
+    nf_mark: integer,       // the selection anchor, same units
+}
+
+// Replace characters `[from, to)` of `s` with `ins` — THE edit primitive.
+//
+// ⚠ `from == len(s)` appends, which the loop cannot see because it stops at
+// `len - 1`; the tail test is what catches that case.
+fn splice(s: text, from: integer, to: integer, ins: text) -> text {
+    out = "";
+    k = 0;
+    for c in s {
+        if k == from { out += ins; }
+        if k < from or k >= to { out += "{c}"; }
+        k = k + 1;
+    }
+    if from >= k { out += ins; }
+    out
+}
+
+// Characters `[from, to)` of `s`.
+fn chars_between(s: text, from: integer, to: integer) -> text {
+    out = "";
+    k = 0;
+    for c in s {
+        if k >= from and k < to { out += "{c}"; }
+        k = k + 1;
+    }
+    out
+}
+
+// Can this node hold the keyboard?
+pub fn focusable(self: const Stage, idx: integer) -> boolean {
+    if idx >= 0 {
+        if idx < len(self.st_nodes) {
+            return self.st_nodes[idx].nd_focusable and !self.st_nodes[idx].nd_disabled;
+        }
+    }
+    false
+}
+
+pub fn set_focusable(self: Stage, idx: integer, on: boolean) {
+    if idx >= 0 {
+        if idx < len(self.st_nodes) { self.st_nodes[idx].nd_focusable = on; }
+    }
+}
+
+// Which node has the keyboard, or -1.
+pub fn focused(self: const Stage) -> integer { self.st_focus }
+
+// Give it the keyboard.  A node that cannot take it clears the focus instead, so
+// this never leaves the keyboard somewhere unreachable.
+pub fn set_focus(self: Stage, idx: integer) {
+    if focusable(self, idx) { self.st_focus = idx; return; }
+    self.st_focus = -1;
+}
+
+// ⚠ TAB ORDER IS THE DECLARED ORDER — the order the nodes were added, which is
+// the order a reader of the building code sees.  A separate `tab_index` would be
+// a second ordering to keep in step with the first, and the two disagree the
+// moment someone inserts a node.
+pub fn focus_next(self: Stage) { focus_step(self, 1); }
+pub fn focus_prev(self: Stage) { focus_step(self, -1); }
+
+fn focus_step(self: Stage, dir: integer) {
+    n = len(self.st_nodes);
+    if n <= 0 { return; }
+    // With nothing focused, forward starts BEFORE the first and backward AFTER
+    // the last, so both land where a reader expects rather than one of them
+    // skipping an end.
+    start = self.st_focus;
+    if start < 0 { start = if dir > 0 { -1 } else { n }; }
+    for step in 1..=n {
+        cand = (((start + dir * step) % n) + n) % n ?? 0;
+        if focusable(self, cand) { self.st_focus = cand; return; }
+    }
+    // Nothing in the scene can take it; leave the focus where it was.
+}
+
+// Make this node an editable field holding `s`, and give it the tab order.
+pub fn set_field(self: Stage, idx: integer, s: text) {
+    if idx < 0 or idx >= len(self.st_nodes) { return; }
+    self.st_nodes[idx].nd_focusable = true;
+    at = field_at(self, idx);
+    n = len(s);
+    if at >= 0 {
+        set_buf(self, at, s);
+        set_caret(self, at, n);
+        set_mark(self, at, n);
+        return;
+    }
+    self.st_fields += [NodeField { nf_node: idx, nf_buf: s, nf_caret: n, nf_mark: n }];
+}
+
+fn field_at(self: const Stage, idx: integer) -> integer {
+    if idx < 0 { return -1; }
+    for f in self.st_fields {
+        if f.nf_node == idx { return f#index; }
+    }
+    -1
+}
+
+// ── The six guarded ways to touch a field's record.
+//
+// ⚠ Every read and write of `st_fields` goes through one of these, so the bounds
+// test is written ONCE per accessor instead of at each of the twenty-odd places
+// an editing key touches the record.
+fn buf_of(self: const Stage, at: integer) -> text {
+    if at >= 0 {
+        if at < len(self.st_fields) { return self.st_fields[at].nf_buf; }
+    }
+    ""
+}
+
+fn caret_of(self: const Stage, at: integer) -> integer {
+    if at >= 0 {
+        if at < len(self.st_fields) { return self.st_fields[at].nf_caret; }
+    }
+    0
+}
+
+fn mark_of(self: const Stage, at: integer) -> integer {
+    if at >= 0 {
+        if at < len(self.st_fields) { return self.st_fields[at].nf_mark; }
+    }
+    0
+}
+
+fn set_buf(self: Stage, at: integer, v: text) {
+    if at >= 0 {
+        if at < len(self.st_fields) { self.st_fields[at].nf_buf = v; }
+    }
+}
+
+fn set_caret(self: Stage, at: integer, v: integer) {
+    if at >= 0 {
+        if at < len(self.st_fields) { self.st_fields[at].nf_caret = v; }
+    }
+}
+
+fn set_mark(self: Stage, at: integer, v: integer) {
+    if at >= 0 {
+        if at < len(self.st_fields) { self.st_fields[at].nf_mark = v; }
+    }
+}
+
+pub fn is_field(self: const Stage, idx: integer) -> boolean { field_at(self, idx) >= 0 }
+
+pub fn field_text(self: const Stage, idx: integer) -> text {
+    buf_of(self, field_at(self, idx))
+}
+
+// Where the caret is, counted in CHARACTERS.
+pub fn field_caret(self: const Stage, idx: integer) -> integer {
+    caret_of(self, field_at(self, idx))
+}
+
+// The selection anchor.  Equal to the caret when nothing is selected.
+pub fn field_mark(self: const Stage, idx: integer) -> integer {
+    mark_of(self, field_at(self, idx))
+}
+
+// The selected text, or "" when the caret is a point.
+pub fn field_selection(self: const Stage, idx: integer) -> text {
+    at = field_at(self, idx);
+    chars_between(buf_of(self, at), min(caret_of(self, at), mark_of(self, at)),
+                  max(caret_of(self, at), mark_of(self, at)))
+}
+
+// Put the caret at a CHARACTER index — what a click resolves to once whoever
+// draws the text has turned an x-coordinate into a count.
+pub fn field_place_caret(self: Stage, idx: integer, at_char: integer, extend: boolean) {
+    at = field_at(self, idx);
+    if at < 0 { return; }
+    c = clamp(at_char, 0, len(buf_of(self, at)));
+    set_caret(self, at, c);
+    if !extend { set_mark(self, at, c); }
+}
+
+// Our own clipboard — see the header.
+pub fn clipboard(self: const Stage) -> text { self.st_clip }
+pub fn set_clipboard(self: Stage, s: text) { self.st_clip = s; }
+
+// Commit text into the focused field, replacing any selection.
+//
+// ⚠ This is where IME text arrives: `EV_TEXT` delivers a whole COMMITTED string,
+// which may be several characters and is very often not ASCII.
+pub fn text_event(self: Stage, s: text) {
+    at = field_at(self, self.st_focus);
+    if at < 0 { return; }
+    if s == "" { return; }
+    replace_selection(self, at, s);
+}
+
+fn replace_selection(self: Stage, at: integer, ins: text) {
+    lo = min(caret_of(self, at), mark_of(self, at));
+    hi = max(caret_of(self, at), mark_of(self, at));
+    set_buf(self, at, splice(buf_of(self, at), lo, hi, ins));
+    c = lo + len(ins);
+    set_caret(self, at, c);
+    set_mark(self, at, c);
+}
+
+// A key, with the modifiers that arrived WITH it.  Tab moves the focus; every
+// other key goes to the focused field.
+pub fn key_event(self: Stage, key: integer, mods: integer) {
+    if key == graphics::KEY_TAB {
+        if (mods & graphics::MOD_SHIFT) != 0 { focus_prev(self); } else { focus_next(self); }
+        return;
+    }
+    at = field_at(self, self.st_focus);
+    if at < 0 { return; }
+    shift = (mods & graphics::MOD_SHIFT) != 0;
+    n = len(buf_of(self, at));
+    caret = caret_of(self, at);
+    lo = min(caret, mark_of(self, at));
+    hi = max(caret, mark_of(self, at));
+
+    if (mods & graphics::MOD_CTRL) != 0 {
+        if key == graphics::KEY_A { set_mark(self, at, 0); set_caret(self, at, n); return; }
+        if key == KEY_COPY {
+            if lo != hi { self.st_clip = chars_between(buf_of(self, at), lo, hi); }
+            return;
+        }
+        if key == KEY_CUT {
+            if lo != hi {
+                self.st_clip = chars_between(buf_of(self, at), lo, hi);
+                replace_selection(self, at, "");
+            }
+            return;
+        }
+        if key == KEY_PASTE { replace_selection(self, at, self.st_clip); }
+        return;
+    }
+
+    if key == graphics::KEY_BACKSPACE {
+        if lo != hi { replace_selection(self, at, ""); return; }
+        if caret > 0 {
+            set_buf(self, at, splice(buf_of(self, at), caret - 1, caret, ""));
+            set_caret(self, at, caret - 1);
+            set_mark(self, at, caret - 1);
+        }
+        return;
+    }
+    if key == graphics::KEY_DELETE {
+        if lo != hi { replace_selection(self, at, ""); return; }
+        if caret < n { set_buf(self, at, splice(buf_of(self, at), caret, caret + 1, "")); }
+        return;
+    }
+    if key == graphics::KEY_LEFT {
+        // ⚠ Without shift a LIVE SELECTION collapses to its near end rather than
+        // stepping one further — pressing left with three characters selected
+        // must land at the START of them, not before the start.
+        if shift { set_caret(self, at, max(caret - 1, 0)); return; }
+        c = if lo != hi { lo } else { max(caret - 1, 0) };
+        set_caret(self, at, c);
+        set_mark(self, at, c);
+        return;
+    }
+    if key == graphics::KEY_RIGHT {
+        if shift { set_caret(self, at, min(caret + 1, n)); return; }
+        c = if lo != hi { hi } else { min(caret + 1, n) };
+        set_caret(self, at, c);
+        set_mark(self, at, c);
+        return;
+    }
+    if key == graphics::KEY_HOME {
+        set_caret(self, at, 0);
+        if !shift { set_mark(self, at, 0); }
+        return;
+    }
+    if key == graphics::KEY_END {
+        set_caret(self, at, n);
+        if !shift { set_mark(self, at, n); }
+    }
+}
+
+// The three editing keys `graphics` does not name.  Loft's key constants ARE the
+// lowercase ASCII codes, so these follow the same convention.
+pub const KEY_CUT: integer = 120;     // 'x'
+pub const KEY_COPY: integer = 99;     // 'c'
+pub const KEY_PASTE: integer = 118;   // 'v'
+
+
+// ── A5: compositing ──────────────────────────────────────────────────────────
+
+// Composite one premultiplied source over a destination channel.
+//
+// `src` is ALREADY multiplied by `ia`, so this is `src + dst * (1 - a)` in integer
+// arithmetic, rounded to nearest.  Straight alpha would need `src * a` here and
+// would darken an anti-aliased edge under linear filtering — the reason the whole
+// path is premultiplied.
+// Linear blend of two channels, `t` in 0..255.
+fn mix(a: integer, b: integer, t: integer) -> integer {
+    (a * (255 - t) + b * t + 127) / 255 ?? 0
+}
+
+fn over(src: integer, dst: integer, ia: integer) -> integer {
+    (src * 255 + dst * (255 - ia) + 127) / 255 ?? 0
+}
+
+// Paint the scene onto a software canvas, honouring each node's alpha and tint.
+//
+// `render(list, canvas)` stays the path for a `lavition_ui` command list, which
+// carries 0xRRGGBB and no alpha by design.  This is the stage's own path, where a
+// node has an alpha to respect — and the two must agree wherever alpha is 1.
+pub fn render_stage(self: const Stage, cv: graphics::Canvas) {
+    render_view(self, 0, cv);
+}
+
+// Paint one VIEW of the scene: the same nodes, through that view's camera, and
+// confined to its own screen rect.
+//
+// ⚠ THE VIEWPORT NARROWS THE SPAN, it does not test each pixel — the same
+// technique A6's clip uses, so the boundary falls where the arithmetic puts it
+// rather than where a per-pixel predicate rounds it, and the two cannot disagree
+// about a shared edge.
+pub fn render_view(self: const Stage, view: integer, cv: graphics::Canvas) {
+    // ⚠ THREE PHASES, and the order IS the feature: world, composite, HUD.  With
+    // the map off `st_hud_layer` is the no-HUD sentinel and both passes collapse
+    // into the single walk L1 had, so the unlit game keeps exactly its pixels.
+    if self.st_light_map {
+        render_band(self, view, cv, 0 - HUD_NONE, self.st_hud_layer);
+        composite_light(self, view, cv);
+        render_band(self, view, cv, self.st_hud_layer, HUD_NONE);
+        return;
+    }
+    render_band(self, view, cv, 0 - HUD_NONE, HUD_NONE);
+}
+
+// Paint the nodes whose layer is in `[lo, hi)`, blurring as each layer finishes.
+//
+// ⚠ THE BLUR IS INTERLEAVED WITH THE WALK, not applied at the end.  That is what
+// puts it BEFORE the layers above composite, so a sharp foreground over a hazy
+// distance is possible at all — the property a fullscreen blur cannot give.
+fn render_band(self: const Stage, view: integer, cv: graphics::Canvas,
+               lo: integer, hi: integer) {
+    // ⚠ PAINT ONE LAYER, THEN BLUR, THEN THE NEXT.  Detecting the boundaries in
+    // one pass and painting in another only LOOKS interleaved: the blur then runs
+    // before anything is drawn and the whole feature is silent.  `st_order` is
+    // sorted by layer first, so its distinct layers arrive in drawing order.
+    prev = 0 - HUD_NONE;
+    started = false;
+    for oi in self.st_order {
+        ln = self.st_nodes[oi].nd_layer;
+        if ln < lo or ln >= hi { continue; }
+        if started and ln == prev { continue; }
+        if started { blur_layer(self, view, cv, prev); }
+        paint_band(self, view, cv, ln, ln + 1);
+        prev = ln;
+        started = true;
+    }
+    if started { blur_layer(self, view, cv, prev); }
+}
+
+// Blur what has been drawn so far, if this layer asks for it.
+fn blur_layer(self: const Stage, view: integer, cv: graphics::Canvas, layer: integer) {
+    r = layer_blur(self, layer);
+    if r <= 0 { return; }
+    vp = view_at(self, view);
+    x0 = 0;
+    y0 = 0;
+    x1 = cv.width;
+    y1 = cv.height;
+    if vp.vw_w > 0 and vp.vw_h > 0 {
+        x0 = vp.vw_x;
+        y0 = vp.vw_y;
+        if vp.vw_x + vp.vw_w < x1 { x1 = vp.vw_x + vp.vw_w; }
+        if vp.vw_y + vp.vw_h < y1 { y1 = vp.vw_y + vp.vw_h; }
+    }
+    if x0 < 0 { x0 = 0; }
+    if y0 < 0 { y0 = 0; }
+    blur_region(cv, x0, y0, x1, y1, r);
+}
+
+fn ly_density_of(self: const Stage, layer: integer) -> float {
+    layer_at(self, layer).ly_density
+}
+
+fn ly_fog_of(self: const Stage, layer: integer) -> integer {
+    layer_at(self, layer).ly_fog
+}
+
+fn paint_band(self: const Stage, view: integer, cv: graphics::Canvas,
+              lo: integer, hi: integer) {
+    vpx = view_at(self, view).vw_x;
+    vpy = view_at(self, view).vw_y;
+    vpw = view_at(self, view).vw_w;
+    vph = view_at(self, view).vw_h;
+    for i in self.st_order {
+        n = self.st_nodes[i];
+        if n.nd_layer < lo or n.nd_layer >= hi { continue; }
+        if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { continue; }
+        if n.nd_alpha <= 0.0 { continue; }
+        ia = (n.nd_alpha * 255.0 + 0.5) as integer;
+        if ia > 255 { ia = 255; }
+        if ia < 0 { ia = 0; }
+        // Fade toward the haze colour before compositing, so distance reads as less
+        // distinct as well as smaller.
+        hz = (n.nd_cue * self.st_cue_haze * 255.0 + 0.5) as integer;
+        if hz < 0 { hz = 0; }
+        if hz > 255 { hz = 255; }
+        lc = lit_colour(self, i);
+        cr = mix((lc >> 16) & 255, (self.st_haze_colour >> 16) & 255, hz);
+        cg = mix((lc >> 8) & 255, (self.st_haze_colour >> 8) & 255, hz);
+        cb = mix(lc & 255, self.st_haze_colour & 255, hz);
+        // ⚠ The LAYER's fog, after the depth cue's haze and in the same mix:
+        // one is per-node by distance, the other a flat band, and they compose
+        // rather than compete.  Density 0 makes `fg` zero, so an unfogged layer
+        // takes the identity path and is bit-identical.
+        fg = (ly_density_of(self, n.nd_layer) * 255.0 + 0.5) as integer;
+        if fg > 0 {
+            if fg > 255 { fg = 255; }
+            fc = ly_fog_of(self, n.nd_layer);
+            cr = mix(cr, (fc >> 16) & 255, fg);
+            cg = mix(cg, (fc >> 8) & 255, fg);
+            cb = mix(cb, fc & 255, fg);
+        }
+        sr = (cr * ia + 127) / 255 ?? 0;
+        sg = (cg * ia + 127) / 255 ?? 0;
+        sb = (cb * ia + 127) / 255 ?? 0;
+        o = world_point(self, i, 0.0, 0.0);
+        far = world_point(self, i, n.nd_w, n.nd_h);
+        off = view_offset(self, view, n.nd_layer);
+        sw = sway_of(self, i);
+        x0 = (o.p_x + off.p_x + sw) as integer;
+        y0 = (o.p_y + off.p_y) as integer;
+        x1 = (far.p_x + off.p_x + sw) as integer;
+        y1 = (far.p_y + off.p_y) as integer;
+        if x1 < x0 { t = x0; x0 = x1; x1 = t; }
+        if y1 < y0 { t2 = y0; y0 = y1; y1 = t2; }
+        // The clip is applied by NARROWING THE SPAN, not by testing each pixel:
+        // the boundary then falls where the arithmetic puts it rather than where a
+        // per-pixel predicate rounds it.
+        // ⚠ THE CLIP TAKES THE SAME OFFSET AS THE CONTENT.  It is derived in WORLD
+        // space by `compose`, while what it cuts has already been moved by the
+        // camera and the viewport — so applying it raw cut the wrong region, and
+        // a pan of more than the node's own width cut ALL of it: a clipped panel
+        // silently disappeared the moment the camera moved.  A6 and P2 each
+        // shipped green because no test moved a camera across a clip.
+        if n.nd_clipped {
+            k0 = (n.nd_cx0 + off.p_x) as integer;
+            k1 = (n.nd_cx1 + off.p_x) as integer;
+            l0 = (n.nd_cy0 + off.p_y) as integer;
+            l1 = (n.nd_cy1 + off.p_y) as integer;
+            if k0 > x0 { x0 = k0; }
+            if l0 > y0 { y0 = l0; }
+            if k1 < x1 { x1 = k1; }
+            if l1 < y1 { y1 = l1; }
+        }
+        // The view's own rect, narrowed the same way.  An unbounded view (width
+        // or height 0) confines nothing, which is the unsplit stage.
+        if vpw > 0 and vph > 0 {
+            if vpx > x0 { x0 = vpx; }
+            if vpy > y0 { y0 = vpy; }
+            if vpx + vpw < x1 { x1 = vpx + vpw; }
+            if vpy + vph < y1 { y1 = vpy + vph; }
+        }
+        for py in y0..y1 {
+            for px in x0..x1 {
+                d = cv.get_pixel(px, py);
+                dr = (d >> 16) & 255;
+                dg = (d >> 8) & 255;
+                db = d & 255;
+                cv.set_pixel(px, py, 0xff000000
+                    | (over(sr, dr, ia) << 16)
+                    | (over(sg, dg, ia) << 8)
+                    | over(sb, db, ia));
+            }
+        }
+    }
+}
+
+
+// ── P2: the camera ───────────────────────────────────────────────────────────
+//
+// ⚠ THE CAMERA IS APPLIED AT DRAW TIME, NEVER BAKED INTO NODE POSITIONS.  The
+// three knobs already let an app do parallax by recomputing every node each frame
+// — and that is an O(N) rewrite per scrolled frame AND a full instance re-upload,
+// which is the retained tree's whole budget spent on standing still.  As an offset
+// per run it costs one pair of floats.
+//
+// ⚠ AND IT TRANSLATES, IT DOES NOT SCALE.  Scaling by parallax is a perspective
+// projection and would resize the footprint a base-anchored sprite is aligned to.
+// Distance-as-smaller is the depth CUE's job (`depth_cue`), which scales about the
+// origin and therefore keeps the feet planted; parallax only moves things.
+
+// Move the camera.  Does NOT dirty the instance buffer — that is the point.
+//
+// An unsplit stage IS a one-view stage, so this is view 0's camera rather than a
+// second place a camera can live — the same move P2 made with parallax, where
+// flat scrolling is every factor at 1.0 instead of a separate path.
+pub fn set_camera(self: Stage, x: float, y: float) { set_view_camera(self, 0, x, y); }
+
+pub fn camera_x(self: const Stage) -> float { view_camera_x(self, 0) }
+pub fn camera_y(self: const Stage) -> float { view_camera_y(self, 0) }
+
+// How much of the camera a layer feels.  1.0 is the world; below that is a
+// background that lags; above it a foreground that leads.  Flat scrolling is every
+// factor at 1.0, which is the degenerate case rather than a second code path.
+pub fn set_parallax(self: Stage, layer: integer, factor: float) {
+    grow_layers(self, layer);
+    if layer < 0 { return; }
+    self.st_layers[layer].ly_parallax = factor;
+}
+
+pub fn parallax_of(self: const Stage, layer: integer) -> float {
+    layer_at(self, layer).ly_parallax
+}
+
+// Make sure `st_layers` reaches `layer`, filling with the plain layer.
+fn grow_layers(self: Stage, layer: integer) {
+    if layer < 0 { return; }
+    while len(self.st_layers) <= layer {
+        self.st_layers += [Layer { ly_parallax: 1.0, ly_fog: 0, ly_density: 0.0,
+                                   ly_blur: 0 }];
+    }
+}
+
+// ⚠ ALWAYS A FRESH RECORD, on every path.  Answering `self.st_layers[layer]`
+// directly would be a borrow on one branch and a literal on the other — the
+// mixed verdict that corrupted the store on `--native` in P6 (loft#1017).
+fn layer_at(self: const Stage, layer: integer) -> Layer {
+    if layer < 0 or layer >= len(self.st_layers) {
+        return Layer { ly_parallax: 1.0, ly_fog: 0, ly_density: 0.0, ly_blur: 0 };
+    }
+    l = self.st_layers[layer] ?? Layer { ly_parallax: 1.0, ly_fog: 0,
+                                         ly_density: 0.0, ly_blur: 0 };
+    Layer { ly_parallax: l.ly_parallax, ly_fog: l.ly_fog, ly_density: l.ly_density,
+            ly_blur: l.ly_blur }
+}
+
+// The screen-space offset a layer's content is drawn at, in view 0.
+pub fn cam_offset(self: const Stage, layer: integer) -> P2 {
+    view_offset(self, 0, layer)
+}
+
+// How many times the instance buffer has been written.  A pure camera move must
+// not move this — the property the whole design turns on.
+pub fn uploads(self: const Stage) -> integer { self.st_uploads }
+
+
+// ── P3: ambient motion ───────────────────────────────────────────────────────
+//
+// ⚠ NOTHING PER FRAME AT ALL.  A field of grass, a canopy, a banner: the phase is
+// derived from POSITION and the animation from a single clock, so five hundred
+// swaying tufts are one buffer uploaded once and one uniform that changes.  This is
+// the limit of what `P4`'s frame-index attribute exists to keep cheap — there, one
+// integer per animating sprite; here, zero.
+//
+// ⚠ AND IT IS VISUAL ONLY.  Sway displaces what is DRAWN and never the footprint:
+// a swaying tree keeps its depth, its bounds and its hit area, because a sprite
+// that re-sorted as it swayed would flicker past its neighbours, and grass that
+// dodged the pointer would be worse than grass that ignored it.
+
+// Example: @STG-008 — ambient motion is free, out of step, and visual only.
+// Advance the ambient clock.  Does NOT dirty the instance buffer — that is the
+// whole point of deriving the phase rather than stepping it.
+pub fn set_time(self: Stage, t: float) { self.st_time = t; }
+
+pub fn time_of(self: const Stage) -> float { self.st_time }
+
+// How far node `idx` is displaced right now, in pixels.  Bounded by its amplitude
+// by construction, since it is an amplitude times a sine.
+pub fn sway_of(self: const Stage, idx: integer) -> float {
+    if idx < 0 or idx >= len(self.st_nodes) { return 0.0; }
+    n = self.st_nodes[idx];
+    if n.nd_sway == 0.0 { return 0.0; }
+    n.nd_sway * sin(self.st_time + n.nd_phase)
+}
+
+
+// ── P4: animation ────────────────────────────────────────────────────────────
+//
+// ⚠ ADVANCED FROM A STEP, NEVER FROM WALL TIME.  `advance` takes the simulation's
+// own delta, so a cycle is identical at any frame rate and replayable under a
+// recorded input stream — the property co-op determinism rests on.  A clock read
+// inside the library would quietly break both.
+//
+// ⚠ AND THE DELTA IS INTEGER MICROSECONDS, not seconds.  Accumulating a float
+// drifts: `0.1` added eight times is `0.7999…`, which truncates to frame 7 where 8
+// is right, and two 1/60 steps do not equal one 1/30 step. Both failures showed up
+// the first time this was gated. Integer units are what `fixstep` speaks and what
+// makes "the same total elapsed gives the same frame" true rather than nearly true.
+
+// Register a sequence and answer its index, for `Place.pl_seq`.
+pub fn add_sequence(self: Stage, first: integer, count: integer, fps: float,
+                    mode: integer) -> integer {
+    push_sequence(self, "", first, count, fps, mode)
+}
+
+// The one place a `Sequence` is built, so its name arrives with the rest of it
+// and cannot be attached — or forgotten — afterwards.
+fn push_sequence(self: Stage, name: text, first: integer, count: integer,
+                 fps: float, mode: integer) -> integer {
+    self.st_seqs += [Sequence { q_first: first,
+                                q_count: if count < 1 { 1 } else { count },
+                                q_fps: fps, q_mode: mode, q_name: name }];
+    len(self.st_seqs) - 1
+}
+
+// Step every animated node by `dt_us` MICROSECONDS — the simulation's own delta,
+// not a clock this library reads.
+//
+// ⚠ Dirties the instance buffer, unlike the camera and the ambient clock — an
+// animated sprite genuinely changes one number per frame.  That number is a FRAME
+// INDEX and not a uv rect, so it is one float and not four.
+pub fn advance(self: Stage, dt_us: integer) {
+    moved = false;
+    for i in 0..len(self.st_nodes) {
+        if self.st_nodes[i].nd_seq >= 0 {
+            self.st_nodes[i].nd_elapsed = self.st_nodes[i].nd_elapsed + dt_us;
+            moved = true;
+        }
+    }
+    // ⚠ The property tweens ride THIS call rather than one of their own, which is
+    // what stops a scene from owning two clocks — see § C2 below.
+    if step_tweens(self, dt_us) { moved = true; }
+    if moved { self.st_dirty = true; }
+}
+
+// Which cell node `idx` shows right now.
+pub fn frame_of(self: const Stage, idx: integer) -> integer {
+    if idx < 0 or idx >= len(self.st_nodes) { return 0; }
+    n = self.st_nodes[idx];
+    if n.nd_seq < 0 or n.nd_seq >= len(self.st_seqs) { return 0; }
+    // ⚠ Indexed, not scanned.  `pack_instances` asks this once per node per
+    // frame, so searching the sequence table would put the number of SEQUENCES
+    // inside the loop over SPRITES — the per-frame cost this phase's design call
+    // exists to hold at one number per sprite.  The bounds test above is what
+    // makes the fallback unreachable.
+    // ⚠ The fallback is a LITERAL, not a call.  A call in this position leaks the
+    // record it returns on an index miss (loft#1013, both backends), and the
+    // compiler's refusal of a struct-valued constant prescribes exactly that
+    // leaking form.  A literal is the shape that does not.  It stays unreachable:
+    // the bounds test above is what decides that, not this line.
+    q = self.st_seqs[n.nd_seq] ?? Sequence { q_first: 0, q_count: 1, q_fps: 0.0,
+                                             q_mode: LOOP, q_name: "" };
+    raw = ((n.nd_elapsed as float) * q.q_fps / 1000000.0) as integer;
+    if raw < 0 { raw = 0; }
+    if q.q_count <= 1 { return q.q_first; }
+    if q.q_mode == ONCE {
+        if raw > q.q_count - 1 { raw = q.q_count - 1; }
+        return q.q_first + raw;
+    }
+    if q.q_mode == PINGPONG {
+        // ⚠ The period is 2n-2, NOT 2n: the two END frames are each shown once
+        // per cycle, not twice.  A period of 2n stutters at both ends, which is
+        // the classic off-by-one in a ping-pong and reads as a limp.
+        period = q.q_count * 2 - 2;
+        pp = raw % period ?? 0;
+        if pp < q.q_count { return q.q_first + pp; }
+        return q.q_first + period - pp;
+    }
+    q.q_first + (raw % q.q_count ?? 0)
+}
+
+// Reset a node to the start of its sequence.
+pub fn restart(self: Stage, idx: integer) {
+    if idx < 0 or idx >= len(self.st_nodes) { return; }
+    self.st_nodes[idx].nd_elapsed = 0;
+    self.st_dirty = true;
+}
+
+
+// ── C2: a node's numbers, read, written, and moved over time ────────────────
+//
+// ⚠⚠ **THE WRITE SWITCH IS THE POINT, AND THERE IS EXACTLY ONE OF IT.**  loft has
+// no property references, so "tween `node.x`" cannot be a pointer to a field — it
+// has to be a name the library switches on.  `write_prop` is that switch, and
+// both doors go through it: `set_prop` writes now, a tween writes every frame.
+// Two switches would be two spellings of *what X means* that can disagree.
+//
+// ⚠ **`Prop.X` is the first public way to MOVE a node at all.**  Before this the
+// stage could place a node and never shift it — a consumer had to reach into
+// `st_nodes[i].nd_x` itself, which is a field write no gate could see.
+//
+// ⚠⚠ **AT MOST ONE TWEEN PER (NODE, PROPERTY), and starting another REPLACES it.**
+// That is the invariant this section exists to hold, and it is structural rather
+// than checked: two tweens on one property are two writers of one number, and the
+// answer would depend on which happened to be later in a vector.  Replacement is
+// also what a caller means — "now go there instead" — so the safe rule and the
+// expected one are the same rule.
+//
+// ⚠ **A finished tween stops writing.**  It stays in the table so
+// `prop_tweening` can answer, but it no longer touches the node — otherwise it
+// would keep re-asserting its end value every frame and silently undo a later
+// `set_prop`, which is the same two-writers defect one move down the line.
+//
+// ⚠ **The unit is the one `advance` already takes: MICROSECONDS.**  A duration
+// here is `dt_us`, not `tween`'s own unit-agnostic count and not `fixstep`'s
+// 3 000 000-per-second base — because the tween rides `advance`, and a scene that
+// had to convert between two units to move a sprite would be carrying two clocks.
+// A consumer on `fixstep` converts once, where it already converts for `advance`.
+
+// Which of a node's numbers a tween drives.
+//
+// ⚠ Every one is a `float` the node already stores.  Colour, atlas and the
+// sequence are not here on purpose: they are not numbers you can be *half way*
+// between, and interpolating them would produce values the node never holds.
+pub enum Prop {
+    X, Y,
+    Rot,
+    ScaleX, ScaleY,
+    OriginX, OriginY,
+    Alpha,
+    Depth,
+}
+
+// One property of one node, moving.
+struct NodeTween {
+    nt_node: integer,
+    nt_prop: Prop = Prop.X,
+    nt_tw: Tween,
+}
+
+// What that property reads right now.
+pub fn prop_of(self: const Stage, idx: integer, p: Prop) -> float {
+    if idx >= 0 {
+        if idx < len(self.st_nodes) {
+            n = self.st_nodes[idx];
+            return match p {
+                X       => n.nd_x,
+                Y       => n.nd_y,
+                Rot     => n.nd_rot,
+                ScaleX  => n.nd_sx,
+                ScaleY  => n.nd_sy,
+                OriginX => n.nd_ox,
+                OriginY => n.nd_oy,
+                Alpha   => n.nd_alpha,
+                Depth   => n.nd_depth,
+            };
+        }
+    }
+    0.0
+}
+
+// Write it now.  The immediate door — the tween door writes through the same
+// switch, one frame at a time.
+pub fn set_prop(self: Stage, idx: integer, p: Prop, v: float) {
+    write_prop(self, idx, p, v);
+    self.st_dirty = true;
+}
+
+// THE SWITCH.  Every write to a node's number goes through here.
+fn write_prop(self: Stage, idx: integer, p: Prop, v: float) {
+    if idx >= 0 {
+        if idx < len(self.st_nodes) {
+            match p {
+                X       => self.st_nodes[idx].nd_x = v,
+                Y       => self.st_nodes[idx].nd_y = v,
+                Rot     => self.st_nodes[idx].nd_rot = v,
+                ScaleX  => self.st_nodes[idx].nd_sx = v,
+                ScaleY  => self.st_nodes[idx].nd_sy = v,
+                OriginX => self.st_nodes[idx].nd_ox = v,
+                OriginY => self.st_nodes[idx].nd_oy = v,
+                Alpha   => self.st_nodes[idx].nd_alpha = v,
+                Depth   => self.st_nodes[idx].nd_depth = v,
+            }
+        }
+    }
+}
+
+// Move `p` from where it is now to `to`, over `dur_us` microseconds.
+//
+// ⚠ `from` is read at THIS moment, so a tween started mid-flight carries on from
+// where the last one had got to rather than snapping back to a remembered start.
+// Replaces any tween already on this (node, property).
+pub fn tween_prop(self: Stage, idx: integer, p: Prop, to: float, dur_us: integer,
+                  c: Curve = Curve.Linear,
+                  s: Shape = Shape.In) {
+    if idx < 0 or idx >= len(self.st_nodes) { return; }
+    cancel_prop_tween(self, idx, p);
+    self.st_tweens += [NodeTween {
+        nt_node: idx, nt_prop: p,
+        nt_tw: tween_new(prop_of(self, idx, p), to, dur_us, c, s),
+    }];
+}
+
+// Is that property still moving?
+pub fn prop_tweening(self: const Stage, idx: integer, p: Prop) -> boolean {
+    for t in self.st_tweens {
+        if t.nt_node == idx and t.nt_prop == p and !t.nt_tw.done() { return true; }
+    }
+    false
+}
+
+// Stop it wherever it has got to.  The property keeps its current value.
+pub fn cancel_prop_tween(self: Stage, idx: integer, p: Prop) {
+    kept: vector<NodeTween> = [];
+    for t in self.st_tweens {
+        if t.nt_node != idx or t.nt_prop != p { kept += [t]; }
+    }
+    self.st_tweens = kept;
+}
+
+// Drop every tween on a node.
+pub fn cancel_node_tweens(self: Stage, idx: integer) {
+    kept_n: vector<NodeTween> = [];
+    for t in self.st_tweens {
+        if t.nt_node != idx { kept_n += [t]; }
+    }
+    self.st_tweens = kept_n;
+}
+
+// How many property tweens the stage is holding — the gate reads this.
+pub fn tween_count(self: const Stage) -> integer { len(self.st_tweens) }
+
+// Step every property tween and write what it now reads.  Answers whether any of
+// them moved, so `advance` can dirty the buffer exactly when something did.
+fn step_tweens(self: Stage, dt_us: integer) -> boolean {
+    if dt_us <= 0 { return false; }
+    any = false;
+    for i in 0..len(self.st_tweens) {
+        if i < len(self.st_tweens) {
+            if !self.st_tweens[i].nt_tw.done() {
+                _ = self.st_tweens[i].nt_tw.advance(dt_us);
+                write_prop(self, self.st_tweens[i].nt_node,
+                           self.st_tweens[i].nt_prop,
+                           self.st_tweens[i].nt_tw.value());
+                any = true;
+            }
+        }
+    }
+    any
+}
+
+
+// ── P5: facings, and the two models the projection picks between ─────────────
+//
+// ⚠ THE PROJECTION PICKS THE MODEL, NOT THE AUTHOR.  An author writes one call —
+// `face(node, angle)`, "this thing points that way" — and the stage decides what
+// that costs.  A top-down world turns one sprite continuously; a side-on one
+// cannot turn a standing sprite at all, so it picks from an (action, facing)
+// table and mirrors at most.  Putting the choice in the projection is what lets
+// the same mob code serve both views, which is the claim the 2.5-D vehicle rests
+// on.
+
+// One sprite authored in a locked orientation, rotated continuously to the
+// facing.  Pre-rotated frames never exist, so 15-degree steps cost no cells.
+pub const TOP_DOWN: integer = 0;
+// A standing sprite cannot be rotated into another facing — at most mirrored —
+// so the facing selects a sequence and the other side is a flip.
+pub const SIDE_ON: integer = 1;
+
+pub fn set_projection(self: Stage, mode: integer) { self.st_proj = mode; }
+
+pub fn projection(self: const Stage) -> integer { self.st_proj }
+
+pub fn sequence_count(self: const Stage) -> integer { len(self.st_seqs) }
+
+// Register a sequence under a NAME, so `face` and `set_action` can resolve it.
+// The convention is `<key>`, `<key>_<action>`, `<key>_<action>_<facing>`, and
+// resolution walks it most-specific first.
+pub fn add_named_sequence(self: Stage, name: text, first: integer, count: integer,
+                          fps: float, mode: integer) -> integer {
+    push_sequence(self, name, first, count, fps, mode)
+}
+
+// The sequence registered under `name`, or -1.  Names are resolved when a facing
+// or an action CHANGES, never per frame, which is what keeps a scan honest here.
+fn seq_named(self: const Stage, name: text) -> integer {
+    if name == "" { return -1; }
+    found = -1;
+    for i in 0..len(self.st_seqs) {
+        qi = self.st_seqs[i];
+        if qi.q_name == name { found = i; }
+    }
+    found
+}
+
+// Which of the four compass facings an angle points at.
+//
+// ⚠ SCREEN SPACE, Y DOWN: angle 0 is +x (east) and +pi/2 is +y (south), matching
+// `pl_rot` and the shader.  The edges are HALF-OPEN, as A4's picking rects are —
+// 45 degrees belongs to south — so no angle is claimed by two facings.
+pub fn facing_name(angle: float) -> text {
+    turn = PI * 2.0;
+    norm = angle - floor(angle / turn ?? 0.0) * turn;
+    b = ((norm + PI / 4.0) / (PI / 2.0) ?? 0.0) as integer;
+    q = b % 4 ?? 0;
+    if q == 0 { return "e"; }
+    if q == 1 { return "s"; }
+    if q == 2 { return "w"; }
+    "n"
+}
+
+// The facing a flip would show instead, or "" where a flip shows nothing new —
+// a front view mirrored is still a front view, so north and south have no partner.
+fn opposite_facing(f: text) -> text {
+    if f == "e" { return "w"; }
+    if f == "w" { return "e"; }
+    ""
+}
+
+// Resolve a node's sequence from its key, action and facing, and say whether the
+// answer has to be mirrored to face the right way.
+//
+// ⚠ FALL BACK, NEVER FAIL.  A missing sprite leaves the mob drawn with what it
+// already had — the rule crawler's `<key>.png` loader keeps, and the reason a
+// half-authored mob is a visibly wrong sprite rather than a blank or a stop.
+fn resolve_facing(self: Stage, idx: integer) {
+    n = self.st_nodes[idx];
+    if n.nd_key == "" { return; }
+    f = facing_name(n.nd_facing);
+    mirror = false;
+    q = -1;
+    if n.nd_action != "" {
+        q = seq_named(self, "{n.nd_key}_{n.nd_action}_{f}");
+        if q < 0 {
+            // At most mirrored: borrow the other side rather than turning.
+            opp = opposite_facing(f);
+            if opp != "" {
+                q = seq_named(self, "{n.nd_key}_{n.nd_action}_{opp}");
+                if q >= 0 { mirror = true; }
+            }
+        }
+        if q < 0 { q = seq_named(self, "{n.nd_key}_{n.nd_action}"); }
+    }
+    if q < 0 { q = seq_named(self, "{n.nd_key}_{f}"); }
+    if q < 0 { q = seq_named(self, n.nd_key); }
+    if q < 0 { return; }               // nothing matched: keep what it had
+    // ⚠ THE PHASE CARRIES OVER — `nd_elapsed` is deliberately not touched.  A mob
+    // turning a corner mid-stride must keep walking from where its legs were; a
+    // reset here is a visible stutter at the exact moment a player is watching.
+    // `restart` stays the one way to go back to frame 0.
+    self.st_nodes[idx].nd_seq = q;
+    self.st_nodes[idx].nd_mirror = mirror;
+    self.st_dirty = true;
+}
+
+// Point a node at `angle` radians.  Top-down turns it; side-on picks and flips.
+pub fn face(self: Stage, idx: integer, angle: float) {
+    if idx < 0 or idx >= len(self.st_nodes) { return; }
+    self.st_nodes[idx].nd_facing = angle;
+    if self.st_proj == TOP_DOWN {
+        // Continuous, off the 2x3 affine A1 already composes — so a finer step
+        // costs arithmetic and never an atlas entry.
+        self.st_nodes[idx].nd_rot = angle;
+        self.st_nodes[idx].nd_mirror = false;
+        self.st_dirty = true;
+        return;
+    }
+    resolve_facing(self, idx);
+}
+
+// What a node is doing — "idle", "walk", "attack".  Re-resolves, phase intact.
+pub fn set_action(self: Stage, idx: integer, action: text) {
+    if idx < 0 or idx >= len(self.st_nodes) { return; }
+    self.st_nodes[idx].nd_action = action;
+    if self.st_proj == SIDE_ON { resolve_facing(self, idx); }
+}
+
+pub fn facing_of(self: const Stage, idx: integer) -> float {
+    if idx < 0 or idx >= len(self.st_nodes) { return 0.0; }
+    self.st_nodes[idx].nd_facing
+}
+
+pub fn action_of(self: const Stage, idx: integer) -> text {
+    if idx < 0 or idx >= len(self.st_nodes) { return ""; }
+    self.st_nodes[idx].nd_action
+}
+
+// The sprite's own rotation, which side-on leaves alone.
+pub fn rotation_of(self: const Stage, idx: integer) -> float {
+    if idx < 0 or idx >= len(self.st_nodes) { return 0.0; }
+    self.st_nodes[idx].nd_rot
+}
+
+pub fn mirrored(self: const Stage, idx: integer) -> boolean {
+    if idx < 0 or idx >= len(self.st_nodes) { return false; }
+    self.st_nodes[idx].nd_mirror
+}
+
+
+// ── P6: several views over one stage ─────────────────────────────────────────
+//
+// ⚠ ONE SCENE, PACKED ONCE, DRAWN N TIMES.  A view carries only a camera and a
+// screen rect, so adding one costs a draw pass and never a re-pack — which is
+// P2's *the camera is a uniform* carried to N cameras.  A view that baked its
+// camera into node positions would spend A3's entire budget on looking twice.
+//
+// ⚠ AND EVERY VIEW SHARES ONE SCREEN-SPACE PROJECTION.  A view is placed by
+// OFFSETTING into its rect and scissoring to it, not by remapping the clip
+// volume: the software path and the GL path then stay directly comparable — the
+// parity rig A2 and A3b rest on — and a sprite is the same size in every view
+// rather than quietly zoomed by a viewport of a different shape.
+
+pub fn view_count(self: const Stage) -> integer { len(self.st_views) }
+
+// Add a view painting into the screen rect `(x, y, w, h)`.  A width of 0 or less
+// means unbounded — the whole target, which is what view 0 starts as.
+pub fn add_view(self: Stage, x: integer, y: integer, w: integer,
+                h: integer) -> integer {
+    self.st_views += [View { vw_cam_x: 0.0, vw_cam_y: 0.0, vw_x: x, vw_y: y,
+                             vw_w: w, vw_h: h }];
+    len(self.st_views) - 1
+}
+
+pub fn set_view_rect(self: Stage, view: integer, x: integer, y: integer,
+                     w: integer, h: integer) {
+    if view < 0 or view >= len(self.st_views) { return; }
+    self.st_views[view].vw_x = x;
+    self.st_views[view].vw_y = y;
+    self.st_views[view].vw_w = w;
+    self.st_views[view].vw_h = h;
+}
+
+// Move one view's camera.  Like `set_camera`, it does not dirty the buffer.
+pub fn set_view_camera(self: Stage, view: integer, x: float, y: float) {
+    if view < 0 or view >= len(self.st_views) { return; }
+    self.st_views[view].vw_cam_x = x;
+    self.st_views[view].vw_cam_y = y;
+}
+
+fn view_at(self: const Stage, view: integer) -> View {
+    if view < 0 or view >= len(self.st_views) {
+        return View { vw_cam_x: 0.0, vw_cam_y: 0.0, vw_x: 0, vw_y: 0,
+                      vw_w: 0, vw_h: 0 };
+    }
+    // ⚠ ONE OWNERSHIP VERDICT ON EVERY PATH.  Answering `self.st_views[view]`
+    // directly is a BORROW, while the guard above answers a FRESH record — one
+    // function telling its caller two different things about who frees the
+    // result — and on `--native` that corrupted the store several calls later,
+    // reading canvas pixels as a record number (loft#1017).  Copying the fields
+    // out makes every return fresh.
+    v = self.st_views[view] ?? View { vw_cam_x: 0.0, vw_cam_y: 0.0, vw_x: 0,
+                                      vw_y: 0, vw_w: 0, vw_h: 0 };
+    View { vw_cam_x: v.vw_cam_x, vw_cam_y: v.vw_cam_y, vw_x: v.vw_x,
+           vw_y: v.vw_y, vw_w: v.vw_w, vw_h: v.vw_h }
+}
+
+pub fn view_camera_x(self: const Stage, view: integer) -> float {
+    view_at(self, view).vw_cam_x
+}
+
+pub fn view_camera_y(self: const Stage, view: integer) -> float {
+    view_at(self, view).vw_cam_y
+}
+
+// Where a layer's content lands on screen in this view: the camera un-applied by
+// the layer's parallax, then moved into the view's rect.
+//
+// ⚠ THE VIEWPORT ORIGIN IS PART OF THE MAPPING, not decoration.  Leave it out and
+// both views draw on top of each other while every camera test still passes.
+pub fn view_offset(self: const Stage, view: integer, layer: integer) -> P2 {
+    v = view_at(self, view);
+    f = parallax_of(self, layer);
+    P2 { p_x: -v.vw_cam_x * f + (v.vw_x as float),
+         p_y: -v.vw_cam_y * f + (v.vw_y as float) }
+}
+
+// Pack the instance buffer if the scene changed, and say whether it did.
+//
+// One home for *when does the buffer get rewritten*, so the GL path and any
+// count of uploads cannot disagree about it — and so N views can be shown to
+// cost ONE upload without a GL context to prove it in.
+pub fn sync_instances(self: Stage) -> boolean {
+    if !self.st_dirty { return false; }
+    self.st_uploads = self.st_uploads + 1;
+    self.st_dirty = false;
+    true
+}
+
+// The topmost node under a screen point AS THAT VIEW SEES IT, or -1.
+//
+// ⚠ ONE SCREEN POINT IS A DIFFERENT WORLD POINT IN EACH VIEW — the same reason
+// P2 un-applies the camera per LAYER.  A point outside the view's own rect is
+// not that view's to answer, whatever its camera would map it to.
+pub fn pick_in(self: const Stage, view: integer, sx: float, sy: float) -> integer {
+    if !in_view_rect(self, view, sx, sy) { return -1; }
+    k = len(self.st_order) - 1;
+    while k >= 0 {
+        i = self.st_order[k] ?? -1;
+        if hits_in(self, view, i, sx, sy) { return i; }
+        k = k - 1;
+    }
+    -1
+}
+
+// Is this screen point inside the view's rect?  An unbounded view holds every
+// point, which is what keeps the unsplit stage a single code path.
+pub fn in_view_rect(self: const Stage, view: integer, sx: float, sy: float) -> boolean {
+    v = view_at(self, view);
+    if v.vw_w <= 0 or v.vw_h <= 0 { return true; }
+    // Half-open, as A4's picking rects are, so abutting views never both claim
+    // a pixel — the seam of a split screen is exactly where that would show.
+    sx >= (v.vw_x as float) and sy >= (v.vw_y as float)
+        and sx < ((v.vw_x + v.vw_w) as float)
+        and sy < ((v.vw_y + v.vw_h) as float)
+}
+
+// Does this node cover the screen point, as `view` maps it?
+pub fn hits_in(self: const Stage, view: integer, idx: integer, sx: float,
+               sy: float) -> boolean {
+    if idx < 0 or idx >= len(self.st_nodes) { return false; }
+    n = self.st_nodes[idx];
+    if !n.nd_visible or n.nd_w <= 0.0 or n.nd_h <= 0.0 { return false; }
+    off = view_offset(self, view, n.nd_layer);
+    l = to_local(self, idx, sx - off.p_x, sy - off.p_y);
+    if l.p_x < 0.0 or l.p_y < 0.0 or l.p_x >= n.nd_w or l.p_y >= n.nd_h { return false; }
+    solid_at(self, idx, l.p_x, l.p_y)
+}
+
+
+// ── L1: light sampled per sprite, applied as tint ────────────────────────────
+//
+// ⚠ NO PASS, NO FRAMEBUFFER, NO REORDER.  Each sprite samples every light at its
+// own ORIGIN and the answer folds into A5's tint attribute, so lighting a scene
+// costs a multiply per sprite and cannot disturb the draw.  That makes it
+// order-independent by construction, which is the property L2's composite has to
+// work for rather than inherit.
+//
+// ⚠ AND THE SAMPLE POINT IS THE ORIGIN — the footprint P1 sorts on, not the
+// artwork.  Two mobs standing on one tile take the same light however tall they
+// are; sampling a corner would light a tall sprite as though it stood further
+// away, which is the 2.5-D wrong picture wearing a different hat.
+
+// Add a light.  Answers its index, for `move_light`.
+pub fn add_light(self: Stage, x: float, y: float, radius: float, colour: integer,
+                 power: float) -> integer {
+    self.st_lights += [StageLight { lt_x: x, lt_y: y, lt_r: radius, lt_colour: colour,
+                               lt_power: power }];
+    // ⚠ Unlike a camera, a light DIRTIES the buffer: it changes what is in the
+    // instance data rather than how it is looked at.  A moving torch therefore
+    // re-packs every frame, and taking that cost off the per-sprite path is
+    // exactly what L2's composite pass is for.
+    self.st_dirty = true;
+    len(self.st_lights) - 1
+}
+
+pub fn move_light(self: Stage, i: integer, x: float, y: float) {
+    if i < 0 or i >= len(self.st_lights) { return; }
+    self.st_lights[i].lt_x = x;
+    self.st_lights[i].lt_y = y;
+    self.st_dirty = true;
+}
+
+pub fn light_count(self: const Stage) -> integer { len(self.st_lights) }
+
+// How lit the world is before any light: 1.0 leaves the material untouched, so a
+// game that never asks for light cannot be dimmed by this existing.  Turn it
+// down and the scene goes dark except where a light reaches.
+pub fn set_ambient(self: Stage, level: float) {
+    self.st_ambient = level;
+    self.st_dirty = true;
+}
+
+pub fn ambient(self: const Stage) -> float { self.st_ambient }
+
+// What a light contributes at a point: linear in the radius, clamped at both ends.
+//
+// ⚠ LINEAR, `1 - d/r`, and that is a design call.  This phase's gate is
+// hand-computed values, and a curve nobody can hand-compute is a gate nobody
+// maintains.  L2 owns the prettier curve, and its own gate says how: expectations
+// GENERATED from the same constants the shader uses, so retuning is one edit.
+pub fn light_reach(l: const StageLight, px: float, py: float) -> float {
+    if l.lt_r <= 0.0 { return 0.0; }
+    dx = px - l.lt_x;
+    dy = py - l.lt_y;
+    d = sqrt(dx * dx + dy * dy);
+    a = 1.0 - (d / l.lt_r ?? 1.0);
+    if a <= 0.0 { return 0.0; }
+    if a > 1.0 { return 1.0; }
+    // ⚠ ONE HOME FOR THE CURVE.  L2's composite shader takes this same exponent
+    // as a uniform rather than baking a number into its text, so retuning the
+    // falloff is one edit and the per-sprite and per-pixel paths cannot drift.
+    if LIGHT_FALLOFF != 1.0 { a = pow(a, LIGHT_FALLOFF) ?? 0.0; }
+    a * l.lt_power
+}
+
+// The colour a node is actually drawn in: its material, multiplied by the light
+// standing on its footprint.
+//
+// ⚠ ONE HOME.  Both render paths and the instance packer read this rather than
+// each folding the light in themselves — the shape P6 shipped a defect through,
+// where one fact derived per path was validated only where the derivations
+// happened to agree.
+pub fn lit_colour(self: const Stage, idx: integer) -> integer {
+    if idx < 0 or idx >= len(self.st_nodes) { return 0; }
+    n = self.st_nodes[idx];
+    // ⚠ ONE LIGHTING MODEL AT A TIME.  With the map on, the composite lights
+    // every pixel — so the sprite goes in RAW.  Tinting it here as well would
+    // light it twice, and a torch-lit mob would come out darker than the floor
+    // it stands on.
+    if self.st_light_map { return n.nd_colour; }
+    if len(self.st_lights) == 0 and self.st_ambient >= 1.0 { return n.nd_colour; }
+    o = world_origin(self, idx);
+    lv = light_rgb_at(self, o.p_x, o.p_y);
+    lr = lv.li_r;
+    lg = lv.li_g;
+    lb = lv.li_b;
+    // ⚠ CLAMPED PER CHANNEL.  Unclamped, standing between two torches multiplies
+    // past 255 and the byte wraps, so the brightest place in the scene comes out
+    // DARK — the classic and the one everybody finds by accident.
+    pack_channel(n.nd_colour >> 16, lr) << 16
+        | pack_channel(n.nd_colour >> 8, lg) << 8
+        | pack_channel(n.nd_colour, lb)
+}
+
+fn pack_channel(material: integer, level: float) -> integer {
+    k = level;
+    if k < 0.0 { k = 0.0; }
+    if k > 1.0 { k = 1.0; }
+    v = (((material & 255) as float) * k + 0.5) as integer;
+    if v < 0 { return 0; }
+    if v > 255 { return 255; }
+    v
+}
+
+
+// ── L2: the light-map composite pass ─────────────────────────────────────────
+//
+// What L1 cannot do: light that falls ACROSS the scene rather than across the
+// sprites.  The world draws, ONE multiply composite lights every pixel of it —
+// including the gaps no sprite covers, which is why it earns a pass at all — and
+// the HUD draws after, unlit.
+//
+// ⚠ A MULTIPLY AFTER THE SCENE IS ORDER-INDEPENDENT, so this does not fight
+// A3a's *never reorder*: the composite cannot care which sprite was drawn first.
+//
+// ⚠ AND VISIBILITY STAYS THE APP'S.  The light PRESENTS; it does not decide what
+// is seen.  A pixel in the dark is still there, still picked, still in its batch.
+
+// The exponent on `1 - d/r`.  One home, read by `light_reach` and handed to the
+// composite shader as a uniform — never baked into its text, both because a
+// second copy drifts and because loft renders `2.0` as `2`, which GLSL takes as
+// an int and refuses.
+pub const LIGHT_FALLOFF: float = 1.0;
+
+// The sentinel meaning "no HUD band": every layer is world.
+pub const HUD_NONE: integer = 1000000;
+
+// A light level, per channel, 0..1.
+pub struct Lit {
+    li_r: float,
+    li_g: float,
+    li_b: float,
+}
+
+pub fn set_light_map(self: Stage, on: boolean) {
+    self.st_light_map = on;
+    self.st_dirty = true;
+}
+
+pub fn light_map(self: const Stage) -> boolean { self.st_light_map }
+
+// Layers at or above `n` draw AFTER the composite and take no light.
+pub fn set_hud_layer(self: Stage, n: integer) { self.st_hud_layer = n; }
+
+pub fn hud_layer(self: const Stage) -> integer { self.st_hud_layer }
+
+// The light standing at a world point, per channel.
+//
+// ⚠ THE ONE HOME both samplings read: L1 asks it at a sprite's origin, L2 asks
+// it per pixel.  One curve, one floor, one clamp — so the per-sprite and the
+// per-pixel answers cannot disagree about the same point.
+pub fn light_rgb_at(self: const Stage, wx: float, wy: float) -> Lit {
+    lr = self.st_ambient;
+    lg = self.st_ambient;
+    lb = self.st_ambient;
+    for i in 0..len(self.st_lights) {
+        l = self.st_lights[i];
+        a = light_reach(l, wx, wy);
+        // Skipping zero is work avoided, NOT the guard: `light_reach` is the one
+        // place that decides a light out of range contributes nothing, and it is
+        // gated there.  Two places enforcing one rule is how they drift.
+        if a <= 0.0 { continue; }
+        lr = lr + (((l.lt_colour >> 16) & 255) as float / 255.0) * a;
+        lg = lg + (((l.lt_colour >> 8) & 255) as float / 255.0) * a;
+        lb = lb + ((l.lt_colour & 255) as float / 255.0) * a;
+    }
+    Lit { li_r: clamp01(lr), li_g: clamp01(lg), li_b: clamp01(lb) }
+}
+
+// The scalar level at a world point — the green channel of a white light, and
+// the number the monotonic-and-floored invariant is stated about.
+pub fn light_level_at(self: const Stage, wx: float, wy: float) -> float {
+    light_rgb_at(self, wx, wy).li_g
+}
+
+fn clamp01(v: float) -> float {
+    if v < 0.0 { return 0.0; }
+    if v > 1.0 { return 1.0; }
+    v
+}
+
+// Multiply every pixel of the view's rect by the light standing there.
+//
+// ⚠ THE SCREEN IS MAPPED TO THE WORLD THROUGH THE WORLD PLANE — layer 0, the
+// plane lights live on.  A parallaxed background is therefore lit as though it
+// stood on that plane, which is the honest simplification here: per-layer
+// atmosphere is L3's question, not this pass's.
+pub fn composite_light(self: const Stage, view: integer, cv: graphics::Canvas) {
+    if !self.st_light_map { return; }
+    off = view_offset(self, view, 0);
+    vp = view_at(self, view);
+    x0 = 0;
+    y0 = 0;
+    x1 = cv.width;
+    y1 = cv.height;
+    if vp.vw_w > 0 and vp.vw_h > 0 {
+        x0 = vp.vw_x;
+        y0 = vp.vw_y;
+        if vp.vw_x + vp.vw_w < x1 { x1 = vp.vw_x + vp.vw_w; }
+        if vp.vw_y + vp.vw_h < y1 { y1 = vp.vw_y + vp.vw_h; }
+    }
+    if x0 < 0 { x0 = 0; }
+    if y0 < 0 { y0 = 0; }
+    for py in y0..y1 {
+        for px in x0..x1 {
+            lv = light_rgb_at(self, (px as float) - off.p_x, (py as float) - off.p_y);
+            d = cv.get_pixel(px, py);
+            cv.set_pixel(px, py, (d & 0xff000000)
+                | (scale_channel((d >> 16) & 255, lv.li_r) << 16)
+                | (scale_channel((d >> 8) & 255, lv.li_g) << 8)
+                | scale_channel(d & 255, lv.li_b));
+        }
+    }
+}
+
+fn scale_channel(c: integer, level: float) -> integer {
+    v = ((c as float) * level + 0.5) as integer;
+    if v < 0 { return 0; }
+    if v > 255 { return 255; }
+    v
+}
+
+// The composite's fragment shader.  Public so a test can check it reads the
+// falloff and the floor as UNIFORMS rather than carrying its own copy of them.
+pub fn composite_shader_source() -> text { FRAG_LIGHT }
+
+
+// ── L3: per-layer atmosphere — fog and blur ──────────────────────────────────
+//
+// A layer already carries a parallax factor (P2).  Give it a fog colour, a
+// density and a blur radius, and *distant, hazy, out-of-focus* becomes LAYER
+// DATA rather than an effects pipeline.
+//
+// ⚠ FOG IS FREE, BLUR IS NOT.  Fog is a lerp toward a colour, folded into the
+// same per-node mix the depth cue's haze already uses, so it costs nothing and
+// needs no buffer.  Blur has to see a layer's neighbouring pixels, so it is a
+// pass over what has been drawn — which is why they are separate switches and
+// why only one of them is worth thinking about per frame.
+
+// Fade this layer toward `colour`.  Density 0 is clear and changes nothing.
+pub fn set_layer_fog(self: Stage, layer: integer, colour: integer, density: float) {
+    grow_layers(self, layer);
+    if layer < 0 { return; }
+    self.st_layers[layer].ly_fog = colour;
+    self.st_layers[layer].ly_density = density;
+    self.st_dirty = true;
+}
+
+pub fn layer_fog_colour(self: const Stage, layer: integer) -> integer {
+    layer_at(self, layer).ly_fog
+}
+
+pub fn layer_fog_density(self: const Stage, layer: integer) -> float {
+    layer_at(self, layer).ly_density
+}
+
+// Put this layer out of focus by `radius` pixels.  0 is sharp.
+//
+// ⚠ THE BLUR RUNS WHEN THE LAYER FINISHES, so it softens everything drawn up to
+// and including it and NOTHING above — which is what makes a sharp foreground
+// over a hazy distance possible, and what a fullscreen blur cannot do.  Distant
+// bands therefore blur together, which is what *distance is out of focus* means.
+pub fn set_layer_blur(self: Stage, layer: integer, radius: integer) {
+    grow_layers(self, layer);
+    if layer < 0 { return; }
+    self.st_layers[layer].ly_blur = radius;
+}
+
+pub fn layer_blur(self: const Stage, layer: integer) -> integer {
+    layer_at(self, layer).ly_blur
+}
+
+// Box-blur a rectangle of the canvas in place.
+//
+// ⚠ SAMPLES ARE CLAMPED TO THE EDGE, never read as black.  Counting an
+// off-image sample as black loses light everywhere the kernel overhangs, and it
+// shows as a dark frame around the picture — the classic bug this phase gates
+// against.  Clamping keeps a uniform field EXACTLY itself.
+pub fn blur_region(cv: graphics::Canvas, x0: integer, y0: integer, x1: integer,
+                   y1: integer, radius: integer) {
+    // Returning early on 0 is work avoided, NOT the guard: a radius-0 kernel
+    // averages exactly one sample and is already the identity.  What the gate
+    // actually defends is that 0 means NO blur rather than the smallest one.
+    if radius <= 0 { return; }
+    w = x1 - x0;
+    h = y1 - y0;
+    if w <= 0 or h <= 0 { return; }
+    src: vector<integer> = [];
+    for py in y0..y1 {
+        for px in x0..x1 { src += [cv.get_pixel(px, py)]; }
+    }
+    for py in 0..h {
+        for px in 0..w {
+            sr = 0;
+            sg = 0;
+            sb = 0;
+            n = 0;
+            for ky in (py - radius)..(py + radius + 1) {
+                jy = ky;
+                if jy < 0 { jy = 0; }
+                if jy >= h { jy = h - 1; }
+                for kx in (px - radius)..(px + radius + 1) {
+                    jx = kx;
+                    if jx < 0 { jx = 0; }
+                    if jx >= w { jx = w - 1; }
+                    v: integer = src[jy * w + jx] ?? 0;
+                    sr = sr + ((v >> 16) & 255);
+                    sg = sg + ((v >> 8) & 255);
+                    sb = sb + (v & 255);
+                    n = n + 1;
+                }
+            }
+            cv.set_pixel(x0 + px, y0 + py, 0xff000000
+                | (((sr + n / 2 ?? 0) / n ?? 0) << 16)
+                | (((sg + n / 2 ?? 0) / n ?? 0) << 8)
+                | ((sb + n / 2 ?? 0) / n ?? 0));
+        }
+    }
+}

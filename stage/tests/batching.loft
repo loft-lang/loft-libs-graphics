@@ -1,0 +1,135 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN144 A3a — the batcher: contiguous runs, and the instance buffer.
+//
+// The design risk here is not speed, it is ORDER and STRIDE.  A batcher that
+// gathers every command of one atlas together is faster and draws the wrong
+// picture; a stride or offset off by one fails as garbage geometry rather than as
+// an error.  So every expected value below is hand-computed, and the interleave
+// case asserts the COST rather than hiding it.
+use stage;
+
+EPS = 0.0001;
+fn near(a: single, b: float) -> boolean {
+  d = (a as float) - b;
+  d < EPS and -d < EPS
+}
+
+fn sized(atlas: integer, x: float, colour: integer) -> stage::Place {
+  stage::Place { pl_x: x, pl_w: 4.0, pl_h: 4.0, pl_atlas: atlas, pl_colour: colour }
+}
+
+// One atlas: everything merges into a single run.
+fn test_one_atlas_is_one_run() {
+  st = stage::stage_new();
+  for i in 0..5 { _ = st.node_add(-1, sized(7, (i * 10) as float, 0x102030)); }
+  st.compose();
+  bs = st.batches();
+  assert(len(bs) == 1, "one atlas gives one run, got {len(bs)}");
+  assert(bs[0].b_atlas == 7 and bs[0].b_first == 0 and bs[0].b_count == 5,
+         "the run covers every instance");
+}
+
+// Grouped by atlas in scene order: two runs, and the boundary is exactly where
+// the atlas changes.
+fn test_runs_break_where_the_atlas_changes() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, sized(1, 0.0, 0x111111));
+  _ = st.node_add(-1, sized(1, 10.0, 0x222222));
+  _ = st.node_add(-1, sized(2, 20.0, 0x333333));
+  _ = st.node_add(-1, sized(2, 30.0, 0x444444));
+  st.compose();
+  bs = st.batches();
+  assert(len(bs) == 2, "expected 2 runs, got {len(bs)}");
+  assert(bs[0].b_atlas == 1 and bs[0].b_first == 0 and bs[0].b_count == 2, "first run");
+  assert(bs[1].b_atlas == 2 and bs[1].b_first == 2 and bs[1].b_count == 2, "second run");
+}
+
+// ⚠ THE COST, ASSERTED RATHER THAN HIDDEN.  Interleaving two atlases
+// sprite-by-sprite gives ONE INSTANCE PER RUN — four draws for four sprites.
+// A batcher that answered 2 here would be sorting, and sorting reorders the
+// picture under alpha blending.  The cure is packing, not batching: sprites that
+// draw near each other must share a page.
+fn test_interleaving_two_atlases_costs_a_run_each() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, sized(1, 0.0, 0x111111));
+  _ = st.node_add(-1, sized(2, 10.0, 0x222222));
+  _ = st.node_add(-1, sized(1, 20.0, 0x333333));
+  _ = st.node_add(-1, sized(2, 30.0, 0x444444));
+  st.compose();
+  bs = st.batches();
+  assert(len(bs) == 4, "interleaved atlases must NOT be gathered; got {len(bs)} runs");
+  for i in 0..4 { assert(bs[i].b_count == 1 and bs[i].b_first == i, "run {i} is one instance"); }
+}
+
+// A batch indexes the packed buffer directly, so the two walks must agree about
+// which nodes are skipped.
+fn test_batches_and_packing_agree_about_what_is_skipped() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, sized(1, 0.0, 0x111111));
+  _ = st.node_add(-1, stage::Place { pl_x: 5.0 });                       // no size
+  _ = st.node_add(-1, stage::Place { pl_w: 4.0, pl_h: 4.0, pl_visible: false });
+  _ = st.node_add(-1, sized(1, 20.0, 0x222222));
+  st.compose();
+  bs = st.batches();
+  floats = st.pack_instances();
+  assert(len(bs) == 1 and bs[0].b_count == 2, "only the two drawable nodes count");
+  assert(len(floats) == 2 * stage::INSTANCE_STRIDE,
+         "the buffer holds exactly the batched instances: {len(floats)}");
+}
+
+// THE STRIDE GATE.  A node at (10, 20), unit scale, no rotation, size 4x4,
+// colour 0xff8040, alpha 1: the affine columns carry the SIZE, so
+// a = 1*4, b = 0, c = 0, d = 1*4, and the translation is the origin (10, 20).
+// rgba is 255/255, 128/255, 64/255, 1.
+fn test_instance_layout_is_exact() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_x: 10.0, pl_y: 20.0, pl_w: 4.0, pl_h: 4.0,
+                                     pl_colour: 0xff8040 });
+  st.compose();
+  f = st.pack_instances();
+  assert(len(f) == stage::INSTANCE_STRIDE, "one instance is one stride");
+  assert(near(f[stage::OFF_AFFINE + 0], 4.0), "a = sx * w");
+  assert(near(f[stage::OFF_AFFINE + 1], 0.0), "b");
+  assert(near(f[stage::OFF_AFFINE + 2], 0.0), "c");
+  assert(near(f[stage::OFF_AFFINE + 3], 4.0), "d = sy * h");
+  assert(near(f[stage::OFF_AFFINE + 4], 10.0), "tx is the origin x");
+  assert(near(f[stage::OFF_AFFINE + 5], 20.0), "ty is the origin y");
+  // ⚠ This slot carries a FRAME INDEX and the atlas grid, not a uv rect — an
+  // animating sprite must dirty one float per frame, never four.
+  assert(near(f[stage::OFF_CELL + 0], 0.0), "a still sprite is on frame 0");
+  assert(near(f[stage::OFF_CELL + 1], 1.0) and near(f[stage::OFF_CELL + 2], 1.0),
+         "and a 1x1 grid by default");
+  assert(near(f[stage::OFF_RGBA + 0], 1.0), "r");
+  assert(near(f[stage::OFF_RGBA + 1], 128.0 / 255.0), "g");
+  assert(near(f[stage::OFF_RGBA + 2], 64.0 / 255.0), "b");
+  assert(near(f[stage::OFF_RGBA + 3], 1.0), "alpha");
+}
+
+// The second instance must start exactly one stride in — the off-by-one that
+// fails as garbage geometry rather than as an error.
+fn test_the_second_instance_starts_one_stride_in() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_x: 1.0, pl_y: 2.0, pl_w: 1.0, pl_h: 1.0 });
+  _ = st.node_add(-1, stage::Place { pl_x: 7.0, pl_y: 9.0, pl_w: 1.0, pl_h: 1.0 });
+  st.compose();
+  f = st.pack_instances();
+  assert(len(f) == 2 * stage::INSTANCE_STRIDE, "two instances");
+  assert(near(f[stage::INSTANCE_STRIDE + stage::OFF_AFFINE + 4], 7.0), "second tx");
+  assert(near(f[stage::INSTANCE_STRIDE + stage::OFF_AFFINE + 5], 9.0), "second ty");
+}
+
+// Rotation and scale reach the affine, so the shader keeps drawing a unit quad.
+// A quarter turn with size 4x4: local +x becomes world +y, so a = 0, b = 4,
+// and local +y becomes world -x, so c = -4, d = 0.
+fn test_rotation_reaches_the_instance_affine() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_rot: 1.5707963267948966, pl_w: 4.0, pl_h: 4.0 });
+  st.compose();
+  f = st.pack_instances();
+  assert(near(f[stage::OFF_AFFINE + 0], 0.0), "a");
+  assert(near(f[stage::OFF_AFFINE + 1], 4.0), "b");
+  assert(near(f[stage::OFF_AFFINE + 2], -4.0), "c");
+  assert(near(f[stage::OFF_AFFINE + 3], 0.0), "d");
+}

@@ -1,0 +1,327 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// tween — a value moving from one number to another over an exact duration.
+//
+// ── ⚠⚠ THE INVARIANT ────────────────────────────────────────────
+//
+// > **A tween's value is a function of the exact ratio `elapsed / duration`
+// > alone — never of how the frames were cut — and both endpoints are values
+// > it returns EXACTLY.**
+//
+// Two halves, and each of them was measured before it was written.
+//
+// ── ⚠ HALF ONE: TIME IS AN INTEGER, AND THE ALTERNATIVE IS NOT A ROUNDING
+//    DIFFERENCE ─────────────────────────────────────────────────
+//
+// The obvious tween keeps `elapsed` in float seconds and adds `dt` each frame.
+// Measured, one second of it:
+//
+//     30 frames of 1/30 s   sums to   0.99999999999999989
+//     60 frames of 1/60 s   sums to   1.00000000000000133
+//
+// Neither is 1.0 and neither is the other.  So the same animation, at the two
+// most ordinary frame rates, **ends in two different places** — and the 30 Hz
+// one never arrives at all: it stops a hair short of its target and stays
+// there, which is the "it lands on end − ε" bug wearing its other face.
+//
+// ⚠ **They are one defect, not two.**  Fix the accumulation and both go away;
+// clamp the endpoint and only the visible half does.
+//
+// So a duration here is an **integer count of base units**, and `advance` adds
+// integers.  Sixty units of 50 000 and thirty of 100 000 are both exactly
+// 3 000 000, to the bit, and there is nothing left for a frame rate to change.
+//
+// ⚠ **The unit is yours.**  This package never converts seconds to units and
+// never names a rate — feed it whatever integer unit your clock already runs
+// in, as long as it is the same one everywhere.  With `fixstep` that is
+// `CLOCK_UNITS_PER_SECOND` and its `clock_units_from_seconds`; **that is also
+// why this package declares no dependency on it** — a second definition of
+// "how long a second is" is two facts that can disagree, and the conversion
+// already has a home.
+//
+// ── ⚠ HALF TWO: WHICH INTERPOLATION, MEASURED ───────────────────
+//
+// There are two ways to write a linear interpolation and they are not
+// equivalent at the ends:
+//
+//     a + (b − a)·t        lands on `b` for 5 of 8 ordinary pairs
+//     a·(1 − t) + b·t      lands on `b` for 8 of 8
+//
+// ⚠⚠ And the miss is not always an ε.  For `a = 1e17, b = 1.0` the first form
+// answers **0.0** — `(b − a)` loses `b` entirely, and adding it back to `a`
+// cancels to nothing.  A camera pulled from a far coordinate to the origin
+// arrives at zero instead of at one, and no clamp on `t` can see it, because
+// `t` was perfectly 1.0 the whole time.
+//
+// This package uses the second form (`lerp`), so **both** endpoints are exact
+// by construction rather than by a special case.  Swept over `[0, 1]` it also
+// never left `[min(a,b), max(a,b)]` in 8008 samples.
+//
+// ── THE RULES UNDER IT, INHERITED FROM `fixstep` ────────────────
+//
+// 1. **No callbacks, and nothing calls your tick.**  `advance` answers how
+//    much time it did NOT use; `done` answers whether it finished.  A
+//    consumer polls.  That is what lets one tween serve a frame loop, a
+//    server pump, a script runner and a test.
+// 2. **Time never runs backwards.**  A non-positive `advance` is dropped
+//    rather than owed, so a paused consumer handing down zero cannot creep.
+//
+// ── ⚠⚠ WHY `advance` ANSWERS A LEFTOVER, WHICH IS THE WHOLE OF SEQUENCING
+//
+// `fixstep`'s `Timer` DISCARDS whatever time overshoots its boundary, on
+// purpose: a one-shot's residue means nothing afterwards.  In a CHAIN it means
+// everything — it is exactly the time the next link should already have run
+// for.  Measured, ten links of 0.07 s each:
+//
+//     frame rate   discard the residue      carry it
+//     60 Hz        0.833 s                  0.700 s
+//     30 Hz        1.000 s                  0.700 s
+//     24 Hz        0.833 s                  0.708 s
+//
+// ⚠ Discarding does not merely round — it makes the chain's total duration a
+// function of the frame rate, and **43 % long at 30 Hz**.  Carrying costs at
+// most one frame for the WHOLE chain (the 24 Hz cell, whose frame does not
+// divide the total), rather than up to one frame PER LINK.
+//
+// That is why `advance` returns an integer instead of a boolean, and why
+// `Track` is eleven lines rather than a scheduler.
+//
+// ── WHAT IS DELIBERATELY NOT HERE ───────────────────────────────
+//
+// **No setter and no property.**  A tween ANSWERS a number; writing it
+// somewhere is the consumer's, and binding one to a scene-graph property is
+// `@PLN145 C2`'s.  Keeping the write out is what lets the same type drive a
+// camera, a colour channel, an audio gain and a value on a server.
+//
+// **No seconds, no frame rate, no clock.**  See the unit note above.
+//
+// **No vector, colour or transform tween.**  Those are N tweens sharing one
+// clock, and N of these is already that.
+use easing;
+
+// A linear interpolation that lands EXACTLY on both endpoints.
+//
+// ⚠ **`a·(1−t) + b·t`, and the other spelling is not equivalent** — see the
+// header: `a + (b−a)·t` answers 0.0 for `lerp(1e17, 1.0, 1.0)`.  Reach for
+// this one whenever an endpoint has to be hit rather than approached.
+//
+// `t` outside `[0, 1]` extrapolates, which is what makes the overshooting
+// curves (`Back`, `Elastic`) work.
+pub fn lerp(a: float, b: float, t: float) -> float {
+    a * (1.0 - t) + b * t
+}
+
+// One value moving from `from` to `to` over `duration` base units.
+//
+// ⚠ **`duration <= 0` means INSTANT, not unarmed** — it reads `to` and is
+// `done` immediately.  That is the opposite of `fixstep`'s `Timer`, where a
+// zero total means nothing is running, and it is deliberate: "move there over
+// no time" is a step, and a chain built from one must pass straight through
+// it rather than stall.
+pub struct Tween {
+    from: float,
+    to: float,
+
+    // The whole duration, in base units.  Zero or less is instant.
+    duration: integer,
+
+    // Base units of it that have gone by.  Never past `duration`.
+    elapsed: integer,
+
+    // Base units still to wait before `elapsed` starts moving.
+    lead: integer,
+
+    curve: Curve = Curve.Linear,
+    shape: Shape = Shape.In,
+}
+
+// A tween ready to run.
+pub fn tween_new(from: float, to: float, duration: integer,
+                 c: Curve = Curve.Linear, s: Shape = Shape.In) -> Tween {
+    Tween { from: from, to: to, duration: max(duration, 0), elapsed: 0, lead: 0,
+            curve: c, shape: s }
+}
+
+// Wait `units` before starting.
+//
+// ⚠ A door rather than a sixth parameter, for `fixstep`'s reason: a delay is a
+// case some callers have and most do not.  During the wait the tween reads
+// `from` and is not `done`.
+pub fn delay(self: Tween, units: integer) {
+    self.lead = max(units, 0);
+}
+
+// Spend `units` of time on it, and answer how many were LEFT OVER — the time
+// past its end, which is what the next link of a chain must already have run
+// for.  Zero while it is still running.
+//
+// ⚠ Non-positive time is dropped rather than owed (`fixstep`'s rule 2), so a
+// paused consumer may call this every frame.
+pub fn advance(self: Tween, units: integer) -> integer {
+    if units <= 0 { return 0; }
+    left = units;
+    if self.lead > 0 {
+        eat = min(self.lead, left);
+        self.lead = self.lead - eat;
+        left = left - eat;
+        if left <= 0 { return 0; }
+    }
+    if self.duration <= 0 { return left; }
+    room = self.duration - self.elapsed;
+    if room <= 0 { return left; }
+    if left < room {
+        self.elapsed = self.elapsed + left;
+        return 0;
+    }
+    self.elapsed = self.duration;
+    left - room
+}
+
+// How far through it is, before easing — the exact ratio `elapsed / duration`,
+// in `[0, 1]`.
+//
+// ⚠ **It reaches 1.0 and STAYS there**, which is the difference from
+// `fixstep`'s `timer_fraction` (documented `[0, 1)`, and 0.0 again once the
+// timer fires — a tween built on one would snap back to its start the instant
+// it finished).
+pub fn progress(self: const Tween) -> float {
+    if self.duration <= 0 { return 1.0; }
+    if self.elapsed >= self.duration { return 1.0; }
+    if self.elapsed <= 0 { return 0.0; }
+    ((self.elapsed as float) / (self.duration as float)) ?? 0.0
+}
+
+// What it reads right now.
+//
+// ⚠ Exactly `from` before it starts and exactly `to` once it has finished —
+// see the header for why that needs the interpolation to be written one way
+// and not the other.
+pub fn value(self: const Tween) -> float {
+    lerp(self.from, self.to, ease(self.curve, self.shape, progress(self)))
+}
+
+// Has it finished?  A tween still waiting out its `delay` has not.
+pub fn done(self: const Tween) -> boolean {
+    if self.lead > 0 { return false; }
+    self.duration <= 0 || self.elapsed >= self.duration
+}
+
+// Put it back at the start, delay and all — the same tween, run again.
+pub fn rewind(self: Tween, lead: integer = 0) {
+    self.elapsed = 0;
+    self.lead = max(lead, 0);
+}
+
+// How several tweens share one stream of time.
+pub enum Play {
+    // One after another; each link starts where the one before it ended.
+    Chain,
+    // All at once, off the same clock.
+    Parallel,
+}
+
+// Several tweens driven together.
+//
+// ⚠ **It is a rule about time, not a scheduler** — there is no queue, no
+// priority and no callback.  `Chain` hands each link's leftover to the next,
+// which is the entire reason `advance` answers one.
+pub struct Track {
+    steps: vector<Tween>,
+    mode: Play = Play.Chain,
+
+    // Which link is running, for `Chain`.  Past the end when it has finished.
+    at: integer,
+}
+
+// An empty track.
+pub fn track_new(mode: Play = Play.Chain) -> Track {
+    Track { steps: [], mode: mode, at: 0 }
+}
+
+// Add a link.  For `Chain` the order of the calls is the order they run in.
+pub fn add(self: Track, tw: Tween) {
+    self.steps += [tw];
+}
+
+// Spend `units` on the track, and answer the leftover — the same contract one
+// tween has, so a track composes into a chain exactly like a tween does.
+pub fn advance(self: Track, units: integer) -> integer {
+    if units <= 0 { return 0; }
+    match self.mode {
+        Chain    => chain_advance(self, units),
+        Parallel => group_advance(self, units),
+    }
+}
+
+// Each link gets what the previous one did not use.
+//
+// ⚠ The loop is a `for` over a written-down bound rather than a `while`, and
+// that is not a style choice: one pass either finishes a link (so `at` grows)
+// or returns, so `len(steps) + 1` passes is the exact worst case — and a loop
+// whose bound a reader can see is also one loft's admission control can.
+fn chain_advance(self: Track, units: integer) -> integer {
+    left = units;
+    for _ in 0..=len(self.steps) {
+        if left <= 0 { return 0; }
+        i = self.at;
+        if i < len(self.steps) {
+            left = advance(self.steps[i], left);
+            if !done(self.steps[i]) { return 0; }
+            self.at = i + 1;
+        } else {
+            return left;
+        }
+    }
+    left
+}
+
+// Every link gets the same time.
+//
+// ⚠ The group's leftover is the SMALLEST of its links', because the group ends
+// when the last one does — a link that finished early has more time to spare,
+// and reporting that would run the next link of an enclosing chain too far.
+fn group_advance(self: Track, units: integer) -> integer {
+    if len(self.steps) == 0 { return units; }
+    out = units;
+    for i in 0..len(self.steps) {
+        if i < len(self.steps) {
+            out = min(out, advance(self.steps[i], units));
+        }
+    }
+    out
+}
+
+// Have all its links finished?
+pub fn done(self: const Track) -> boolean {
+    for s in self.steps {
+        if !done(s) { return false; }
+    }
+    true
+}
+
+// Which link is running, for `Chain` — `len(steps)` once it has finished.
+pub fn active(self: const Track) -> integer {
+    self.at
+}
+
+// What the link at `i` reads right now.
+//
+// ⚠ A door rather than making a consumer index `steps` itself, because an
+// out-of-range index there reads `null` and this answers `0.0`.
+pub fn value_at(self: const Track, i: integer) -> float {
+    if i >= 0 {
+        if i < len(self.steps) { return value(self.steps[i]); }
+    }
+    0.0
+}
+
+// Put every link back at its start.
+pub fn rewind(self: Track) {
+    for i in 0..len(self.steps) {
+        if i < len(self.steps) {
+            rewind(self.steps[i], 0);
+        }
+    }
+    self.at = 0;
+}
