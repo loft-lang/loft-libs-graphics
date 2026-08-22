@@ -65,3 +65,62 @@ fn test_clamp() {
   assert(clamp(-1.0, 0.0, 10.0) == 0.0, "below-range clamp");
   assert(clamp(15.0, 0.0, 10.0) == 10.0, "above-range clamp");
 }
+
+// A proxy is a SET of boxes, and the point of it is disagreeing with the single
+// box where the single box is wrong.  The shape here is @PLN146 F7a's measured
+// case: a diagonal stick whose AABB is over six times its own art, banded into
+// four boxes down the diagonal.
+fn test_a_proxy_disagrees_with_its_own_bounds_where_it_must() {
+  diag = Proxy{boxes: [
+    Rect{rx:  0.0, ry:  0.0, rw: 4.0, rh: 4.0},
+    Rect{rx:  4.0, ry:  4.0, rw: 4.0, rh: 4.0},
+    Rect{rx:  8.0, ry:  8.0, rw: 4.0, rh: 4.0},
+    Rect{rx: 12.0, ry: 12.0, rw: 4.0, rh: 4.0},
+  ]};
+  // The empty CORNER is the whole reason to carry four boxes instead of one.
+  corner = Rect{rx: 13.0, ry: 1.0, rw: 2.0, rh: 2.0};
+  assert(rects_overlap(diag.bounds(), corner), "the single box says hit");
+  assert(!diag.proxy_hits(corner), "and the proxy says miss — that is the gain");
+  // On the stick itself they agree, or the proxy would just be wrong.
+  on_it = Rect{rx: 5.0, ry: 5.0, rw: 2.0, rh: 2.0};
+  assert(rects_overlap(diag.bounds(), on_it) && diag.proxy_hits(on_it), "both hit");
+
+  // `bounds` is the AABB it replaces.
+  bb = diag.bounds();
+  assert(bb.rx == 0.0 && bb.ry == 0.0 && bb.rw == 16.0 && bb.rh == 16.0, "16x16 hull");
+  // Four 4x4 boxes cover 64 of the 256 the single box claims.
+  assert(diag.area() == 64.0, "area is the sum of the boxes");
+  assert(bb.rw * bb.rh == 256.0, "against 256 for the AABB");
+
+  // Overshoot is measured against the SOLID area, not against the AABB.
+  assert(diag.overshoot(64.0) == 0.0, "exact when the boxes are all art");
+  assert(diag.overshoot(32.0) == 1.0, "twice the art is +100%, F7's bound");
+  assert(diag.overshoot(0.0) == 0.0, "no art to be a multiple of — 0, not a null");
+
+  // The strict boundary is the one the rest of this library uses.
+  touching = Rect{rx: 4.0, ry: 0.0, rw: 2.0, rh: 2.0};
+  assert(!diag.proxy_hits(touching), "sharing an edge is not overlapping");
+}
+
+// An empty proxy hits nothing.  A sprite with no opaque texels derives no boxes,
+// and the answer that keeps it from colliding with the world is `false` — not a
+// zero-size box at the origin, which would collide with anything there.
+fn test_an_empty_proxy_hits_nothing() {
+  empty = Proxy{boxes: []};
+  assert(!empty.proxy_hits(Rect{rx: 0.0, ry: 0.0, rw: 10.0, rh: 10.0}), "no boxes, no hit");
+  assert(empty.area() == 0.0, "no area");
+  eb = empty.bounds();
+  assert(eb.rw == 0.0 && eb.rh == 0.0, "and a zero-size bounds rather than a null");
+}
+
+// Two proxies meet only where a box of each meets.
+fn test_two_proxies_meet_only_where_boxes_do() {
+  left  = Proxy{boxes: [Rect{rx: 0.0, ry: 0.0, rw: 4.0, rh: 4.0},
+                        Rect{rx: 0.0, ry: 8.0, rw: 4.0, rh: 4.0}]};
+  // Sits in the GAP between left's two bands: bounds overlap, boxes do not.
+  gap   = Proxy{boxes: [Rect{rx: 1.0, ry: 5.0, rw: 2.0, rh: 2.0}]};
+  assert(rects_overlap(left.bounds(), gap.bounds()), "the hulls overlap");
+  assert(!left.proxies_overlap(gap), "the boxes do not");
+  hit   = Proxy{boxes: [Rect{rx: 1.0, ry: 9.0, rw: 2.0, rh: 2.0}]};
+  assert(left.proxies_overlap(hit) && hit.proxies_overlap(left), "and symmetric when they do");
+}
