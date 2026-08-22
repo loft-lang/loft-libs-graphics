@@ -111,3 +111,105 @@ pub fn aabb_depth_y(ax: float, ay: float, aw: float, ah: float,
   if !(ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by) { return 0.0; }
   min(ay + ah - by, by + bh - ay)
 }
+
+// ── A derived collision proxy ───────────────────────────────────────
+
+/// A shape approximated by a SET of boxes rather than one.
+///
+/// A sprite's silhouette is rarely a rectangle, and a single bounding box around
+/// a diagonal or an L is mostly empty — a mover well clear of the art still reads
+/// as a hit.  A handful of boxes tracks the silhouette closely enough to fix that
+/// while staying axis-aligned, so every test below is still the cheap one.
+///
+/// The contract a producer owes is CONTAINMENT: every box together must cover
+/// everything solid, so substituting the proxy for the art can only ever over-
+/// report a hit, never miss one. A system validated against the proxy therefore
+/// stays valid when the art changes. Containment alone is satisfied by a
+/// screen-sized box, which is why a producer also bounds the OVERSHOOT — see
+/// `overshoot`.
+///
+/// Measured over a 36-sprite corpus (@PLN146 F7a): 16 boxes banded along the
+/// tighter axis beat a convex hull on mean, median and worst case, and need no
+/// shape kind this library does not already have.
+pub struct Proxy {
+  boxes: vector<Rect>,
+}
+
+/// Does anything in the proxy overlap `r`?
+///
+/// The set test every consumer would otherwise write, with the same STRICT
+/// boundary as `rects_overlap` — a box sharing an edge does not overlap.  An
+/// EMPTY proxy answers false: nothing solid was derived, so nothing can be hit,
+/// which is the answer that keeps a sprite with no opaque texels from colliding
+/// with the world.
+pub fn proxy_hits(self: const Proxy, r: const Rect) -> boolean {
+  for b in self.boxes {
+    if rects_overlap(b, r) { return true }
+  }
+  false
+}
+
+/// Do two proxies overlap anywhere?
+///
+/// Pairwise, because a proxy is small by construction — 16 boxes against 16 is
+/// 256 rect tests in the worst case and stops at the first hit.  Cull with the
+/// cheap `bounds()` box first when both are large.
+pub fn proxies_overlap(self: const Proxy, other: const Proxy) -> boolean {
+  for b in self.boxes {
+    if other.proxy_hits(b) { return true }
+  }
+  false
+}
+
+/// The single box containing every box in the proxy — the AABB it replaces.
+///
+/// Useful as a broad-phase cull before `proxies_overlap`, and as the denominator
+/// when judging whether the proxy earned its extra boxes.  An empty proxy answers
+/// a zero-size box at the origin.
+pub fn bounds(self: const Proxy) -> Rect {
+  if len(self.boxes) == 0 { return Rect{rx: 0.0, ry: 0.0, rw: 0.0, rh: 0.0} }
+  first = self.boxes[0]?;
+  bx0 = first.rx;
+  by0 = first.ry;
+  bx1 = first.rx + first.rw;
+  by1 = first.ry + first.rh;
+  for b in self.boxes {
+    if b.rx < bx0 { bx0 = b.rx; }
+    if b.ry < by0 { by0 = b.ry; }
+    if b.rx + b.rw > bx1 { bx1 = b.rx + b.rw; }
+    if b.ry + b.rh > by1 { by1 = b.ry + b.rh; }
+  }
+  Rect{rx: bx0, ry: by0, rw: bx1 - bx0, rh: by1 - by0}
+}
+
+/// Total area of the proxy's boxes.
+///
+/// Bands from one derivation do not overlap, so for a banded proxy this is the
+/// covered area exactly.  A proxy whose boxes DO overlap counts the shared part
+/// twice, which overstates the area and therefore the overshoot — the honest
+/// direction for a bound.
+pub fn area(self: const Proxy) -> float {
+  pa_total = 0.0;
+  for b in self.boxes { pa_total += b.rw * b.rh; }
+  pa_total
+}
+
+/// How much bigger the proxy is than the thing it stands for, as a fraction.
+///
+/// `solid` is the area actually covered by art — the opaque texel count for a
+/// sprite. `0.0` is exact, `1.0` is twice the size. This is the number a packer
+/// gates on, and the reason containment alone is not the contract: a
+/// screen-sized box contains everything and is useless.
+///
+/// A `solid` of zero or less answers `0.0` rather than dividing: there is nothing
+/// to be a multiple OF, and a null here would propagate into a comparison that
+/// then silently passes.
+///
+/// The trailing `?` is not redundant with that guard.  A divide types `float?`
+/// whatever the code above it proves, so without the discharge this returns a
+/// null into a non-null `float` — which is the very failure the guard is there to
+/// prevent, arriving by the other door.
+pub fn overshoot(self: const Proxy, solid: float) -> float {
+  if solid <= 0.0 { return 0.0 }
+  ((self.area() - solid) / solid)?
+}
