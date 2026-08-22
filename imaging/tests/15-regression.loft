@@ -151,3 +151,35 @@ fn test_save_bad_path_returns_false() {
   ok = img.save_png("no_such_dir_qx9z/out.png");
   assert(!ok, "save to nonexistent dir returns false");
 }
+
+// The encoder chooses RGB or RGBA from the PIXELS, so gaining a channel did not
+// change what an all-opaque image writes.  A saved file that round-trips is the
+// claim; the colour type it round-trips THROUGH is what keeps every existing
+// consumer's output the size it was.
+fn test_save_picks_its_colour_type_from_the_pixels() {
+  src = file("fixture-rgba.png").png();
+  assert(src != null, "fixture decodes");
+
+  // Any alpha below 255 -> RGBA, and the alpha survives the round trip.
+  assert(src.save_png("/tmp/imaging_rt_alpha.png"), "save with alpha");
+  back = file("/tmp/imaging_rt_alpha.png").png();
+  assert(back != null, "reload");
+  assert(len(back.data) == len(src.data), "same pixel count");
+  b2 = back.data[2]?;
+  assert(b2.a == 0, "the transparent texel is still transparent after a round trip");
+  b1 = back.data[1]?;
+  assert(b1.a == 128 && b1.r == 40, "and the partly-transparent one keeps both");
+
+  // Every texel opaque -> RGB, which is byte-for-byte what this wrote before
+  // alpha existed.  Measured as a SIZE: an RGBA file of four pixels is larger.
+  op: vector<Pixel> = [];
+  for i in 0..4 { op += [Pixel{r: 10 * i, g: 20, b: 30}]; }
+  solid = Image{name: "solid", width: 2, height: 2, data: op};
+  assert(solid.save_png("/tmp/imaging_rt_opaque.png"), "save all-opaque");
+  reread = file("/tmp/imaging_rt_opaque.png").png();
+  assert(reread != null, "reload opaque");
+  r0 = reread.data[0]?;
+  r3 = reread.data[3]?;
+  assert(r0.a == 255 && r3.a == 255, "an RGB file reads back opaque");
+  assert(r3.r == 30 && r3.g == 20 && r3.b == 30, "colours intact");
+}

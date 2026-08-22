@@ -4,10 +4,16 @@
 // Types and functions for reading PNG images.
 
 // Data per pixel of a PNG image.
-// Fields r, g, b hold red, green and blue intensity, each 0–255.  The channels
-// are const, so a pixel is REPLACED (`img.data[i] = Pixel{…}`), never edited in
-// place, and `limit(0, 255)` is a range rather than a clamp — a value outside it
-// stores 0.
+// Fields r, g, b hold red, green and blue intensity and `a` holds opacity, each
+// 0–255.  The channels are const, so a pixel is REPLACED (`img.data[i] =
+// Pixel{…}`), never edited in place, and `limit(0, 255)` is a range rather than a
+// clamp — a value outside it stores 0.
+//
+// **`a` defaults to 255, and the default is load-bearing.** An omitted field takes
+// its type's zero, and zero alpha is INVISIBLE — so without the declared default
+// every `Pixel{r, g, b}` ever written would silently become fully transparent
+// (loft#914's `omitted-field-zero` in its purest form).  With it, code that
+// predates alpha keeps meaning what it meant: opaque.
 // Example: @IMG-003 — replacing a pixel, and why the local you read it into is a
 // view of its slot rather than a snapshot.
 // Example: @IMG-004 — the range is not a clamp: doubling a bright channel stores
@@ -15,13 +21,34 @@
 pub struct Pixel {
   const r: integer limit(0, 255),
   const g: integer limit(0, 255),
-  const b: integer limit(0, 255)
+  const b: integer limit(0, 255),
+  const a: integer limit(0, 255) = 255
 }
 
 // Returns the pixel colour as a packed 24-bit integer (0xRRGGBB).
-// Use for fast colour comparison or storage.
+// Use for fast colour comparison or storage.  Alpha is NOT in it — this is the
+// pre-alpha contract and stays 24-bit, so a comparison written against it keeps
+// answering what it answered.  For opacity read `p.a`, or `rgba()` for the packed
+// 32-bit form.
 pub fn value(self: Pixel) -> integer {
   self.r * 0x10000 + self.g * 0x100 + self.b
+}
+
+// Returns the pixel as a packed 32-bit integer (0xAARRGGBB) — the byte order
+// `graphics::Canvas` uses, so a decoded image can be handed to a canvas without a
+// per-channel loop at the call site.
+pub fn rgba(self: Pixel) -> integer {
+  self.a * 0x1000000 + self.r * 0x10000 + self.g * 0x100 + self.b
+}
+
+// Is this texel opaque enough to count as covered?
+//
+// A collision proxy, a trim box and a colour key all want the same question, and
+// they want it with a THRESHOLD rather than `a == 255`: antialiased art has a
+// fringe of partly-transparent texels that belong to the silhouette.  Default 128
+// — half opacity — which is the midpoint of that fringe.
+pub fn opaque(self: Pixel, cutoff: integer = 128) -> boolean {
+  self.a >= cutoff
 }
 
 // Database structure with image data.
@@ -56,13 +83,14 @@ pub fn save_png(self: const Image, path: text) -> boolean {
 // Returns null when there is nothing to decode — the path does not exist, names
 // a directory, or holds bytes this decoder cannot read.  So the answer is either
 // a complete image (`len(data) == width * height`) or null; there is no
-// half-filled Image to guard against.  Any PNG colour type loads: RGBA, greyscale
-// and palette files are folded to RGB, alpha discarded.
+// half-filled Image to guard against.  Any PNG colour type loads: greyscale and
+// palette files are expanded to RGBA, and **alpha is carried** — a file with no
+// alpha channel arrives fully opaque (`a == 255`), never transparent.
 // Use to load sprite sheets or textures.
 // Example: @IMG-001 — the three ways to get null, and the completeness the null
 // check buys past it.
-// Example: @IMG-002 — every colour type arrives as RGB; alpha is DISCARDED, so a
-// sprite sheet needs a colour key rather than a transparency test.
+// Example: @IMG-002 — every colour type arrives as RGBA, and a source without an
+// alpha channel is opaque rather than invisible.
 pub fn png(self: File) -> Image {
   if self.format == Format.TextFile {
     result = Image { };

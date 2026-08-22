@@ -32,7 +32,7 @@ mod image_fields {
     pub const WIDTH: u32 = 0; // integer (i64)
     pub const HEIGHT: u32 = 8; // integer (i64)
     pub const NAME: u32 = 16; // text (record ref)
-    pub const DATA: u32 = 20; // vector ref (Pixel — 3 bytes each)
+    pub const DATA: u32 = 20; // vector ref (Pixel — 4 bytes each)
 }
 
 // Host imports provided by `doc/loft-gl-wasm.js` for the `--html` build.
@@ -50,17 +50,17 @@ unsafe extern "C" {
         h_out: *mut u32,
     ) -> i32;
 
-    /// Copy the decoded RGB bytes for `path`'s basename into
+    /// Copy the decoded RGBA bytes for `path`'s basename into
     /// `dest_ptr..dest_ptr+dest_len`.  Returns `1` on success, `0` on
     /// miss / size mismatch.
-    safe fn imaging_copy_rgb(
+    safe fn imaging_copy_rgba(
         path_ptr: *const u8,
         path_len: usize,
         dest_ptr: *mut u8,
         dest_len: usize,
     ) -> i32;
 
-    /// Encode the RGB bytes at `data_ptr..data_ptr+data_len` (3·w·h
+    /// Encode the RGBA bytes at `data_ptr..data_ptr+data_len` (4·w·h
     /// bytes) as a PNG and trigger a browser download named by the
     /// basename of `path`.  Returns `1` on success, `0` on failure.
     safe fn imaging_save(
@@ -92,7 +92,7 @@ pub fn imaging_load_png(stores: &mut Stores, path: &str, image: &DbRef) -> bool 
             Some(c) => c,
             None => return false,
         };
-        let pixel_bytes = (count as usize).checked_mul(3).unwrap_or(0);
+        let pixel_bytes = (count as usize).checked_mul(4).unwrap_or(0);
         if pixel_bytes == 0 {
             return false;
         }
@@ -102,13 +102,13 @@ pub fn imaging_load_png(stores: &mut Stores, path: &str, image: &DbRef) -> bool 
             .unwrap_or("")
             .to_string();
         let store = stores.store_mut(image);
-        let vec_rec = loft::vector::alloc_vector_from_bytes(store, 3, count, &[]);
+        let vec_rec = loft::vector::alloc_vector_from_bytes(store, 4, count, &[]);
         let payload = store.buffer(vec_rec);
         if payload.len() < pixel_bytes {
             return false;
         }
         let dest_ptr = payload.as_mut_ptr();
-        if imaging_copy_rgb(path.as_ptr(), path.len(), dest_ptr, pixel_bytes) == 0 {
+        if imaging_copy_rgba(path.as_ptr(), path.len(), dest_ptr, pixel_bytes) == 0 {
             return false;
         }
         let store = stores.store_mut(image);
@@ -129,7 +129,7 @@ pub fn imaging_load_png(stores: &mut Stores, path: &str, image: &DbRef) -> bool 
 /// `lib/imaging::save_png(image: Image, path: text) -> boolean`
 ///
 /// `--html` only — reads width/height/data from the Image struct,
-/// hands the RGB bytes to JS which encodes a PNG (`canvas.toBlob`) and
+/// hands the RGBA bytes to JS which encodes a PNG (`canvas.toBlob`) and
 /// triggers a browser download with `path`'s basename as filename.
 pub fn imaging_save_png(stores: &mut Stores, image: &DbRef, path: &str) -> bool {
     #[cfg(target_arch = "wasm32")]
@@ -150,7 +150,7 @@ pub fn imaging_save_png(stores: &mut Stores, image: &DbRef, path: &str) -> bool 
         }
         let store = stores.store_mut(image);
         let payload = store.buffer(data_rec);
-        let needed = match (count as usize).checked_mul(3) {
+        let needed = match (count as usize).checked_mul(4) {
             Some(n) => n,
             None => return false,
         };

@@ -13,7 +13,7 @@
 // extensions matches manifest scan order.
 //
 // The Rust bridge in `lib/imaging/wasm/src/lib.rs` calls these in
-// two steps: imaging_query for dimensions, then imaging_copy_rgb to
+// two steps: imaging_query for dimensions, then imaging_copy_rgba to
 // fill a pre-allocated vector payload directly.  imaging_save uses
 // OffscreenCanvas.convertToBlob + a synthetic <a download> click.
 
@@ -36,7 +36,7 @@
         mem32[h_out >>> 2] = a.height;
         return 1;
       },
-      imaging_copy_rgb(pp, pl, dest, dest_len) {
+      imaging_copy_rgba(pp, pl, dest, dest_len) {
         const name = basename(readStr(pp, pl));
         const a = ctrl.assets && ctrl.assets[name];
         if (!a || !a.bytes || a.bytes.length > dest_len) return 0;
@@ -46,14 +46,12 @@
       imaging_save(pp, pl, w, h, dp, dl) {
         try {
           const name = basename(readStr(pp, pl)) || 'image.png';
-          const rgb = new Uint8Array(getMem().buffer, dp, dl);
-          const rgba = new Uint8ClampedArray(w * h * 4);
-          for (let i = 0, j = 0; j < rgb.length; i += 4, j += 3) {
-            rgba[i] = rgb[j];
-            rgba[i + 1] = rgb[j + 1];
-            rgba[i + 2] = rgb[j + 2];
-            rgba[i + 3] = 255;
-          }
+          // The bridge hands over RGBA, which is ImageData's own layout — the
+          // loop that used to sit here rebuilt it from RGB and forced alpha 255,
+          // so a saved image could never carry transparency.
+          const rgba = new Uint8ClampedArray(
+            getMem().buffer.slice(dp, dp + dl),
+          );
           const canvas = new OffscreenCanvas(w, h);
           const ctx2 = canvas.getContext('2d');
           ctx2.putImageData(new ImageData(rgba, w, h), 0, 0);

@@ -24,19 +24,18 @@ mod image_fields {
     pub const WIDTH: u16 = 0; // integer (i64)
     pub const HEIGHT: u16 = 8; // integer (i64)
     pub const NAME: u16 = 16; // text (record ref)
-    pub const DATA: u16 = 20; // vector ref (Pixel elements, 3 bytes each)
+    pub const DATA: u16 = 20; // vector ref (Pixel elements, 4 bytes each)
 }
 
-/// Decode `path` into exactly `width * height` RGB triples.
+/// Decode `path` into exactly `width * height` RGBA quadruples.
 ///
-/// A loft `Image` is `width * height` three-byte `Pixel` records, so every PNG
-/// colour type has to be folded down to plain 8-bit RGB here — the store layout
-/// has nowhere to put a fourth channel and no way to say "this row is 1 byte per
-/// pixel".  Anything left un-folded is not a smaller image, it is the raw byte
-/// stream re-cut into threes: an RGBA file yields alpha-shifted colours and 4/3
-/// of the pixel count, a greyscale file yields a third of it.  Returns `None`
-/// rather than a mismatched buffer, so the caller's failure path is the one that
-/// runs.
+/// A loft `Image` is `width * height` four-byte `Pixel` records, so every PNG
+/// colour type is expanded to 8-bit RGBA here — there is no way to say "this row
+/// is 1 byte per pixel".  Anything left un-expanded is not a smaller image, it is
+/// the raw byte stream re-cut into fours.  A source with **no alpha channel is
+/// filled 255**, not 0: zero alpha is invisible, so the fallback has to be opaque
+/// or every RGB PNG would decode to nothing.  Returns `None` rather than a
+/// mismatched buffer, so the caller's failure path is the one that runs.
 fn decode_png(path: &str) -> Option<(u32, u32, Vec<u8>)> {
     let file = File::open(path).ok()?;
     let mut decoder = Decoder::new(BufReader::new(file));
@@ -51,27 +50,24 @@ fn decode_png(path: &str) -> Option<(u32, u32, Vec<u8>)> {
     if info.bit_depth != png::BitDepth::Eight {
         return None;
     }
-    let rgb: Vec<u8> = match info.color_type {
-        png::ColorType::Rgb => buf,
-        png::ColorType::Rgba => buf
-            .chunks_exact(4)
-            .flat_map(|p| [p[0], p[1], p[2]])
-            .collect(),
-        png::ColorType::Grayscale => buf.iter().flat_map(|&g| [g, g, g]).collect(),
+    let rgba: Vec<u8> = match info.color_type {
+        png::ColorType::Rgb => buf.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+        png::ColorType::Rgba => buf,
+        png::ColorType::Grayscale => buf.iter().flat_map(|&g| [g, g, g, 255]).collect(),
         png::ColorType::GrayscaleAlpha => buf
             .chunks_exact(2)
-            .flat_map(|p| [p[0], p[0], p[0]])
+            .flat_map(|p| [p[0], p[0], p[0], p[1]])
             .collect(),
         // normalize_to_color8 expands these; reaching here means it did not.
         png::ColorType::Indexed => return None,
     };
     let expected = (info.width as usize)
         .checked_mul(info.height as usize)?
-        .checked_mul(3)?;
-    if rgb.len() != expected {
+        .checked_mul(4)?;
+    if rgba.len() != expected {
         return None;
     }
-    Some((info.width, info.height, rgb))
+    Some((info.width, info.height, rgba))
 }
 
 /// Decode a PNG file and write the result directly into an Image struct.
@@ -99,10 +95,10 @@ pub unsafe extern "C" fn n_load_png(
         store.set_text(image.rec, image.pos, image_fields::NAME, name);
         store.set_long(image.rec, image.pos, image_fields::WIDTH, i64::from(w));
         store.set_long(image.rec, image.pos, image_fields::HEIGHT, i64::from(h));
-        // Create pixel vector and bulk-copy RGB data (3 bytes per Pixel).
+        // Create pixel vector and bulk-copy RGBA data (4 bytes per Pixel).
         let vec = store.alloc_vector_from_bytes(
-            3,
-            pixels.len() as u32 / 3,
+            4,
+            pixels.len() as u32 / 4,
             pixels.as_ptr(),
             pixels.len(),
         );
@@ -111,23 +107,43 @@ pub unsafe extern "C" fn n_load_png(
     true
 }
 
-fn encode_png(path: &str, width: u32, height: u32, rgb_data: &[u8]) -> bool {
+/// Write RGBA texels out, choosing the colour type from the PIXELS.
+///
+/// An all-opaque image is written as RGB, exactly as it was before alpha existed,
+/// so no consumer's output file changes for gaining a channel it does not use —
+/// and one texel below 255 switches the whole file to RGBA.  The same rule
+/// `graphics::save_png` already follows: the choice is read off the pixels rather
+/// than declared, because a flag nobody sets is a flag that is always wrong.
+fn encode_png(path: &str, width: u32, height: u32, rgba_data: &[u8]) -> bool {
     let file = match File::create(path) {
         Ok(f) => f,
         Err(_) => return false,
     };
+    let has_alpha = rgba_data.chunks_exact(4).any(|p| p[3] != 255);
     let mut encoder = png::Encoder::new(BufWriter::new(file), width, height);
-    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_color(if has_alpha {
+        png::ColorType::Rgba
+    } else {
+        png::ColorType::Rgb
+    });
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = match encoder.write_header() {
         Ok(w) => w,
         Err(_) => return false,
     };
-    writer.write_image_data(rgb_data).is_ok()
+    if has_alpha {
+        writer.write_image_data(rgba_data).is_ok()
+    } else {
+        let rgb: Vec<u8> = rgba_data
+            .chunks_exact(4)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect();
+        writer.write_image_data(&rgb).is_ok()
+    }
 }
 
 /// Encode an Image struct as a PNG file.
-/// Reads width, height, and pixel data (3 bytes per Pixel: r, g, b) from the store.
+/// Reads width, height, and pixel data (4 bytes per Pixel: r, g, b, a) from the store.
 #[loft_native]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn n_save_png(
@@ -155,10 +171,10 @@ pub unsafe extern "C" fn n_save_png(
     if count < expected {
         return false;
     }
-    // Each Pixel is 3 bytes (r, g, b) stored contiguously in the vector.
+    // Each Pixel is 4 bytes (r, g, b, a) stored contiguously in the vector.
     let ptr = unsafe { store.vector_data_ptr(&data_ref) };
-    let rgb_data = unsafe { std::slice::from_raw_parts(ptr, (expected * 3) as usize) };
-    encode_png(path, w, h, rgb_data)
+    let rgba_data = unsafe { std::slice::from_raw_parts(ptr, (expected * 4) as usize) };
+    encode_png(path, w, h, rgba_data)
 }
 
 // @PLAN12 phase 2 — the `loft_ffi::loft_register! { … }` symbol list is
