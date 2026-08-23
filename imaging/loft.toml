@@ -2,7 +2,15 @@
 name = "imaging"
 version = "0.3.0"
 loft = ">=0.8"
-api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
+api_compatible_with  = "0.3.0"   # DECLARED BREAK: `Pixel` gained `a`, so the type
+                                 # and its record width both changed.  Source that
+                                 # writes `Pixel{r,g,b}` is unaffected (the field
+                                 # defaults to 255), but `compat check --full` reads
+                                 # the TYPE and calls it an API+DATA break against
+                                 # every prior release — and it is right: positional
+                                 # construction, reflection and anything that
+                                 # persisted an Image all move.  Declaring it is the
+                                 # supported move; hiding it is not.
 data_compatible_with = "0.3.0"   # Pixel went 3 bytes -> 4; a persisted Image from
                                  # an older release reads as shifted colour
 repository = "loft-libs-graphics"
