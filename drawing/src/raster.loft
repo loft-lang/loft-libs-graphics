@@ -137,6 +137,12 @@ fn pil_hline(cv: graphics::Canvas, hx0: integer, hy: integer, hx1: integer, ink:
 ///    `k` is an EDGE index, not a crossing index — so it can move a crossing
 ///    belonging to a different edge.  Reproduced verbatim, because the goldens
 ///    were rendered through it.
+///
+/// ⚠ It scores 124 for control-flow complexity and that is deliberate: this is a
+/// line-for-line port of one C function, and the thing a reader needs to be able to
+/// do is put the two side by side.  Splitting it would make the correspondence
+/// unverifiable and would buy nothing — there is no second caller and no variation
+/// to factor out.
 fn polygon_generic(cv: graphics::Canvas, edges: const vector<Edge>, ink: integer) {
   if len(edges) <= 0 { return }
   pg_table: vector<Edge> = [];

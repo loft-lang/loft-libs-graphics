@@ -101,9 +101,11 @@ typo'd mark has to read as a syntax problem, not as a geometry one.
 - `Elem.` `ename` `seen` `bx0` `by0` `bx1` `by1` — `seen` is false for an element that was
   named and never drawn, which is an absence rather than a box at the origin
 - `circle_pts` · `smooth_pts` · `smooth_vals` · `smooth_applies` · `read_points` · `grey`
-- `raster::` `fill_poly` · `wide_line` · `thin_line` · `round_up` · `round_down` · `pt` —
-  the Pillow-compatible rasteriser, public because anything that wants to agree with the
-  same oracle needs it
+- `raster::` `fill_poly` · `wide_line` · `thin_line` · `round_up` · `round_down` · `pt` ·
+  `Pt` — the Pillow-compatible rasteriser, public because anything that wants to agree with
+  the same oracle needs it. Reach it with a **second `use`** — `use drawing; use raster;` —
+  and qualify as `raster::fill_poly`; the two-level `drawing::raster::…` spelling does not
+  parse
 
 ⚠ The parsed scene is a `Sketch`, not a `Scene`: `mesh3d::Scene` owns that name and
 `graphics` depends on mesh3d, so the collision is a hard error — the same trap
