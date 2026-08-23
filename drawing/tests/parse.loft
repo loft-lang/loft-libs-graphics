@@ -1,0 +1,130 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The line grammar: what each command produces, and what happens to a line no
+// command accepts.
+//
+// The grammar is `draw.py`'s, down to its looseness — options are found ANYWHERE
+// on the line, `Circle` is tried before `Poly`, and a line that matches nothing
+// is reported rather than dropped.  These pin the parts of that a renderer can
+// get wrong without the picture obviously breaking.
+use drawing;
+use graphics;
+
+fn source() -> text {
+  `
+  size 256x200
+  Background transparent
+  name blade
+  Poly (0.1,0.2) (0.9,0.2) (0.5,0.9) rgb=190,60,50
+  Circle (0.5,0.5) r=0.25 n=12 flat=0.3 rgb=10,20,30
+  Line (0.0,0.0) - (1.0,1.0) w=4
+  Poly (0.1,0.1)@6 (0.9,0.9)@2 stroke=250,240,60
+  Poly (0.2,0.2)~ (0.5,0.1)~ (0.8,0.2)~ w=2
+  # a comment, and the next line is not one
+  Wobble (0.1,0.2) r=3
+  `
+}
+
+fn test_paper_and_background() {
+  sc = parse_scene(source());
+  assert(sc.sw == 256 && sc.sh == 200, "size WxH");
+  assert(sc.transparent, "Background transparent");
+}
+
+fn test_a_line_no_command_accepts_is_reported() {
+  sc = parse_scene(source());
+  assert(len(sc.unparsed) == 1, "exactly one unparsed line, got {len(sc.unparsed)}");
+  assert(sc.unparsed[0]?.contains("Wobble"), "the report names the line: {sc.unparsed[0]?}");
+}
+
+fn test_five_marks_five_ops() {
+  sc = parse_scene(source());
+  assert(len(sc.ops) == 5, "five marks, got {len(sc.ops)}");
+  assert(sc.ops[0]?.kind == Fill, "a Poly with rgb= fills");
+  assert(sc.ops[2]?.kind == Stroke, "a Line strokes");
+}
+
+fn test_rgb_is_a_fill_and_stroke_is_a_pen_colour() {
+  sc = parse_scene(source());
+  fill_c = sc.ops[0]?.paint.c1;
+  assert(graphics::color_r(fill_c) == 190 && graphics::color_g(fill_c) == 60
+         && graphics::color_b(fill_c) == 50, "rgb=190,60,50");
+  assert(graphics::color_a(fill_c) == 255, "a fill colour is opaque");
+  pen = sc.ops[3]?.color;
+  assert(graphics::color_r(pen) == 250 && graphics::color_b(pen) == 60,
+         "stroke=250,240,60 colours the pen, it does not fill");
+  assert(sc.ops[3]?.paint.pk == Stroked, "…and leaves the mark unfilled");
+}
+
+fn test_an_uncoloured_mark_takes_the_default_ink() {
+  sc = parse_scene(source());
+  ink = sc.ops[2]?.color;
+  assert(graphics::color_r(ink) == drawing::DEFAULT_INK_R
+         && graphics::color_g(ink) == drawing::DEFAULT_INK_G
+         && graphics::color_b(ink) == drawing::DEFAULT_INK_B, "the dark default ink");
+}
+
+fn test_circle_takes_its_segment_count_and_closes_itself() {
+  sc = parse_scene(source());
+  // `n=12` is twelve segments, so thirteen points: the first is repeated at the
+  // end, which is how the outline closes without an extra edge.
+  assert(len(sc.ops[1]?.pts) == 13, "n=12 gives 13 points, got {len(sc.ops[1]?.pts)}");
+}
+
+fn test_per_point_width_becomes_a_taper() {
+  sc = parse_scene(source());
+  w = sc.ops[3]?.widths;
+  assert(len(w) == 2, "two points carry two widths, got {len(w)}");
+  assert(w[0]? == 6.0 && w[1]? == 2.0, "@6 and @2");
+}
+
+fn test_a_smooth_point_expands_the_outline() {
+  sc = parse_scene(source());
+  // Three control points, all `~`, open: the first point plus ten samples per
+  // segment.
+  assert(len(sc.ops[4]?.pts) == 21, "3 smooth points expand to 21, got {len(sc.ops[4]?.pts)}");
+  assert(len(sc.ops[0]?.pts) == 3, "a Poly with no `~` is left alone");
+}
+
+fn test_name_measures_the_marks_that_follow() {
+  sc = parse_scene(source());
+  assert(len(sc.elems) == 1, "one named element");
+  e = sc.elems[0]?;
+  assert(e.ename == "blade", "the name");
+  assert(e.seen, "it has marks");
+  assert(e.bx0 == 0.0 && e.bx1 == 1.0, "the box spans everything drawn after it");
+}
+
+fn test_a_fill_this_build_does_not_draw_is_listed() {
+  sc = parse_scene("size 8x8\nCircle (0.5,0.5) r=0.3 radial=10,20,30>40,50,60 at=0.5,0.5,0.3\n");
+  assert(len(sc.unparsed) == 0, "a radial fill is not a syntax problem");
+  assert(len(sc.deferred) == 1, "…it is a mark this build does not draw: {len(sc.deferred)}");
+  assert(sc.ops[0]?.paint.pk == Radial, "and it parsed as one");
+}
+
+fn test_fronds_and_petals_are_recognised_not_misread() {
+  // Without their own branch these fall through to `Line`, whose regex would
+  // find the two coordinates on the line and draw a segment nobody wrote.
+  sc = parse_scene("size 8x8\nFronds (0.5,0.9)-(0.5,0.2) n=8 len=0.1\nPetals (0.5,0.5) n=6 r=0.1 len=0.2 w=0.05\n");
+  assert(len(sc.ops) == 0, "neither draws, got {len(sc.ops)} op(s)");
+  assert(len(sc.deferred) == 2, "both are listed");
+  assert(len(sc.unparsed) == 0, "neither is a syntax problem");
+}
+
+fn test_topc_is_not_top() {
+  // `\btop\s*=` must not match inside `topc=`, or a colour ramp reads as a grey
+  // one and the sky comes out monochrome.
+  sc = parse_scene("size 8x8\nBackground topc=30,36,64 botc=92,80,104\n");
+  assert(len(sc.ops) == 1 && sc.ops[0]?.kind == Sky, "one sky op");
+  assert(graphics::color_b(sc.ops[0]?.color) == 64, "the top colour is the colour, not a grey");
+  assert(graphics::color_r(sc.ops[0]?.color2) == 92, "and the bottom colour is read too");
+}
+
+fn test_grey_rounds_half_to_even() {
+  // Python's `round`, which `draw.py` uses here.  `0.5 * 255` is 127.5 and the
+  // even neighbour is 128 — one level, and a byte diff finds it.
+  assert(graphics::color_r(drawing::grey(0.5)) == 128, "fill=0.5 is 128");
+  assert(graphics::color_r(drawing::grey(0.0)) == 0, "fill=0 is black");
+  assert(graphics::color_r(drawing::grey(1.0)) == 255, "fill=1 is white");
+}

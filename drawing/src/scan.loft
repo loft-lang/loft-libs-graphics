@@ -1,0 +1,160 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// scan — the byte-level reader the `.draw` line grammar is built out of.
+//
+// `draw.py` states that grammar as a dozen regular expressions, all of them
+// `search` (match anywhere on the line) and all case-insensitive.  What matters
+// for a port is not that this uses the same engine — it is that it accepts the
+// same lines and reads the same numbers out of them, so the helpers here are
+// shaped after the regex constructs rather than after a tidier grammar:
+// `\b` is `word_boundary`, `[-\d.]+` is `read_number`, `(\d+)` is `read_uint`,
+// and `\s*` is `skip_space`.
+//
+// Everything is BYTE-indexed.  A `.draw` command line is ASCII by construction
+// (a line that is not is a comment, and comments never reach here), so a byte
+// index and a character index are the same number — and `byte_at` reads without
+// decoding, which is what makes a per-character scan of 300 lines cheap.
+
+/// A parse position and what was read there.
+///
+/// A scan either lands (`ok`) or does not, and the caller needs BOTH the value
+/// and where to carry on from, so every reader answers all three at once.
+pub struct Scan {
+  ok: boolean,
+  at: integer,
+  value: float,
+}
+
+pub fn scan_fail() -> Scan { Scan { ok: false, at: 0, value: 0.0 } }
+
+pub fn is_digit(b: integer) -> boolean { b >= 48 && b <= 57 }
+
+/// A regex `\w`: letters, digits and underscore.
+pub fn is_word_byte(b: integer) -> boolean {
+  (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95
+}
+
+/// A regex `\s`: space, tab, and the line endings a stray `\r` leaves behind.
+pub fn is_space_byte(b: integer) -> boolean {
+  b == 32 || b == 9 || b == 10 || b == 13 || b == 12 || b == 11
+}
+
+/// The byte at `i`, or -1 past either end — a value no byte can take, so a
+/// caller never has to bound-check before asking.
+pub fn at(s: text, i: integer) -> integer {
+  if i < 0 || i >= size(s) { -1 } else { s.byte_at(i) }
+}
+
+/// ASCII lowercase of one byte.
+pub fn lower_byte(b: integer) -> integer { if b >= 65 && b <= 90 { b + 32 } else { b } }
+
+/// Past any run of spaces starting at `i`.
+pub fn skip_space(s: text, i: integer) -> integer {
+  sk_i = i;
+  while is_space_byte(at(s, sk_i)) { sk_i += 1; }
+  sk_i
+}
+
+/// Does `s` carry `word` at byte `i`, ignoring case?  (`word` must be lowercase.)
+pub fn matches_at(s: text, i: integer, word: text) -> boolean {
+  ma_n = size(word);
+  if i + ma_n > size(s) { return false }
+  for k in 0..ma_n {
+    if lower_byte(at(s, i + k)) != word.byte_at(k) { return false }
+  }
+  true
+}
+
+/// A regex `\b` before byte `i`: position 0, or a non-word byte to the left.
+pub fn word_boundary(s: text, i: integer) -> boolean {
+  if i <= 0 { return true }
+  !is_word_byte(at(s, i - 1))
+}
+
+/// A regex `([-\d.]+)` — a run of digits, dots and minus signs, read as a number.
+///
+/// The character class is what `draw.py` writes, so this is deliberately loose:
+/// the run is taken first and converted second, and a run that is not a number
+/// fails the scan rather than being silently read as zero.
+pub fn read_number(s: text, i: integer) -> Scan {
+  rn_j = i;
+  while true {
+    rn_b = at(s, rn_j);
+    if is_digit(rn_b) || rn_b == 45 || rn_b == 46 { rn_j += 1; } else { break }
+  }
+  // The class swallows a `-` that is really the next token's separator, and the
+  // regex engine backtracks off it because the pattern after demands it.  Give
+  // back trailing bytes until what is left is a number, which lands on the same
+  // answer without a second pass over the grammar.
+  while rn_j > i {
+    rn_v = s[i..rn_j] as float?;
+    if rn_v != null { return Scan { ok: true, at: rn_j, value: rn_v ?? 0.0 } }
+    rn_j -= 1;
+  }
+  scan_fail()
+}
+
+/// A regex `([\d.]+)` — digits and dots, no sign.
+pub fn read_unsigned(s: text, i: integer) -> Scan {
+  ru_j = i;
+  while true {
+    ru_b = at(s, ru_j);
+    if is_digit(ru_b) || ru_b == 46 { ru_j += 1; } else { break }
+  }
+  while ru_j > i {
+    ru_v = s[i..ru_j] as float?;
+    if ru_v != null { return Scan { ok: true, at: ru_j, value: ru_v ?? 0.0 } }
+    ru_j -= 1;
+  }
+  scan_fail()
+}
+
+/// A regex `(\d+)` — digits only.
+pub fn read_uint(s: text, i: integer) -> Scan {
+  rd_j = i;
+  while is_digit(at(s, rd_j)) { rd_j += 1; }
+  if rd_j == i { return scan_fail() }
+  rd_v = s[i..rd_j] as integer?;
+  if rd_v == null { return scan_fail() }
+  Scan { ok: true, at: rd_j, value: (rd_v ?? 0) as float }
+}
+
+/// The first `\b<key>\s*=\s*` on the line, answering where its VALUE starts.
+///
+/// This is the shape every option regex in `draw.py` opens with, and the
+/// word-boundary is load-bearing rather than decorative: without it `w=` would
+/// also be found inside `w2=`, which is a different option with a different
+/// meaning.  `key` must be lowercase; the match is not.
+pub fn find_option(s: text, key: text) -> Scan {
+  fo_n = size(s);
+  fo_i = 0;
+  while fo_i < fo_n {
+    if word_boundary(s, fo_i) && matches_at(s, fo_i, key) {
+      fo_j = skip_space(s, fo_i + size(key));
+      if at(s, fo_j) == 61 {
+        return Scan { ok: true, at: skip_space(s, fo_j + 1), value: 0.0 }
+      }
+    }
+    fo_i += 1;
+  }
+  scan_fail()
+}
+
+/// The first occurrence of a lowercase `word` at or after `start`, ignoring case
+/// — a regex literal with no boundary condition, which is what `Circle` and
+/// `Line` open with.
+///
+/// The `start` is what makes a failed parse behave like `re.search`: a command
+/// whose first occurrence does not parse is retried from the NEXT one rather
+/// than given up on.
+pub fn find_word_from(s: text, word: text, start: integer) -> Scan {
+  fw_n = size(s);
+  fw_i = if start < 0 { 0 } else { start };
+  while fw_i < fw_n {
+    if matches_at(s, fw_i, word) { return Scan { ok: true, at: fw_i + size(word), value: 0.0 } }
+    fw_i += 1;
+  }
+  scan_fail()
+}
+

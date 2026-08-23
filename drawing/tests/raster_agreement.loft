@@ -1,0 +1,109 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Does the rasteriser still draw what Pillow draws?
+//
+// Every mask below came out of `ImageDraw` itself, so these are not a
+// description of what this code does — they are the answer it has to reproduce.
+// The two edge cases are deliberate: `axis_square` has horizontal edges, which
+// Pillow draws as spans rather than as crossings, and `off_left` hangs off the
+// canvas so its crossings go NEGATIVE, which is the only place the mirrored
+// `ROUND_DOWN` is visible.
+// ⚠ `use drawing;` must come BEFORE `use raster;`.  `raster` is a sibling module of
+// this package, not a package of its own, so nothing resolves it until the package's
+// entry file has been loaded and pulled it in.  Reversed, the CI gate
+// (`loft --interpret --tests tests`) fails with "Library 'raster' not found" while
+// `loft test` — which sets up the package context first — passes.
+use graphics;
+use drawing;
+use raster;
+
+const N = 16;
+
+fn mask_of(cv: const graphics::Canvas) -> text {
+  m = "";
+  for i in 0..(N * N) {
+    m += if ((cv.data[i]? >> 24) & 255) != 0 { "#" } else { "." };
+  }
+  m
+}
+
+fn ink() -> integer { graphics::rgba(200, 40, 30, 255) }
+
+fn test_polygon_matches_pillow() {
+  cv = graphics::canvas(N, N, 0);
+  pts: vector<raster::Pt> = [raster::pt(2.5, 1.5), raster::pt(13.2, 3.9), raster::pt(7.1, 14.6)];
+  raster::fill_poly(cv, pts, ink());
+  assert(mask_of(cv) ==
+"..................#...............######...........###########.." +
+    "...##########.......#########.......########........########...." +
+    ".....######..........######..........#####............####......" +
+    "......###..............##..............#........................", "triangle");
+}
+
+fn test_horizontal_edges_are_spans() {
+  cv = graphics::canvas(N, N, 0);
+  pts: vector<raster::Pt> = [raster::pt(2.0, 2.0), raster::pt(13.0, 2.0),
+                             raster::pt(13.0, 13.0), raster::pt(2.0, 13.0)];
+  raster::fill_poly(cv, pts, ink());
+  assert(mask_of(cv) ==
+"..................................############....############.." +
+    "..############....############....############....############.." +
+    "..############....############....############....############.." +
+    "..############....############..................................", "axis-aligned square");
+}
+
+fn test_even_odd_leaves_the_star_hollow() {
+  cv = graphics::canvas(N, N, 0);
+  pts: vector<raster::Pt> = [raster::pt(8.0, 0.5), raster::pt(10.4, 10.5), raster::pt(1.0, 4.5),
+                             raster::pt(15.0, 4.5), raster::pt(5.6, 10.5)];
+  raster::fill_poly(cv, pts, ink());
+  assert(mask_of(cv) ==
+"........#...............#..............##..............###......" +
+    ".###############...####..#####......###..####.........#..##....." +
+    "......#####..........###.##.........##....##...................." +
+    "................................................................", "self-intersecting star");
+}
+
+fn test_negative_crossings_round_the_mirrored_way() {
+  cv = graphics::canvas(N, N, 0);
+  pts: vector<raster::Pt> = [raster::pt(-9.0, 2.0), raster::pt(6.0, 1.0),
+                             raster::pt(4.0, 14.0), raster::pt(-6.0, 9.0)];
+  raster::fill_poly(cv, pts, ink());
+  assert(mask_of(cv) ==
+"......................##........#######.........#######........." +
+    "#######.........######..........######..........######.........." +
+    "######..........######..........######..........#####..........." +
+    "#####.............###...............#...........................", "polygon hanging off the left edge");
+}
+
+fn test_wide_line_is_a_filled_quad() {
+  cv = graphics::canvas(N, N, 0);
+  raster::wide_line(cv, 2.3, 3.1, 13.8, 12.4, ink(), 5);
+  assert(mask_of(cv) ==
+"...................#...............##.............####.........." +
+    "..######.........########.........########.........########....." +
+    ".....########.........########.........########.........######.." +
+    "..........####.............##...............#...................", "width-5 segment");
+}
+
+fn test_thin_line_puts_its_last_pixel_back() {
+  cv = graphics::canvas(N, N, 0);
+  pts: vector<raster::Pt> = [raster::pt(1.0, 1.0), raster::pt(14.0, 4.0), raster::pt(3.0, 14.0)];
+  raster::thin_line(cv, pts, ink());
+  assert(mask_of(cv) ==
+".................###................####................####...." +
+    "............###..............#..............#..............#...." +
+    "..........#.............##.............#..............#........." +
+    ".....#..............#..............#............................", "thin polyline");
+}
+
+fn test_round_up_and_round_down_mirror_about_zero() {
+  // The sign lives OUTSIDE the floor / ceil, so these are not `floor(f+0.5)` and
+  // `ceil(f-0.5)`.  Getting this wrong loses a span that ends on column 0.
+  assert(raster::round_up(0.5) == 1, "ROUND_UP(0.5)");
+  assert(raster::round_up(-0.5) == -1, "ROUND_UP(-0.5)");
+  assert(raster::round_down(0.5) == 0, "ROUND_DOWN(0.5)");
+  assert(raster::round_down(-0.45) == 0, "ROUND_DOWN(-0.45) is 0, not -1");
+  assert(raster::round_down(-1.5) == -1, "ROUND_DOWN(-1.5)");
+}
