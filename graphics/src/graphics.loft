@@ -534,6 +534,112 @@ pub fn fill_triangle(self: Canvas, tx0: integer, ty0: integer, tx1: integer, ty1
   }
 }
 
+/// A point on the canvas, in pixels.
+///
+/// Exists because a polygon is a LIST of them and `fill_triangle`'s six loose
+/// integers do not generalise — six is already the edge of what a caller gets
+/// right in order, and a polygon has no fixed count.
+///
+/// NOT called `Point`: `mesh3d::LightType` has a `Point` variant and `graphics`
+/// depends on mesh3d, so the name is taken and the collision is a hard error
+/// ("struct 'Point' conflicts with a enumvalue of the same name"). `Vertex` is
+/// mesh3d's too. Reach for `Coord` in 2-D graphics code and the 3-D names stay
+/// where they belong.
+pub struct Coord {
+  px: integer,
+  py: integer,
+}
+
+/// Fill a closed polygon under the EVEN-ODD rule.
+///
+/// The polygon closes itself: the last point joins the first, so a triangle is
+/// three points and not four. Fewer than three points draws nothing.
+///
+/// Even-odd means a point is inside when a ray from it crosses the outline an odd
+/// number of times, so a self-intersecting outline leaves its overlap EMPTY — the
+/// classic five-point star is a pentagon-shaped hole with five filled arms. That
+/// is a choice, not a bug: the alternative (non-zero winding) fills the middle,
+/// and the two disagree on exactly the shapes people draw deliberately.
+///
+/// Matches `fill_triangle` pixel for pixel on a triangle, which is the reason the
+/// row rule below is inclusive rather than the half-open rule a scanline filler
+/// usually takes. See the note on `polygon_crossings`.
+// Example: @GFX-006 — the star's hollow middle, and the triangle agreement.
+pub fn fill_polygon(self: Canvas, pts: const vector<Coord>, color: integer) {
+  fp_n = len(pts);
+  if fp_n < 3 { return; }
+  fp_top = pts[0]?.py;
+  fp_bot = fp_top;
+  for p in pts {
+    if p.py < fp_top { fp_top = p.py; }
+    if p.py > fp_bot { fp_bot = p.py; }
+  }
+  if fp_top < 0 { fp_top = 0; }
+  if fp_bot >= self.height { fp_bot = self.height - 1; }
+  for fp_y in fp_top..=fp_bot {
+    fp_xs = polygon_crossings(pts, fp_y, fp_y == fp_bot);
+    fp_i = 0;
+    while fp_i + 1 < len(fp_xs) {
+      // Inclusive span, like `fill_triangle`: `hline` takes a half-open end, so
+      // the right edge is +1.
+      self.hline(fp_xs[fp_i]?, fp_xs[fp_i + 1]? + 1, fp_y, color);
+      fp_i += 2;
+    }
+  }
+}
+
+/// Where the outline crosses scanline `y`, left to right.
+///
+/// The rule is HALF-OPEN on an edge's lower end (`ylo <= y < yhi`) and that is
+/// what makes even-odd work: a vertex the outline passes straight through belongs
+/// to exactly one of its two edges, so it counts once. Count it twice — the
+/// obvious inclusive rule — and a through-vertex yields two crossings at the same
+/// x, which pair with each other and fill a single pixel where a whole span
+/// belonged.
+///
+/// The cost is that the polygon's LOWEST row loses every edge, so `closing` turns
+/// the rule inclusive for exactly that row. It is safe there and nowhere else: the
+/// half-open rule exists to disambiguate a vertex the outline passes THROUGH, and
+/// the extreme row has none — every edge meeting it goes back up, so no crossing
+/// is counted twice. Measured: left half-open throughout, a triangle loses its
+/// bottom vertex (1 px) or its whole base (34 px on a 34-wide one), which was the
+/// entire `fill_triangle` disagreement.
+fn polygon_crossings(pc_pts: const vector<Coord>, pc_y: integer,
+                     closing: boolean) -> vector<integer> {
+  pc_out: vector<integer> = [];
+  pc_n = len(pc_pts);
+  for i in 0..pc_n {
+    pc_a = pc_pts[i]?;
+    pc_b = pc_pts[(i + 1) % pc_n]?;
+    pc_ylo = if pc_a.py < pc_b.py { pc_a.py } else { pc_b.py };
+    pc_yhi = if pc_a.py < pc_b.py { pc_b.py } else { pc_a.py };
+    // A horizontal edge crosses no scanline: its endpoints are already carried by
+    // the two edges that meet it, and counting it would flip parity along a row it
+    // only touches.
+    if pc_ylo == pc_yhi { continue }
+    if pc_y < pc_ylo { continue }
+    if pc_y > pc_yhi { continue }
+    if pc_y == pc_yhi && !closing { continue }
+    // Interpolate from the edge's TOP end, and multiply before dividing — the
+    // same integer-precision rule `fill_triangle` documents.
+    pc_ty = if pc_a.py < pc_b.py { pc_a } else { pc_b };
+    pc_by = if pc_a.py < pc_b.py { pc_b } else { pc_a };
+    pc_out += [pc_ty.px + ((pc_by.px - pc_ty.px) * (pc_y - pc_ty.py) / (pc_by.py - pc_ty.py) ?? 0)];
+  }
+  // Insertion sort: a crossing list is a handful of numbers, and a fresh vector
+  // per scanline would cost more than the compare.
+  for i in 1..len(pc_out) {
+    pc_v = pc_out[i]?;
+    pc_j = i;
+    while pc_j > 0 && pc_out[pc_j - 1]? > pc_v {
+      pc_out[pc_j] = pc_out[pc_j - 1]?;
+      pc_j -= 1;
+    }
+    pc_out[pc_j] = pc_v;
+  }
+  pc_out
+}
+
 // Native: write packed pixel data to a PNG file.
 fn save_png_raw(path: text, width: integer, height: integer, data: const vector<integer>) -> boolean;
 #native "loft_save_png"
