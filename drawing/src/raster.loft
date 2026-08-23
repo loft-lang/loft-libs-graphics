@@ -1,0 +1,387 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// raster — Pillow's polygon and thick-line rasteriser, reproduced exactly.
+//
+// ── ⚠ WHY THIS IS NOT `graphics::fill_polygon` ──────────────────────
+//
+// `graphics` already fills polygons, and this deliberately does not call it.
+// The two answer different questions:
+//
+//   * `graphics::fill_polygon` agrees with `graphics::fill_triangle`, pixel for
+//     pixel, on every triangle — a gated, published contract.  It interpolates
+//     each crossing in INTEGER arithmetic and fills an inclusive span between a
+//     pair of them.
+//   * this fills the pixels whose CENTRES fall inside the outline, in C `float`,
+//     which is what `ImageDraw.polygon` does.
+//
+// They are different rules and they disagree constantly: on 400 random polygons
+// the two agree on **4**, and on `graphics`' own reference triangle they differ
+// by 35 pixels.  A `.draw` scene is specified by what `draw.py` renders, and
+// `draw.py`'s filler *is* Pillow — so a renderer that wants to be diffed against
+// the corpus has to sign Pillow's rule, not a better one.
+//
+// ── ⚠ THE `single` IS LOAD-BEARING ──────────────────────────────────
+//
+// `Edge.dx` and the crossing array are C `float` (32-bit) in `Draw.c`, and the
+// two exact-equality tests below — "is this crossing an integer?" and "do these
+// two edges cross at the same x?" — read that rounding.  Widen them to `float`
+// and 12 of 500 random polygons rasterise differently.  Every value that is a C
+// `float` there is a `single` here, and the arithmetic is per-operation binary32
+// on both backends.
+//
+// Ported from Pillow 10.2.0, `src/libImaging/Draw.c` + `src/_imaging.c`.
+use graphics;
+
+/// A point in canvas pixels, before Pillow truncates it to a whole pixel.
+///
+/// The truncation is `(int)` on a C double — toward ZERO, so `-0.4` lands on 0
+/// and not on -1.  Keep coordinates fractional right up to the rasteriser and
+/// the port and the oracle round the same way.
+pub struct Pt {
+  ptx: float,
+  pty: float,
+}
+
+/// Build a point without spelling the field names.
+pub fn pt(px: float, py: float) -> Pt {
+  Pt { ptx: px, pty: py }
+}
+
+/// One outline edge, field for field as `Edge` in `Draw.c`.
+struct Edge {
+  exmin: integer,
+  exmax: integer,
+  eymin: integer,
+  eymax: integer,
+  edx: single,
+  ex0: integer,
+  ey0: integer,
+}
+
+/// `ROUND_UP` from `Draw.c` — half AWAY from zero.
+///
+/// Not `floor(f + 0.5)`: the sign lives outside, so the negative side mirrors
+/// the positive one exactly (`ROUND_UP(-0.5)` is -1, not 0).
+pub fn round_up(ru_v: float) -> integer {
+  if ru_v >= 0.0 { floor(ru_v + 0.5) as integer }
+  else { -(floor(abs(ru_v) + 0.5) as integer) }
+}
+
+/// `ROUND_DOWN` from `Draw.c` — `ceil(f - 0.5)`, mirrored about zero.
+///
+/// The mirroring is the whole subtlety: `ROUND_DOWN(-0.45)` is **0**, because
+/// the `ceil` runs on `|f| - 0.5` and the sign is applied afterwards.  Take the
+/// obvious `ceil(-0.95)` instead and a span that should end on column 0 ends on
+/// column -1, which clips away and draws nothing.
+pub fn round_down(rd_v: float) -> integer {
+  if rd_v >= 0.0 { ceil(rd_v - 0.5) as integer }
+  else { -(ceil(abs(rd_v) - 0.5) as integer) }
+}
+
+/// C `roundf` on a 32-bit float: half away from zero, answer stays binary32.
+fn roundf(rf_v: single) -> single {
+  rf_d = rf_v as float;
+  if rf_d >= 0.0 { floor(rf_d + 0.5) as single } else { ceil(rf_d - 0.5) as single }
+}
+
+/// `add_edge` from `Draw.c`.
+fn make_edge(mx0: integer, my0: integer, mx1: integer, my1: integer) -> Edge {
+  Edge {
+    exmin: if mx0 <= mx1 { mx0 } else { mx1 },
+    exmax: if mx0 <= mx1 { mx1 } else { mx0 },
+    eymin: if my0 <= my1 { my0 } else { my1 },
+    eymax: if my0 <= my1 { my1 } else { my0 },
+    edx: if my0 == my1 { 0.0f }
+         else { (((mx1 - mx0) as single) / ((my1 - my0) as single) ?? 0.0f) },
+    ex0: mx0,
+    ey0: my0,
+  }
+}
+
+/// Where an edge meets scanline `y`, in the `float` `Draw.c` carries it in.
+fn edge_x(exe: const Edge, exy: integer) -> single {
+  ((exy - exe.ey0) as single) * exe.edx + (exe.ex0 as single)
+}
+
+/// `hline32` from `Draw.c`: an INCLUSIVE span `[x0, x1]`, clipped to the canvas.
+///
+/// It STORES the ink rather than compositing it — `ImageDraw` on an RGBA image
+/// replaces the pixel, alpha included, which is why a half-transparent mark does
+/// not show what was under it.
+fn pil_hline(cv: graphics::Canvas, hx0: integer, hy: integer, hx1: integer, ink: integer) {
+  if hy < 0 || hy >= cv.height { return }
+  hl_lo = hx0;
+  hl_hi = hx1;
+  if hl_lo < 0 { hl_lo = 0; } else if hl_lo >= cv.width { return }
+  if hl_hi < 0 { return } else if hl_hi >= cv.width { hl_hi = cv.width - 1; }
+  if hl_lo > hl_hi { return }
+  hl_d = &cv.data;
+  hl_base = hy * cv.width;
+  for hl_x in hl_lo..=hl_hi {
+    hl_d[hl_base + hl_x] = ink;
+  }
+}
+
+/// `polygon_generic` from `Draw.c`, in the non-blending 32-bit form
+/// `ImageDraw.Draw(rgba_image)` selects.
+///
+/// Three things here look like mistakes and are the contract:
+///
+///  * a HORIZONTAL edge is drawn immediately, as a span from its own `xmin` to
+///    its own `xmax`, and takes no part in the scanline crossings;
+///  * an edge ending on this row contributes its crossing TWICE (unless the row
+///    is the polygon's last), which is how a vertex the outline passes through
+///    keeps the parity right;
+///  * the "connect discontiguous corners" repair writes back to `xx[k]` where
+///    `k` is an EDGE index, not a crossing index — so it can move a crossing
+///    belonging to a different edge.  Reproduced verbatim, because the goldens
+///    were rendered through it.
+fn polygon_generic(cv: graphics::Canvas, edges: const vector<Edge>, ink: integer) {
+  if len(edges) <= 0 { return }
+  pg_table: vector<Edge> = [];
+  pg_ymin = cv.height - 1;
+  pg_ymax = 0;
+  for e in edges {
+    if pg_ymin > e.eymin { pg_ymin = e.eymin; }
+    if pg_ymax < e.eymax { pg_ymax = e.eymax; }
+    if e.eymin == e.eymax {
+      pil_hline(cv, e.exmin, e.eymin, e.exmax, ink);
+      continue
+    }
+    pg_table += [e];
+  }
+  if pg_ymin < 0 { pg_ymin = 0; }
+  if pg_ymax > cv.height { pg_ymax = cv.height; }
+  pg_ec = len(pg_table);
+  if pg_ec == 0 { return }
+  // One crossing buffer for the whole polygon, exactly as `Draw.c` allocates it:
+  // the corner repair reaches back into it by edge index, so it must persist
+  // across the row and must be at least two slots per edge.
+  pg_xx: vector<single> = [];
+  for _ in 0..(pg_ec * 2) { pg_xx += [0.0f]; }
+  pg_y = pg_ymin;
+  while pg_y <= pg_ymax {
+    pg_j = 0;
+    for i in 0..pg_ec {
+      pg_cur = pg_table[i]?;
+      if pg_y >= pg_cur.eymin && pg_y <= pg_cur.eymax {
+        pg_xx[pg_j] = edge_x(pg_cur, pg_y);
+        pg_j += 1;
+        if pg_y == pg_cur.eymax && pg_y < pg_ymax {
+          pg_xx[pg_j] = pg_xx[pg_j - 1]?;
+          pg_j += 1;
+        } else if pg_cur.edx != 0.0f && roundf(pg_xx[pg_j - 1]?) == pg_xx[pg_j - 1]? {
+          for k in 0..i {
+            pg_oth = pg_table[k]?;
+            if (pg_cur.edx > 0.0f && pg_oth.edx <= 0.0f)
+               || (pg_cur.edx < 0.0f && pg_oth.edx >= 0.0f) { continue }
+            if ((pg_y == pg_cur.eymin && pg_y == pg_oth.eymin)
+                || (pg_y == pg_cur.eymax && pg_y == pg_oth.eymax))
+               && pg_xx[pg_j - 1]? == edge_x(pg_oth, pg_y) {
+              // The row below (or above, on the last row) says which side the
+              // two edges leave the corner on.
+              pg_off = if pg_y == pg_ymax { -1 } else { 1 };
+              pg_ac = edge_x(pg_cur, pg_y + pg_off);
+              pg_ao = edge_x(pg_oth, pg_y + pg_off);
+              if pg_y == pg_cur.eymax {
+                if pg_cur.edx > 0.0f {
+                  pg_xx[k] = (if pg_ac > pg_ao { pg_ac } else { pg_ao }) + 1.0f;
+                } else {
+                  pg_xx[k] = (if pg_ac < pg_ao { pg_ac } else { pg_ao }) - 1.0f;
+                }
+              } else {
+                if pg_cur.edx > 0.0f {
+                  pg_xx[k] = if pg_ac < pg_ao { pg_ac } else { pg_ao };
+                } else {
+                  pg_xx[k] = (if pg_ac > pg_ao { pg_ac } else { pg_ao }) + 1.0f;
+                }
+              }
+              break
+            }
+          }
+        }
+      }
+    }
+    // Insertion sort over `xx[0 .. j)` — a row holds a handful of crossings, and
+    // equal ones are interchangeable, so this and `Draw.c`'s `qsort` agree.
+    pg_s = 1;
+    while pg_s < pg_j {
+      pg_v = pg_xx[pg_s]?;
+      pg_t = pg_s;
+      while pg_t > 0 && pg_xx[pg_t - 1]? > pg_v {
+        pg_xx[pg_t] = pg_xx[pg_t - 1]?;
+        pg_t -= 1;
+      }
+      pg_xx[pg_t] = pg_v;
+      pg_s += 1;
+    }
+    pg_p = 1;
+    while pg_p < pg_j {
+      pil_hline(cv, round_up(pg_xx[pg_p - 1]? as float), pg_y,
+                round_down(pg_xx[pg_p]? as float), ink);
+      pg_p += 2;
+    }
+    pg_y += 1;
+  }
+}
+
+/// Fill a polygon the way `ImageDraw.polygon(pts, fill=…)` does.
+///
+/// The outline closes itself only when the last point is not already the first —
+/// a circle handed in with its start repeated gets no extra edge, which is how
+/// `draw.py` passes one.
+pub fn fill_poly(cv: graphics::Canvas, pts: const vector<Pt>, ink: integer) {
+  fp_count = len(pts);
+  if fp_count <= 0 { return }
+  fp_xs: vector<integer> = [];
+  fp_ys: vector<integer> = [];
+  for p in pts {
+    fp_xs += [p.ptx as integer];
+    fp_ys += [p.pty as integer];
+  }
+  fp_edges: vector<Edge> = [];
+  fp_i = 0;
+  while fp_i < fp_count - 1 {
+    fp_x0 = fp_xs[fp_i]?;
+    fp_y0 = fp_ys[fp_i]?;
+    fp_x1 = fp_xs[fp_i + 1]?;
+    fp_y1 = fp_ys[fp_i + 1]?;
+    fp_merged = false;
+    // Two horizontal steps running the same way are ONE span in Pillow, so the
+    // second widens the first edge instead of adding its own.
+    if fp_y0 == fp_y1 && fp_i != 0 && fp_y0 == fp_ys[fp_i - 1]? && len(fp_edges) > 0 {
+      fp_prev = fp_xs[fp_i - 1]?;
+      fp_last = len(fp_edges) - 1;
+      fp_e = fp_edges[fp_last]?;
+      if fp_x1 > fp_x0 && fp_x0 > fp_prev {
+        fp_edges[fp_last] = Edge { exmin: fp_e.exmin, exmax: fp_x1, eymin: fp_e.eymin,
+                                   eymax: fp_e.eymax, edx: fp_e.edx, ex0: fp_e.ex0,
+                                   ey0: fp_e.ey0 };
+        fp_merged = true;
+      } else if fp_x1 < fp_x0 && fp_x0 < fp_prev {
+        fp_edges[fp_last] = Edge { exmin: fp_x1, exmax: fp_e.exmax, eymin: fp_e.eymin,
+                                   eymax: fp_e.eymax, edx: fp_e.edx, ex0: fp_e.ex0,
+                                   ey0: fp_e.ey0 };
+        fp_merged = true;
+      }
+    }
+    if !fp_merged {
+      fp_edges += [make_edge(fp_x0, fp_y0, fp_x1, fp_y1)];
+    }
+    fp_i += 1;
+  }
+  fp_end = fp_count - 1;
+  if fp_xs[fp_end]? != fp_xs[0]? || fp_ys[fp_end]? != fp_ys[0]? {
+    fp_edges += [make_edge(fp_xs[fp_end]?, fp_ys[fp_end]?, fp_xs[0]?, fp_ys[0]?)];
+  }
+  polygon_generic(cv, fp_edges, ink);
+}
+
+/// One thick segment, the way `ImageDraw.line(…, width=w)` draws it for `w > 1`.
+///
+/// Pillow does not stroke — it builds a four-cornered quad around the segment
+/// and fills that, with the two half-widths rounded APART (`ROUND_UP` one side,
+/// `ROUND_DOWN` the other) so an even width still lands on whole pixels.  A
+/// polyline is therefore a series of independent quads with no joins, and the
+/// overlap at a bend is what rounds the corner.
+pub fn wide_line(cv: graphics::Canvas, wx0: float, wy0: float, wx1: float, wy1: float,
+                 ink: integer, wwidth: integer) {
+  wl_x0 = wx0 as integer;
+  wl_y0 = wy0 as integer;
+  wl_x1 = wx1 as integer;
+  wl_y1 = wy1 as integer;
+  wl_dx = wl_x1 - wl_x0;
+  wl_dy = wl_y1 - wl_y0;
+  if wl_dx == 0 && wl_dy == 0 {
+    cv.set_pixel(wl_x0, wl_y0, ink);
+    return
+  }
+  wl_big = sqrt(((wl_dx * wl_dx + wl_dy * wl_dy) as float));
+  wl_small = (((wwidth - 1) as float) / 2.0 ?? 0.0);
+  wl_rmax = ((round_up(wl_small) as float) / wl_big ?? 0.0);
+  wl_rmin = ((round_down(wl_small) as float) / wl_big ?? 0.0);
+  wl_dxmin = round_down(wl_rmin * (wl_dy as float));
+  wl_dxmax = round_down(wl_rmax * (wl_dy as float));
+  wl_dymin = round_down(wl_rmin * (wl_dx as float));
+  wl_dymax = round_down(wl_rmax * (wl_dx as float));
+  wl_vx: vector<integer> = [wl_x0 - wl_dxmin, wl_x1 - wl_dxmin,
+                            wl_x1 + wl_dxmax, wl_x0 + wl_dxmax];
+  wl_vy: vector<integer> = [wl_y0 + wl_dymax, wl_y1 + wl_dymax,
+                            wl_y1 - wl_dymin, wl_y0 - wl_dymin];
+  wl_edges: vector<Edge> = [];
+  for k in 0..4 {
+    wl_edges += [make_edge(wl_vx[k]?, wl_vy[k]?, wl_vx[(k + 1) % 4]?, wl_vy[(k + 1) % 4]?)];
+  }
+  polygon_generic(cv, wl_edges, ink);
+}
+
+/// `line32` from `Draw.c` — Bresenham, and it stops one pixel SHORT of the end.
+///
+/// `draw_lines` puts that missing pixel back after the last segment, which is
+/// why this is a polyline call rather than a segment one: split it into
+/// segments and each one grows a pixel Pillow never drew.
+pub fn thin_line(cv: graphics::Canvas, pts: const vector<Pt>, ink: integer) {
+  tl_n = len(pts);
+  if tl_n < 2 { return }
+  tl_lx = 0;
+  tl_ly = 0;
+  for i in 0..(tl_n - 1) {
+    tl_a = pts[i]?;
+    tl_b = pts[i + 1]?;
+    tl_lx = tl_b.ptx as integer;
+    tl_ly = tl_b.pty as integer;
+    bresenham(cv, tl_a.ptx as integer, tl_a.pty as integer, tl_lx, tl_ly, ink);
+  }
+  cv.set_pixel(tl_lx, tl_ly, ink);
+}
+
+/// The Bresenham walk itself, end-exclusive.
+fn bresenham(cv: graphics::Canvas, bx0: integer, by0: integer, bx1: integer, by1: integer,
+             ink: integer) {
+  br_x = bx0;
+  br_y = by0;
+  br_dx = bx1 - bx0;
+  br_xs = 1;
+  if br_dx < 0 { br_dx = -br_dx; br_xs = -1; }
+  br_dy = by1 - by0;
+  br_ys = 1;
+  if br_dy < 0 { br_dy = -br_dy; br_ys = -1; }
+  if br_dx == 0 {
+    for _ in 0..br_dy {
+      cv.set_pixel(br_x, br_y, ink);
+      br_y += br_ys;
+    }
+    return
+  }
+  if br_dy == 0 {
+    for _ in 0..br_dx {
+      cv.set_pixel(br_x, br_y, ink);
+      br_x += br_xs;
+    }
+    return
+  }
+  if br_dx > br_dy {
+    br_n = br_dx;
+    br_dy += br_dy;
+    br_e = br_dy - br_dx;
+    br_dx += br_dx;
+    for _ in 0..br_n {
+      cv.set_pixel(br_x, br_y, ink);
+      if br_e >= 0 { br_y += br_ys; br_e -= br_dx; }
+      br_e += br_dy;
+      br_x += br_xs;
+    }
+    return
+  }
+  br_n2 = br_dy;
+  br_dx += br_dx;
+  br_e2 = br_dx - br_dy;
+  br_dy += br_dy;
+  for _ in 0..br_n2 {
+    cv.set_pixel(br_x, br_y, ink);
+    if br_e2 >= 0 { br_x += br_xs; br_e2 -= br_dy; }
+    br_e2 += br_dx;
+    br_y += br_ys;
+  }
+}

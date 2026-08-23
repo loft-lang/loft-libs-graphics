@@ -1,0 +1,17 @@
+[package]
+name = "drawing"
+version = "0.1.0"
+loft = ">=2026.8.0"
+repository = "loft-libs-graphics"
+description = "Render a .draw scene — a sprite authored as lines of text — pixel-identically to the Python renderer it replaces"
+categories = ["graphics", "tools"]
+
+# ⚠ FIRST release, so both floors are this release itself.
+api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
+data_compatible_with = "0.1.0"   # oldest own release whose stored data this reads
+
+[dependencies]
+graphics = ">=0.7.0"
+
+[library]
+entry = "src/drawing.loft"

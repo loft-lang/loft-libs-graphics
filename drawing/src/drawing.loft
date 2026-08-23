@@ -1,0 +1,893 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// drawing — a sprite authored as lines of text, rendered in loft.
+//
+// A `.draw` scene is a dozen lines of marks on fractional paper:
+//
+//     size 256x256
+//     Background transparent
+//     name blade
+//     Poly (0.48,0.10) (0.52,0.10) (0.52,0.70) (0.48,0.70) rgb=190,196,206
+//     Circle (0.50,0.78) r=0.06 rgb=120,90,50
+//
+// ── ⚠⚠ THE INVARIANT ────────────────────────────────────────────────
+//
+// > **The picture is the one `draw.py` renders — pixel for pixel, not
+// > approximately.**
+//
+// That is not a quality bar, it is the definition.  A corpus of `.draw` scenes
+// already exists and already has art in it; the Python renderer is what made
+// that art look the way it does, so "close enough" here means every sprite in
+// the corpus quietly changes the day it is re-rendered.  The whole port is
+// therefore measured by a byte diff against Pillow's output and nothing else.
+//
+// Three things follow from that, and each of them cost a probe to learn:
+//
+//  1. **The rasteriser is Pillow's, not `graphics`'.**  `graphics::fill_polygon`
+//     is a fine polygon filler that obeys a different rule, and the two agree on
+//     4 of 400 random polygons.  See [raster.loft](raster.loft).
+//  2. **The picture is drawn at 3x and resampled with Lanczos.**  The
+//     supersample factor and the filter are part of the contract a scene signs,
+//     not an implementation choice — `graphics::resize_lanczos` is byte-identical
+//     to `Image.resize(…, LANCZOS)` for exactly this reason.
+//  3. **Absence is reported, never guessed.**  A line no command accepts is
+//     collected and named rather than dropped, because a typo'd mark has to read
+//     as a syntax problem and not as a geometry one.
+//
+// ── WHAT THIS BUILD DRAWS ───────────────────────────────────────────
+//
+// `size`, `Background`, `name`, `Line`, `Circle`, `Poly`, with solid fills
+// (`rgb=` / `fill=`), coloured strokes (`stroke=`), pen widths (`w=`, and the
+// per-point `@N` taper), and smooth points (`~`).  `grad=` / `radial=` fills and
+// the `Petals` / `Fronds` arrays parse and are listed in `Sketch.deferred` — they
+// are recognised, and a caller can see they were not drawn.
+use graphics;
+use raster;
+use scan;
+
+/// The supersample factor the corpus is drawn at.  Not adjustable: every golden
+/// in the corpus carries it, and a scene rendered at any other factor is a
+/// different picture.
+pub const SUPERSAMPLE = 3;
+
+/// The ink a mark uses when it names no colour.
+pub const DEFAULT_INK_R = 38;
+pub const DEFAULT_INK_G = 32;
+pub const DEFAULT_INK_B = 36;
+
+/// Control points per curve segment when a smooth point (`~`) expands.
+const SMOOTH_SAMPLES = 10;
+
+const PI = 3.141592653589793;
+
+/// How a mark is filled, if it is filled at all.
+pub enum PaintKind { Stroked, Solid, Linear, Radial }
+
+/// A mark's fill descriptor.
+///
+/// `Stroked` is the absence of a fill, not a fill of nothing: it is what sends a
+/// `Poly` down the pen path instead of the polygon path, and the two produce
+/// completely different pictures from the same points.
+pub struct Paint {
+  pk: PaintKind = Stroked,
+  c1: integer = 0,
+  c2: integer = 0,
+  /// `Linear`: `ax,ay,bx,by`.  `Radial`: `cx,cy,r`.  Empty means "derive it from
+  /// the shape's own bounding box", which is what a fill with no `dir=` / `at=`
+  /// asks for.
+  spec: vector<float>,
+}
+
+/// What an op does.
+pub enum OpKind { Sky, Fill, Stroke }
+
+/// One entry in the ordered draw program.
+///
+/// ⚠ `pts` are FRACTIONS of the paper (0..1, origin top-left, y down), never
+/// pixels.  The scale to pixels happens once, at the raster call, because the
+/// paper size is a property of the scene and the supersample factor is a
+/// property of the renderer — neither belongs in a parsed mark.
+pub struct Op {
+  kind: OpKind = Sky,
+  pts: vector<raster::Pt>,
+  paint: Paint,
+  /// Stroke: one width per point (a taper).  Empty means the uniform `w`.
+  widths: vector<float>,
+  w: integer = 3,
+  /// Stroke ink, or `Sky`'s top colour.
+  color: integer = 0,
+  /// `Sky`'s bottom colour.
+  color2: integer = 0,
+}
+
+/// A named group of marks and the box they cover, in paper fractions.
+pub struct Elem {
+  ename: text = "",
+  /// False until a mark has actually contributed a point: an element that is
+  /// named and never drawn has no box, and answering `0,0,0,0` for it would be a
+  /// measurement rather than an absence.
+  seen: boolean = false,
+  bx0: float = 0.0,
+  by0: float = 0.0,
+  bx1: float = 0.0,
+  by1: float = 0.0,
+}
+
+/// A `landmark <name> = <value>` line.
+pub struct Landmark {
+  lname: text = "",
+  lvalue: float = 0.0,
+}
+
+/// A parsed scene: the paper, the ordered draw program, and everything the
+/// parser could measure or could not accept.
+///
+/// ⚠ NOT called `Scene`: `mesh3d::Scene` owns that name and `graphics` depends on
+/// mesh3d, so the collision is a hard error — the same trap `graphics::Coord`
+/// hit with `Point`.  Reach for `Sketch` in `.draw` code and the 3-D names stay
+/// where they belong.
+pub struct Sketch {
+  sw: integer = 800,
+  sh: integer = 800,
+  transparent: boolean = false,
+  ops: vector<Op>,
+  elems: vector<Elem>,
+  landmarks: vector<Landmark>,
+  checks: vector<text>,
+  /// `line N: <text>` for every line no command accepted.
+  unparsed: vector<text>,
+  /// `line N: <what>` for every mark this build recognises but does not draw.
+  deferred: vector<text>,
+}
+
+// ── Colour ──────────────────────────────────────────────────────────
+
+/// A grey level in 0..1 as an opaque colour, rounded HALF TO EVEN.
+///
+/// Python's `round` is half-to-even and `draw.py` uses it here, so `fill=0.5`
+/// is 128 and not 127 — a difference of one level that no eye would find and a
+/// byte diff would.
+pub fn grey(gl: float) -> integer {
+  gy = round_half_even(gl * 255.0) as integer;
+  if gy < 0 { return graphics::rgba(0, 0, 0, 255) }
+  if gy > 255 { return graphics::rgba(255, 255, 255, 255) }
+  graphics::rgba(gy, gy, gy, 255)
+}
+
+fn round_half_even(rv: float) -> float {
+  rh_f = floor(rv);
+  rh_d = rv - rh_f;
+  if rh_d > 0.5 { return rh_f + 1.0 }
+  if rh_d < 0.5 { return rh_f }
+  if ((rh_f as integer) % 2 ?? 0) == 0 { rh_f } else { rh_f + 1.0 }
+}
+
+fn default_ink() -> integer {
+  graphics::rgba(DEFAULT_INK_R, DEFAULT_INK_G, DEFAULT_INK_B, 255)
+}
+
+// ── Option readers ──────────────────────────────────────────────────
+
+/// `\bw\s*=\s*(\d+)` — the uniform pen width, or `fallback`.
+fn read_width(s: text, fallback: integer) -> integer {
+  rw_o = scan::find_option(s, "w");
+  if !rw_o.ok { return fallback }
+  rw_n = scan::read_uint(s, rw_o.at);
+  if !rw_n.ok { return fallback }
+  rw_n.value as integer
+}
+
+/// `\(?(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\)?` at `i` — a colour triple, optionally
+/// parenthesised, as `draw.py` writes every colour option.
+fn read_rgb_at(s: text, i: integer) -> Scan3 {
+  rr_i = i;
+  rr_paren = scan::at(s, rr_i) == 40;
+  if rr_paren { rr_i = scan::skip_space(s, rr_i + 1); }
+  rr_r = scan::read_uint(s, rr_i);
+  if !rr_r.ok { return scan3_fail() }
+  rr_i = scan::skip_space(s, rr_r.at);
+  if scan::at(s, rr_i) != 44 { return scan3_fail() }
+  rr_g = scan::read_uint(s, scan::skip_space(s, rr_i + 1));
+  if !rr_g.ok { return scan3_fail() }
+  rr_i = scan::skip_space(s, rr_g.at);
+  if scan::at(s, rr_i) != 44 { return scan3_fail() }
+  rr_b = scan::read_uint(s, scan::skip_space(s, rr_i + 1));
+  if !rr_b.ok { return scan3_fail() }
+  rr_i = rr_b.at;
+  if scan::at(s, rr_i) == 41 { rr_i += 1; }
+  Scan3 { ok: true, at: rr_i,
+          color: graphics::rgba(rr_r.value as integer, rr_g.value as integer,
+                                rr_b.value as integer, 255) }
+}
+
+/// A colour read and where it ended.
+struct Scan3 {
+  ok: boolean = false,
+  at: integer = 0,
+  color: integer = 0,
+}
+
+fn scan3_fail() -> Scan3 { Scan3 { ok: false, at: 0, color: 0 } }
+
+/// `\bstroke\s*=\s*R,G,B` — a pen colour.  `rgb=` still means FILL; this lets a
+/// stroke carry colour without becoming one.
+fn read_stroke_colour(s: text) -> integer {
+  rs_o = scan::find_option(s, "stroke");
+  if !rs_o.ok { return default_ink() }
+  rs_c = read_rgb_at(s, rs_o.at);
+  if !rs_c.ok { return default_ink() }
+  rs_c.color
+}
+
+/// `draw.py`'s `_paint`, in its order: `radial=` beats `grad=` beats `rgb=`
+/// beats `fill=`, and nothing at all means the mark is stroked.
+fn read_paint(s: text) -> Paint {
+  rp_rad = scan::find_option(s, "radial");
+  if rp_rad.ok {
+    rp_pair = read_colour_pair(s, rp_rad.at);
+    if rp_pair.ok {
+      return Paint { pk: Radial, c1: rp_pair.c1, c2: rp_pair.c2,
+                     spec: read_spec(s, "at", 3) }
+    }
+  }
+  rp_grad = scan::find_option(s, "grad");
+  if rp_grad.ok {
+    rp_pair2 = read_colour_pair(s, rp_grad.at);
+    if rp_pair2.ok {
+      return Paint { pk: Linear, c1: rp_pair2.c1, c2: rp_pair2.c2,
+                     spec: read_spec(s, "dir", 4) }
+    }
+  }
+  rp_rgb = scan::find_option(s, "rgb");
+  if rp_rgb.ok {
+    rp_c = read_rgb_at(s, rp_rgb.at);
+    if rp_c.ok { return Paint { pk: Solid, c1: rp_c.color, c2: 0, spec: [] } }
+  }
+  rp_fill = scan::find_option(s, "fill");
+  if rp_fill.ok {
+    rp_l = scan::read_unsigned(s, rp_fill.at);
+    if rp_l.ok { return Paint { pk: Solid, c1: grey(rp_l.value), c2: 0, spec: [] } }
+  }
+  Paint { pk: Stroked, c1: 0, c2: 0, spec: [] }
+}
+
+/// Two colours either side of a `>`.
+struct ColourPair {
+  ok: boolean = false,
+  c1: integer = 0,
+  c2: integer = 0,
+}
+
+fn read_colour_pair(s: text, i: integer) -> ColourPair {
+  cp_a = read_rgb_at(s, i);
+  if !cp_a.ok { return ColourPair { ok: false, c1: 0, c2: 0 } }
+  cp_j = scan::skip_space(s, cp_a.at);
+  if scan::at(s, cp_j) != 62 { return ColourPair { ok: false, c1: 0, c2: 0 } }
+  cp_b = read_rgb_at(s, scan::skip_space(s, cp_j + 1));
+  if !cp_b.ok { return ColourPair { ok: false, c1: 0, c2: 0 } }
+  ColourPair { ok: true, c1: cp_a.color, c2: cp_b.color }
+}
+
+/// `\b<key>\s*=\s*n,n[,n[,n]]` — a comma-separated run of exactly `count`
+/// numbers, or empty when the option is absent or short.
+fn read_spec(s: text, key: text, count: integer) -> vector<float> {
+  rs_out: vector<float> = [];
+  rs_o = scan::find_option(s, key);
+  if !rs_o.ok { return rs_out }
+  rs_i = rs_o.at;
+  for k in 0..count {
+    if k > 0 {
+      if scan::at(s, rs_i) != 44 { rs_out = []; return rs_out }
+      rs_i += 1;
+    }
+    rs_n = scan::read_number(s, rs_i);
+    if !rs_n.ok { rs_out = []; return rs_out }
+    rs_out += [rs_n.value];
+    rs_i = rs_n.at;
+  }
+  rs_out
+}
+
+// ── Points on a line ────────────────────────────────────────────────
+
+/// Every `(x,y)` on a line, with the two suffixes a point may carry.
+pub struct PointList {
+  pts: vector<raster::Pt>,
+  /// `~` — this point curves; a point without it is a corner.
+  smooth: vector<boolean>,
+  /// `@N` — the pen width AT this point.  `has_width` says which were given.
+  widths: vector<float>,
+  has_width: vector<boolean>,
+  any_width: boolean = false,
+}
+
+/// `\(\s*(n)\s*,\s*(n)\s*\)\s*(~?)\s*(?:@\s*(n))?`, found repeatedly along the line.
+///
+/// Scanning for points rather than splitting the line is what lets the same
+/// grammar carry options: `rgb=140,104,62` has no parentheses, so it is not a
+/// point, and no separator has to be agreed between the two.
+pub fn read_points(s: text) -> PointList {
+  rp_out = PointList { pts: [], smooth: [], widths: [], has_width: [], any_width: false };
+  rp_i = 0;
+  rp_n = size(s);
+  while rp_i < rp_n {
+    if scan::at(s, rp_i) != 40 { rp_i += 1; continue }
+    rp_j = scan::skip_space(s, rp_i + 1);
+    rp_x = scan::read_number(s, rp_j);
+    if !rp_x.ok { rp_i += 1; continue }
+    rp_j = scan::skip_space(s, rp_x.at);
+    if scan::at(s, rp_j) != 44 { rp_i += 1; continue }
+    rp_y = scan::read_number(s, scan::skip_space(s, rp_j + 1));
+    if !rp_y.ok { rp_i += 1; continue }
+    rp_j = scan::skip_space(s, rp_y.at);
+    if scan::at(s, rp_j) != 41 { rp_i += 1; continue }
+    rp_j += 1;
+    rp_k = scan::skip_space(s, rp_j);
+    rp_sm = scan::at(s, rp_k) == 126;
+    if rp_sm { rp_k = scan::skip_space(s, rp_k + 1); }
+    rp_wv = 0.0;
+    rp_has = false;
+    if scan::at(s, rp_k) == 64 {
+      rp_w = scan::read_number(s, scan::skip_space(s, rp_k + 1));
+      if rp_w.ok { rp_wv = rp_w.value; rp_has = true; rp_k = rp_w.at; }
+    }
+    rp_out.pts += [raster::pt(rp_x.value, rp_y.value)];
+    rp_out.smooth += [rp_sm];
+    rp_out.widths += [rp_wv];
+    rp_out.has_width += [rp_has];
+    if rp_has { rp_out.any_width = true; }
+    rp_i = rp_k;
+  }
+  rp_out
+}
+
+// ── Geometry ────────────────────────────────────────────────────────
+
+/// The outline of a `Circle`, as `draw.py` builds it: `n` segments round the
+/// centre with the FIRST point repeated at the end, so the polygon closes
+/// itself and Pillow adds no edge of its own.
+///
+/// `flat` squashes the vertical radius; the `W/H` factor keeps the circle round
+/// on non-square paper, since the coordinates are fractions of each axis.
+pub fn circle_pts(cx: float, cy: float, r: float, n: integer, flat: float,
+                  pw: integer, ph: integer) -> vector<raster::Pt> {
+  cp_ary = r * (((pw as float) / (ph as float)) ?? 1.0) * (1.0 - flat);
+  cp_out: vector<raster::Pt> = [];
+  for i in 0..=n {
+    cp_a = ((2.0 * PI * (i as float)) / (n as float)) ?? 0.0;
+    cp_out += [raster::pt(cx + r * cos(cp_a), cy + cp_ary * sin(cp_a))];
+  }
+  cp_out
+}
+
+fn any_smooth(flags: const vector<boolean>) -> boolean {
+  for f in flags { if f { return true } }
+  false
+}
+
+/// The control point `i`, clamped on an open outline and wrapped on a closed one.
+fn ctrl(pts: const vector<raster::Pt>, i: integer, closed: boolean) -> raster::Pt {
+  cn = len(pts);
+  if closed { return pts[i.floor_mod(cn) ?? 0]? }
+  ci = i;
+  if ci < 0 { ci = 0; }
+  if ci > cn - 1 { ci = cn - 1; }
+  pts[ci]?
+}
+
+/// Half the chord between a point's two neighbours — the Catmull-Rom tangent.
+fn half_chord(pts: const vector<raster::Pt>, i: integer, closed: boolean) -> raster::Pt {
+  hc_a = ctrl(pts, i - 1, closed);
+  hc_b = ctrl(pts, i + 1, closed);
+  raster::pt((hc_b.ptx - hc_a.ptx) * 0.5, (hc_b.pty - hc_a.pty) * 0.5)
+}
+
+/// Does this outline curve at all?  Fewer than three points, or no `~`, and the
+/// control points ARE the polyline — which is what keeps a plain `Poly`
+/// unchanged.
+pub fn smooth_applies(pts: const vector<raster::Pt>, flags: const vector<boolean>) -> boolean {
+  len(pts) >= 3 && any_smooth(flags)
+}
+
+/// Expand control points to a dense polyline.
+///
+/// A point flagged `~` curves (its tangent is half the neighbour chord); a
+/// corner uses the segment chord, which makes that segment exactly straight.  So
+/// one outline mixes straight runs and curves, and a segment between two corners
+/// is a line however many `~` the rest of the outline has.
+pub fn smooth_pts(pts: const vector<raster::Pt>, flags: const vector<boolean>,
+                  closed: boolean) -> vector<raster::Pt> {
+  sp_n = len(pts);
+  sp_out: vector<raster::Pt> = [];
+  if !smooth_applies(pts, flags) {
+    for p in pts { sp_out += [p]; }
+    return sp_out
+  }
+  sp_out += [pts[0]?];
+  sp_segs = if closed { sp_n } else { sp_n - 1 };
+  for i in 0..sp_segs {
+    sp_ia = i % sp_n ?? 0;
+    sp_ib = (i + 1) % sp_n ?? 0;
+    sp_a = pts[sp_ia]?;
+    sp_b = pts[sp_ib]?;
+    sp_chx = sp_b.ptx - sp_a.ptx;
+    sp_chy = sp_b.pty - sp_a.pty;
+    sp_ta = if flags[sp_ia]? { half_chord(pts, sp_ia, closed) } else { raster::pt(sp_chx, sp_chy) };
+    sp_tb = if flags[sp_ib]? { half_chord(pts, sp_ib, closed) } else { raster::pt(sp_chx, sp_chy) };
+    for k in 1..=SMOOTH_SAMPLES {
+      sp_t = ((k as float) / (SMOOTH_SAMPLES as float)) ?? 0.0;
+      sp_t2 = sp_t * sp_t;
+      sp_t3 = sp_t2 * sp_t;
+      sp_h00 = 2.0 * sp_t3 - 3.0 * sp_t2 + 1.0;
+      sp_h10 = sp_t3 - 2.0 * sp_t2 + sp_t;
+      sp_h01 = -2.0 * sp_t3 + 3.0 * sp_t2;
+      sp_h11 = sp_t3 - sp_t2;
+      sp_out += [raster::pt(
+        sp_h00 * sp_a.ptx + sp_h10 * sp_ta.ptx + sp_h01 * sp_b.ptx + sp_h11 * sp_tb.ptx,
+        sp_h00 * sp_a.pty + sp_h10 * sp_ta.pty + sp_h01 * sp_b.pty + sp_h11 * sp_tb.pty)];
+    }
+  }
+  sp_out
+}
+
+/// The per-point widths carried across the same expansion, interpolated linearly.
+pub fn smooth_vals(vals: const vector<float>, closed: boolean) -> vector<float> {
+  sv_n = len(vals);
+  sv_out: vector<float> = [];
+  sv_out += [vals[0]?];
+  sv_segs = if closed { sv_n } else { sv_n - 1 };
+  for i in 0..sv_segs {
+    sv_a = vals[i % sv_n ?? 0]?;
+    sv_b = vals[(i + 1) % sv_n ?? 0]?;
+    for k in 1..=SMOOTH_SAMPLES {
+      sv_out += [sv_a + (sv_b - sv_a) * (((k as float) / (SMOOTH_SAMPLES as float)) ?? 0.0)];
+    }
+  }
+  sv_out
+}
+
+// ── Commands ────────────────────────────────────────────────────────
+
+/// What one command line produced: whether the command matched at all, whether
+/// it matched but is not a legal mark, and the points it covers.
+///
+/// The middle case is the one worth having a flag for.  `Poly (0.1,0.2)
+/// rgb=1,2,3` IS a `Poly` — it just cannot be filled with one point — and
+/// reporting it as "no command accepted this line" would send the author
+/// looking for a typo that is not there.
+struct Mark {
+  matched: boolean = false,
+  bad: boolean = false,
+  pts: vector<raster::Pt>,
+}
+
+fn no_mark() -> Mark { Mark { matched: false, bad: false, pts: [] } }
+
+/// `Circle\s*\(\s*(n)\s*,\s*(n)\s*\)\s*r=(n)(?:\s+n=(\d+))?(?:\s+flat=(n))?`
+fn parse_circle(sc: Sketch, s: text) -> Mark {
+  pc_from = 0;
+  while true {
+    pc_w = scan::find_word_from(s, "circle", pc_from);
+    if !pc_w.ok { return no_mark() }
+    pc_from = pc_w.at;
+    pc_i = scan::skip_space(s, pc_w.at);
+    if scan::at(s, pc_i) != 40 { continue }
+    pc_x = scan::read_number(s, scan::skip_space(s, pc_i + 1));
+    if !pc_x.ok { continue }
+    pc_i = scan::skip_space(s, pc_x.at);
+    if scan::at(s, pc_i) != 44 { continue }
+    pc_y = scan::read_number(s, scan::skip_space(s, pc_i + 1));
+    if !pc_y.ok { continue }
+    pc_i = scan::skip_space(s, pc_y.at);
+    if scan::at(s, pc_i) != 41 { continue }
+    pc_i = scan::skip_space(s, pc_i + 1);
+    if scan::lower_byte(scan::at(s, pc_i)) != 114 { continue }
+    if scan::at(s, pc_i + 1) != 61 { continue }
+    pc_r = scan::read_number(s, pc_i + 2);
+    if !pc_r.ok { continue }
+    pc_i = pc_r.at;
+    pc_n = 28;
+    pc_j = scan::skip_space(s, pc_i);
+    if pc_j > pc_i && scan::lower_byte(scan::at(s, pc_j)) == 110 && scan::at(s, pc_j + 1) == 61 {
+      pc_cnt = scan::read_uint(s, pc_j + 2);
+      if pc_cnt.ok { pc_n = pc_cnt.value as integer; pc_i = pc_cnt.at; }
+    }
+    pc_flat = 0.0;
+    pc_j = scan::skip_space(s, pc_i);
+    if pc_j > pc_i && scan::matches_at(s, pc_j, "flat") && scan::at(s, pc_j + 4) == 61 {
+      pc_f = scan::read_number(s, pc_j + 5);
+      if pc_f.ok { pc_flat = pc_f.value; }
+    }
+    pc_pts = circle_pts(pc_x.value, pc_y.value, pc_r.value, pc_n, pc_flat, sc.sw, sc.sh);
+    pc_paint = read_paint(s);
+    if pc_paint.pk == Stroked {
+      sc.ops += [Op { kind: Stroke, pts: pc_pts, paint: pc_paint, widths: [],
+                      w: read_width(s, 3), color: read_stroke_colour(s), color2: 0 }];
+    } else {
+      sc.ops += [Op { kind: Fill, pts: pc_pts, paint: pc_paint, widths: [],
+                      w: 3, color: 0, color2: 0 }];
+      note_deferred_paint(sc, s, pc_paint);
+    }
+    return Mark { matched: true, bad: false, pts: pc_pts }
+  }
+  no_mark()
+}
+
+/// `Line\s*\(\s*(n)\s*,\s*(n)\s*\)\s*(?:@\s*(n))?\s*-\s*\(…\)\s*(?:@\s*(n))?\s*(?:w\s*=\s*(\d+))?`
+fn parse_line_cmd(sc: Sketch, s: text) -> Mark {
+  pl_from = 0;
+  while true {
+    pl_w = scan::find_word_from(s, "line", pl_from);
+    if !pl_w.ok { return no_mark() }
+    pl_from = pl_w.at;
+    pl_i = scan::skip_space(s, pl_w.at);
+    if scan::at(s, pl_i) != 40 { continue }
+    pl_x0 = scan::read_number(s, scan::skip_space(s, pl_i + 1));
+    if !pl_x0.ok { continue }
+    pl_i = scan::skip_space(s, pl_x0.at);
+    if scan::at(s, pl_i) != 44 { continue }
+    pl_y0 = scan::read_number(s, scan::skip_space(s, pl_i + 1));
+    if !pl_y0.ok { continue }
+    pl_i = scan::skip_space(s, pl_y0.at);
+    if scan::at(s, pl_i) != 41 { continue }
+    pl_i += 1;
+    pl_wa = read_at_width(s, pl_i);
+    pl_i = pl_wa.at;
+    pl_i = scan::skip_space(s, pl_i);
+    // `[-\d.]+` swallows the `-` separator when no space precedes it, and the
+    // regex backtracks off it.  Retract the same way rather than refusing.
+    if scan::at(s, pl_i) != 45 && pl_wa.ok && scan::at(s, pl_i - 1) == 45 { pl_i -= 1; }
+    if scan::at(s, pl_i) != 45 { continue }
+    pl_i = scan::skip_space(s, pl_i + 1);
+    if scan::at(s, pl_i) != 40 { continue }
+    pl_x1 = scan::read_number(s, scan::skip_space(s, pl_i + 1));
+    if !pl_x1.ok { continue }
+    pl_i = scan::skip_space(s, pl_x1.at);
+    if scan::at(s, pl_i) != 44 { continue }
+    pl_y1 = scan::read_number(s, scan::skip_space(s, pl_i + 1));
+    if !pl_y1.ok { continue }
+    pl_i = scan::skip_space(s, pl_y1.at);
+    if scan::at(s, pl_i) != 41 { continue }
+    pl_wb = read_at_width(s, pl_i + 1);
+    pl_base = read_width(s, 3);
+    pl_pts: vector<raster::Pt> = [raster::pt(pl_x0.value, pl_y0.value),
+                                  raster::pt(pl_x1.value, pl_y1.value)];
+    pl_widths: vector<float> = [];
+    if pl_wa.ok || pl_wb.ok {
+      pl_widths += [if pl_wa.ok { pl_wa.value } else { pl_base as float }];
+      pl_widths += [if pl_wb.ok { pl_wb.value } else { pl_base as float }];
+    }
+    sc.ops += [Op { kind: Stroke, pts: pl_pts, paint: Paint { pk: Stroked, c1: 0, c2: 0, spec: [] },
+                    widths: pl_widths, w: pl_base, color: read_stroke_colour(s), color2: 0 }];
+    return Mark { matched: true, bad: false, pts: pl_pts }
+  }
+  no_mark()
+}
+
+/// `\s*(?:@\s*([-\d.]+))?` — an endpoint's own pen width.
+fn read_at_width(s: text, i: integer) -> Scan {
+  ra_j = scan::skip_space(s, i);
+  if scan::at(s, ra_j) != 64 { return Scan { ok: false, at: i, value: 0.0 } }
+  ra_n = scan::read_number(s, scan::skip_space(s, ra_j + 1));
+  if !ra_n.ok { return Scan { ok: false, at: i, value: 0.0 } }
+  ra_n
+}
+
+/// `Poly (x,y)… [w=N] [<fill>]` — the workhorse: filled when it names a fill,
+/// a pen stroke when it does not.
+fn parse_poly(sc: Sketch, s: text) -> Mark {
+  pp_raw = read_points(s);
+  pp_paint = read_paint(s);
+  pp_need = if pp_paint.pk == Stroked { 2 } else { 3 };
+  if len(pp_raw.pts) < pp_need { return Mark { matched: true, bad: true, pts: [] } }
+  if pp_paint.pk != Stroked {
+    pp_pts = smooth_pts(pp_raw.pts, pp_raw.smooth, true);
+    sc.ops += [Op { kind: Fill, pts: pp_pts, paint: pp_paint, widths: [], w: 3,
+                    color: 0, color2: 0 }];
+    note_deferred_paint(sc, s, pp_paint);
+    return Mark { matched: true, bad: false, pts: pp_pts }
+  }
+  pp_base = read_width(s, 3);
+  pp_ink = read_stroke_colour(s);
+  if pp_raw.any_width {
+    pp_vals: vector<float> = [];
+    for i in 0..len(pp_raw.pts) {
+      pp_vals += [if pp_raw.has_width[i]? { pp_raw.widths[i]? } else { pp_base as float }];
+    }
+    pp_open = smooth_pts(pp_raw.pts, pp_raw.smooth, false);
+    pp_ow = if smooth_applies(pp_raw.pts, pp_raw.smooth) { smooth_vals(pp_vals, false) }
+            else { pp_vals };
+    sc.ops += [Op { kind: Stroke, pts: pp_open, paint: pp_paint, widths: pp_ow,
+                    w: pp_base, color: pp_ink, color2: 0 }];
+    return Mark { matched: true, bad: false, pts: pp_open }
+  }
+  pp_line = smooth_pts(pp_raw.pts, pp_raw.smooth, false);
+  sc.ops += [Op { kind: Stroke, pts: pp_line, paint: pp_paint, widths: [],
+                  w: pp_base, color: pp_ink, color2: 0 }];
+  Mark { matched: true, bad: false, pts: pp_line }
+}
+
+/// A fill this build parses but does not draw is LISTED, so a caller can see the
+/// picture is short of a mark rather than discovering it by eye.
+fn note_deferred_paint(sc: Sketch, s: text, p: const Paint) {
+  if p.pk == Linear { sc.deferred += ["grad= fill: {s}"]; }
+  if p.pk == Radial { sc.deferred += ["radial= fill: {s}"]; }
+}
+
+// ── The scene ───────────────────────────────────────────────────────
+
+/// Where `name`'s box lives, creating it on first mention.
+fn elem_index(sc: Sketch, nm: text) -> integer {
+  for i in 0..len(sc.elems) {
+    if sc.elems[i]?.ename == nm { return i }
+  }
+  sc.elems += [Elem { ename: nm, seen: false, bx0: 0.0, by0: 0.0, bx1: 0.0, by1: 0.0 }];
+  len(sc.elems) - 1
+}
+
+/// Grow the current element's box to hold these points.
+fn acc_pts(sc: Sketch, idx: integer, pts: const vector<raster::Pt>) {
+  if idx < 0 || len(pts) == 0 { return }
+  ap_e = sc.elems[idx]?;
+  ap_seen = ap_e.seen;
+  ap_x0 = ap_e.bx0;
+  ap_y0 = ap_e.by0;
+  ap_x1 = ap_e.bx1;
+  ap_y1 = ap_e.by1;
+  for p in pts {
+    if !ap_seen {
+      ap_x0 = p.ptx; ap_y0 = p.pty; ap_x1 = p.ptx; ap_y1 = p.pty;
+      ap_seen = true;
+    } else {
+      if p.ptx < ap_x0 { ap_x0 = p.ptx; }
+      if p.pty < ap_y0 { ap_y0 = p.pty; }
+      if p.ptx > ap_x1 { ap_x1 = p.ptx; }
+      if p.pty > ap_y1 { ap_y1 = p.pty; }
+    }
+  }
+  sc.elems[idx] = Elem { ename: ap_e.ename, seen: ap_seen,
+                         bx0: ap_x0, by0: ap_y0, bx1: ap_x1, by1: ap_y1 };
+}
+
+/// `Background …` — transparent, a colour ramp, or a grey ramp.
+fn parse_background(sc: Sketch, s: text, low: text) -> boolean {
+  if low.contains("transparent") || low.contains("none") {
+    sc.transparent = true;
+    return true
+  }
+  pb_tc = scan::find_option(s, "topc");
+  pb_bc = scan::find_option(s, "botc");
+  if pb_tc.ok && pb_bc.ok {
+    pb_t = read_rgb_at(s, pb_tc.at);
+    pb_b = read_rgb_at(s, pb_bc.at);
+    if pb_t.ok && pb_b.ok {
+      sc.ops += [Op { kind: Sky, pts: [], paint: Paint { pk: Stroked, c1: 0, c2: 0, spec: [] },
+                      widths: [], w: 3, color: pb_t.color, color2: pb_b.color }];
+      return true
+    }
+  }
+  pb_gt = scan::find_option(s, "top");
+  if !pb_gt.ok { return false }
+  pb_gb = scan::find_option(s, "bottom");
+  if !pb_gb.ok { pb_gb = scan::find_option(s, "bot"); }
+  if !pb_gb.ok { return false }
+  pb_tv = scan::read_unsigned(s, pb_gt.at);
+  pb_bv = scan::read_unsigned(s, pb_gb.at);
+  if !pb_tv.ok || !pb_bv.ok { return false }
+  sc.ops += [Op { kind: Sky, pts: [], paint: Paint { pk: Stroked, c1: 0, c2: 0, spec: [] },
+                  widths: [], w: 3, color: grey(pb_tv.value), color2: grey(pb_bv.value) }];
+  true
+}
+
+/// `size WxH` — a FULL-line match, so nothing else can be on it.
+fn parse_size(sc: Sketch, s: text) -> boolean {
+  if !scan::matches_at(s, 0, "size") { return false }
+  pz_i = scan::skip_space(s, 4);
+  if pz_i == 4 { return false }
+  pz_w = scan::read_uint(s, pz_i);
+  if !pz_w.ok { return false }
+  pz_i = scan::skip_space(s, pz_w.at);
+  if scan::lower_byte(scan::at(s, pz_i)) != 120 { return false }
+  pz_h = scan::read_uint(s, scan::skip_space(s, pz_i + 1));
+  if !pz_h.ok || pz_h.at != size(s) { return false }
+  sc.sw = pz_w.value as integer;
+  sc.sh = pz_h.value as integer;
+  true
+}
+
+/// `landmark <name> = <value>` — anchored at the start of the line.
+fn parse_landmark(sc: Sketch, s: text) -> boolean {
+  pm_i = scan::skip_space(s, 8);
+  if pm_i == 8 { return false }
+  pm_j = pm_i;
+  while scan::is_word_byte(scan::at(s, pm_j)) { pm_j += 1; }
+  if pm_j == pm_i { return false }
+  pm_k = scan::skip_space(s, pm_j);
+  if scan::at(s, pm_k) != 61 { return false }
+  pm_v = scan::read_number(s, scan::skip_space(s, pm_k + 1));
+  if !pm_v.ok { return false }
+  sc.landmarks += [Landmark { lname: s[pm_i..pm_j], lvalue: pm_v.value }];
+  true
+}
+
+/// Parse a whole `.draw` source.
+///
+/// The command order below is `draw.py`'s, and it is not alphabetical or
+/// tidy — `Circle` is tried before `Poly`, `Line` last of all.  Keep it: a
+/// grammar this loose is defined by the order its alternatives are tried in,
+/// and re-sorting it silently re-reads lines that sit in two alternatives.
+pub fn parse_scene(src: text) -> Sketch {
+  sc = Sketch { sw: 800, sh: 800, transparent: false, ops: [], elems: [], landmarks: [],
+               checks: [], unparsed: [], deferred: [] };
+  ps_cur = -1;
+  ps_no = 0;
+  for raw in src.split('\n') {
+    ps_no += 1;
+    ps_s = raw.trim();
+    if ps_s == "" || ps_s.starts_with("#") { continue }
+    ps_low = ps_s.to_lowercase();
+    if ps_low.starts_with("name ") {
+      ps_cur = elem_index(sc, ps_s[5..size(ps_s)].trim());
+      continue
+    }
+    if ps_low.starts_with("landmark") {
+      if !parse_landmark(sc, ps_s) { sc.unparsed += ["line {ps_no}: {ps_s}"]; }
+      continue
+    }
+    if ps_low.starts_with("check") {
+      sc.checks += [ps_s[5..size(ps_s)].trim()];
+      continue
+    }
+    if ps_low.starts_with("background") {
+      if !parse_background(sc, ps_s, ps_low) { sc.unparsed += ["line {ps_no}: {ps_s}"]; }
+      continue
+    }
+    if parse_size(sc, ps_s) { continue }
+    ps_m = parse_circle(sc, ps_s);
+    if ps_m.matched { acc_pts(sc, ps_cur, ps_m.pts); continue }
+    // `Petals` and `Fronds` are recognised here so they cannot fall through to
+    // `Line` and be read as something else — and listed, so their absence from
+    // the picture is a fact the caller has rather than one they discover.
+    if ps_low.starts_with("petals") { sc.deferred += ["line {ps_no}: Petals"]; continue }
+    if ps_low.starts_with("fronds") { sc.deferred += ["line {ps_no}: Fronds"]; continue }
+    if ps_low.starts_with("poly") {
+      ps_p = parse_poly(sc, ps_s);
+      if ps_p.bad { sc.unparsed += ["line {ps_no}: {ps_s}"]; }
+      else { acc_pts(sc, ps_cur, ps_p.pts); }
+      continue
+    }
+    ps_l = parse_line_cmd(sc, ps_s);
+    if ps_l.matched { acc_pts(sc, ps_cur, ps_l.pts); continue }
+    sc.unparsed += ["line {ps_no}: {ps_s}"];
+  }
+  sc
+}
+
+// ── Rendering ───────────────────────────────────────────────────────
+
+/// Paper fractions to pixels on the supersampled canvas.
+fn to_pixels(pts: const vector<raster::Pt>, bw: integer, bh: integer) -> vector<raster::Pt> {
+  tp_out: vector<raster::Pt> = [];
+  for p in pts { tp_out += [raster::pt(p.ptx * (bw as float), p.pty * (bh as float))]; }
+  tp_out
+}
+
+/// The vertical background ramp, one Bresenham row at a time — which is what
+/// `draw.py` does, and the row-by-row truncation of the interpolated colour is
+/// visible in the result.
+fn draw_sky(cv: graphics::Canvas, top: integer, bot: integer, bw: integer, bh: integer) {
+  dk_den = if bh - 1 < 1 { 1 } else { bh - 1 };
+  dk_tr = graphics::color_r(top);
+  dk_tg = graphics::color_g(top);
+  dk_tb = graphics::color_b(top);
+  dk_dr = graphics::color_r(bot) - dk_tr;
+  dk_dg = graphics::color_g(bot) - dk_tg;
+  dk_db = graphics::color_b(bot) - dk_tb;
+  for y in 0..bh {
+    dk_t = ((y as float) / (dk_den as float)) ?? 0.0;
+    dk_c = graphics::rgba(((dk_tr as float) + (dk_dr as float) * dk_t) as integer,
+                          ((dk_tg as float) + (dk_dg as float) * dk_t) as integer,
+                          ((dk_tb as float) + (dk_db as float) * dk_t) as integer, 255);
+    dk_row: vector<raster::Pt> = [raster::pt(0.0, y as float), raster::pt(bw as float, y as float)];
+    raster::thin_line(cv, dk_row, dk_c);
+  }
+}
+
+fn draw_fill(cv: graphics::Canvas, op: const Op, bw: integer, bh: integer) {
+  if op.paint.pk != Solid { return }
+  df_px = to_pixels(op.pts, bw, bh);
+  raster::fill_poly(cv, df_px, op.paint.c1);
+}
+
+fn draw_stroke(cv: graphics::Canvas, op: const Op, bw: integer, bh: integer) {
+  ds_px = to_pixels(op.pts, bw, bh);
+  if len(ds_px) < 2 { return }
+  if len(op.widths) > 0 { ribbon(cv, ds_px, op.widths, op.color); return }
+  ds_w = op.w * SUPERSAMPLE;
+  if ds_w < 1 { ds_w = 1; }
+  for i in 0..(len(ds_px) - 1) {
+    ds_a = ds_px[i]?;
+    ds_b = ds_px[i + 1]?;
+    if ds_w <= 1 {
+      ds_seg: vector<raster::Pt> = [ds_a, ds_b];
+      raster::thin_line(cv, ds_seg, op.color);
+    } else {
+      raster::wide_line(cv, ds_a.ptx, ds_a.pty, ds_b.ptx, ds_b.pty, op.color, ds_w);
+    }
+  }
+}
+
+/// A stroke whose pen width varies along it, drawn as a filled band.
+///
+/// Offsetting each point along its own normal by half its own width and filling
+/// between the two sides is what lets a hair strand be thick at the root and
+/// thin at the tip — a pen cannot do that, and a polygon can.
+fn ribbon(cv: graphics::Canvas, pxs: const vector<raster::Pt>, widths: const vector<float>,
+          color: integer) {
+  rb_n = len(pxs);
+  if rb_n < 2 { return }
+  rb_left: vector<raster::Pt> = [];
+  rb_right: vector<raster::Pt> = [];
+  for i in 0..rb_n {
+    rb_hw = widths[i]? * (SUPERSAMPLE as float) / 2.0;
+    if rb_hw < 0.5 { rb_hw = 0.5; }
+    rb_p = pxs[i]?;
+    rb_tx = 0.0;
+    rb_ty = 0.0;
+    if i == 0 {
+      rb_q = pxs[1]?;
+      rb_tx = rb_q.ptx - rb_p.ptx;
+      rb_ty = rb_q.pty - rb_p.pty;
+    } else if i == rb_n - 1 {
+      rb_q = pxs[i - 1]?;
+      rb_tx = rb_p.ptx - rb_q.ptx;
+      rb_ty = rb_p.pty - rb_q.pty;
+    } else {
+      rb_a = pxs[i + 1]?;
+      rb_b = pxs[i - 1]?;
+      rb_tx = rb_a.ptx - rb_b.ptx;
+      rb_ty = rb_a.pty - rb_b.pty;
+    }
+    rb_l = sqrt(rb_tx * rb_tx + rb_ty * rb_ty);
+    if rb_l == 0.0 { rb_l = 1.0; }
+    rb_nx = (-rb_ty / rb_l) ?? 0.0;
+    rb_ny = (rb_tx / rb_l) ?? 0.0;
+    rb_left += [raster::pt(rb_p.ptx + rb_nx * rb_hw, rb_p.pty + rb_ny * rb_hw)];
+    rb_right += [raster::pt(rb_p.ptx - rb_nx * rb_hw, rb_p.pty - rb_ny * rb_hw)];
+  }
+  rb_poly: vector<raster::Pt> = [];
+  for p in rb_left { rb_poly += [p]; }
+  for i in 0..rb_n { rb_poly += [rb_right[rb_n - 1 - i]?]; }
+  raster::fill_poly(cv, rb_poly, color);
+}
+
+/// Draw a parsed scene: at `SUPERSAMPLE`x, then resampled down with Lanczos.
+///
+/// A transparent background renders on transparent pixels so the resample
+/// anti-aliases edges against ALPHA rather than against white — which is what
+/// makes the result a sprite that can be composited over anything, with no
+/// colour-key hack.
+pub fn render(sc: const Sketch) -> graphics::Canvas {
+  rn_bw = sc.sw * SUPERSAMPLE;
+  rn_bh = sc.sh * SUPERSAMPLE;
+  rn_cv = graphics::canvas(rn_bw, rn_bh,
+                           if sc.transparent { 0 } else { graphics::rgba(255, 255, 255, 255) });
+  for op in sc.ops {
+    match op.kind {
+      Sky => draw_sky(rn_cv, op.color, op.color2, rn_bw, rn_bh),
+      Fill => draw_fill(rn_cv, op, rn_bw, rn_bh),
+      Stroke => draw_stroke(rn_cv, op, rn_bw, rn_bh),
+    }
+  }
+  rn_cv.resize_lanczos(sc.sw, sc.sh)
+}
+
+/// Render a `.draw` file to a PNG, answering the parsed scene so the caller can
+/// report what it could not accept.
+pub fn render_file(src: text, out: text) -> Sketch {
+  rf_sc = parse_scene(file(src).content()?);
+  rf_cv = render(rf_sc);
+  _ = rf_cv.save_png(out);
+  rf_sc
+}
