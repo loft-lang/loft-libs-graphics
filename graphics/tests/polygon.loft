@@ -1,0 +1,115 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @PLN146 W1 — `fill_polygon`, the one CPU raster primitive that was missing.
+//
+// Two things are being pinned.  The pixel COUNTS are hand-computed from the
+// geometry, so a change in the fill rule shows up as a number nobody can wave
+// through.  And a triangle drawn through the polygon path must be pixel-identical
+// to `fill_triangle` — the primitive that already shipped — because two fills
+// that disagree about a triangle are two different rasterisers.
+use graphics;
+
+fn filled(fc: const graphics::Canvas) -> integer {
+  n = 0;
+  for i in 0..len(fc.data) { if fc.data[i]? != 0 { n += 1; } }
+  n
+}
+
+// A rectangle as a polygon: x 2..11 and y 2..7 INCLUSIVE, so 10 wide by 6 tall.
+fn test_a_convex_polygon_fills_its_own_area() {
+  c = graphics::canvas(14, 14, 0);
+  pts: vector<graphics::Coord> = [
+    graphics::Coord{px: 2, py: 2},  graphics::Coord{px: 11, py: 2},
+    graphics::Coord{px: 11, py: 7}, graphics::Coord{px: 2, py: 7}];
+  c.fill_polygon(pts, 0xFFFFFFFF);
+  assert(filled(c) == 60, "10 wide x 6 tall = 60, not {filled(c)}");
+  assert(c.get_pixel(2, 2) != 0 && c.get_pixel(11, 7) != 0, "both corners inclusive");
+  assert(c.get_pixel(1, 2) == 0 && c.get_pixel(12, 7) == 0, "and nothing outside");
+}
+
+// A U — outer 1..12 square with a notch cut up from the bottom, x 5..8.
+// Rows 1..4 are solid: 4 rows x 12 = 48.  Rows 5..12 are two 4-wide arms:
+// 8 rows x 8 = 64.  112 in total, and the notch is EMPTY, which is the whole
+// point of testing a concave outline rather than another box.
+fn test_a_concave_polygon_leaves_its_notch_empty() {
+  c = graphics::canvas(14, 14, 0);
+  pts: vector<graphics::Coord> = [
+    graphics::Coord{px: 1, py: 1},   graphics::Coord{px: 12, py: 1},
+    graphics::Coord{px: 12, py: 12}, graphics::Coord{px: 9, py: 12},
+    graphics::Coord{px: 9, py: 5},   graphics::Coord{px: 4, py: 5},
+    graphics::Coord{px: 4, py: 12},  graphics::Coord{px: 1, py: 12}];
+  c.fill_polygon(pts, 0xFFFFFFFF);
+  assert(filled(c) == 112, "48 solid + 64 in the arms = 112, not {filled(c)}");
+  assert(c.get_pixel(6, 9) == 0, "the notch is empty — a convex fill would cover it");
+  assert(c.get_pixel(6, 3) != 0, "while the same column above the notch is solid");
+  assert(c.get_pixel(2, 9) != 0 && c.get_pixel(11, 9) != 0, "both arms are filled");
+}
+
+// A bowtie: the simplest outline that crosses itself.  Symmetric hourglass on its
+// side, rows 2..11 counting 2,4,6,8,10,10,8,6,4,2 = 60.
+fn test_a_self_intersecting_polygon_is_filled_even_odd() {
+  c = graphics::canvas(14, 14, 0);
+  pts: vector<graphics::Coord> = [
+    graphics::Coord{px: 2, py: 2},  graphics::Coord{px: 11, py: 11},
+    graphics::Coord{px: 11, py: 2}, graphics::Coord{px: 2, py: 11}];
+  c.fill_polygon(pts, 0xFFFFFFFF);
+  assert(filled(c) == 60, "2+4+6+8+10+10+8+6+4+2 = 60, not {filled(c)}");
+  assert(c.get_pixel(3, 2) == 0, "the widest row is the middle, not the top");
+  assert(c.get_pixel(3, 6) != 0 && c.get_pixel(10, 6) != 0, "both lobes");
+}
+
+// EVEN-ODD, stated as the property that distinguishes it: a star's centre is
+// covered twice by the outline and is therefore OUTSIDE.  Non-zero winding fills
+// it, so this assertion is what says which rule this is.
+fn test_even_odd_leaves_a_stars_centre_hollow() {
+  c = graphics::canvas(21, 21, 0);
+  pts: vector<graphics::Coord> = [
+    graphics::Coord{px: 10, py: 0}, graphics::Coord{px: 14, py: 19},
+    graphics::Coord{px: 0, py: 7},  graphics::Coord{px: 20, py: 7},
+    graphics::Coord{px: 6, py: 19}];
+  c.fill_polygon(pts, 0xFFFFFFFF);
+  assert(c.get_pixel(10, 10) == 0, "the centre is crossed twice, so it is OUTSIDE");
+  assert(c.get_pixel(10, 3) != 0, "while an arm is inside");
+}
+
+// The tie to the primitive that already shipped.  Every triangle on a 5x5 lattice
+// — 15625 of them, covering flat tops, flat bottoms, degenerate lines, coincident
+// vertices and both windings — must raster identically through both paths.
+//
+// Proven able to fail: with `fill_polygon`'s closing-row rule left half-open,
+// 15000 of the 15625 disagree (the 625 survivors are the degenerate single-row
+// ones), by up to 21 pixels.
+fn test_a_triangle_through_the_polygon_path_is_the_triangle() {
+  bad = 0;
+  for i in 0..25 {
+    for j in 0..25 {
+      for k in 0..25 {
+        ax = (i % 5) * 5 + 1; ay = (i / 5) * 5 + 1;
+        bx = (j % 5) * 5 + 1; by = (j / 5) * 5 + 1;
+        cx = (k % 5) * 5 + 1; cy = (k / 5) * 5 + 1;
+        t = graphics::canvas(24, 24, 0);
+        p = graphics::canvas(24, 24, 0);
+        t.fill_triangle(ax, ay, bx, by, cx, cy, 0xFFFFFFFF);
+        pts: vector<graphics::Coord> = [graphics::Coord{px: ax, py: ay},
+                                        graphics::Coord{px: bx, py: by},
+                                        graphics::Coord{px: cx, py: cy}];
+        p.fill_polygon(pts, 0xFFFFFFFF);
+        for n in 0..len(t.data) { if t.data[n]? != p.data[n]? { bad += 1; } }
+      }
+    }
+  }
+  assert(bad == 0, "{bad} pixels differ between fill_triangle and fill_polygon");
+}
+
+// Fewer than three points is not a polygon, and draws nothing rather than
+// guessing at a closing edge.
+fn test_a_degenerate_polygon_draws_nothing() {
+  c = graphics::canvas(8, 8, 0);
+  none: vector<graphics::Coord> = [];
+  two: vector<graphics::Coord> = [graphics::Coord{px: 1, py: 1},
+                                  graphics::Coord{px: 6, py: 6}];
+  c.fill_polygon(none, 0xFFFFFFFF);
+  c.fill_polygon(two, 0xFFFFFFFF);
+  assert(filled(c) == 0, "nothing drawn, not {filled(c)}");
+}
