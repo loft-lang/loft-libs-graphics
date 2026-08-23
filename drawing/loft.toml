@@ -4,7 +4,7 @@ version = "0.1.0"
 loft = ">=2026.8.0"
 repository = "loft-libs-graphics"
 description = "Render a .draw scene — a sprite authored as lines of text — pixel-identically to the Python renderer it replaces"
-categories = ["graphics", "tools"]
+categories = ["graphics", "asset-format"]
 
 # ⚠ FIRST release, so both floors are this release itself.
 api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for

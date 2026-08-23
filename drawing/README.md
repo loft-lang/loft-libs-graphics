@@ -103,13 +103,46 @@ typo'd mark has to read as a syntax problem, not as a geometry one.
 - `circle_pts` · `smooth_pts` · `smooth_vals` · `smooth_applies` · `read_points` · `grey`
 - `raster::` `fill_poly` · `wide_line` · `thin_line` · `round_up` · `round_down` · `pt` ·
   `Pt` — the Pillow-compatible rasteriser, public because anything that wants to agree with
-  the same oracle needs it. Reach it with a **second `use`** — `use drawing; use raster;` —
-  and qualify as `raster::fill_poly`; the two-level `drawing::raster::…` spelling does not
-  parse
+  the same oracle needs it. Reach it with a **second `use`, in this order**:
+
+  ```loft
+  use drawing;
+  use raster;          // ⚠ AFTER `use drawing;` — see below
+  ```
+
+  and qualify as `raster::fill_poly`. `raster` is a sibling module of this package rather
+  than a package of its own, so nothing resolves it until `drawing`'s entry file has been
+  loaded and pulled it in — put it first and you get *"Library 'raster' not found"*. The
+  two-level `drawing::raster::…` spelling does not parse at all.
 
 ⚠ The parsed scene is a `Sketch`, not a `Scene`: `mesh3d::Scene` owns that name and
 `graphics` depends on mesh3d, so the collision is a hard error — the same trap
 `graphics::Coord` hit with `Point`.
+
+## Targets
+
+| target | state |
+|---|---|
+| interpreter | ✓ suite green, and the 28-scene corpus gate |
+| `--native` | ✓ suite green, and the 28-scene corpus gate |
+| `--native-wasm` (headless WASI) | ✗ blocked by a dependency — see below |
+| `--html` (browser) | compiles; the render path is pure loft, but see below |
+
+This package is pure loft — no `#native`, no inline `#rust` — so its own code has nothing
+target-specific in it. Both limits come from `graphics`, which it draws through.
+
+`--native-wasm` does not build: `graphics`' native crate links glutin/GL, which is not
+wasm-clean, so the cross-build fails before anything of this package is reached (`imaging`
+is blocked on the same target for a different upstream reason,
+[loft#967](https://github.com/loft-lang/loft/issues/967)).
+
+`--html` emits a page. Everything this package computes — `parse_scene`, `render`, and the
+whole rasteriser — is pure loft and runs there, because `Canvas`, `rgba`, `resize_lanczos`
+and the pixel primitives are pure loft too. The one native it touches is
+`graphics::save_png`, reached only from `render_file`, and `graphics` ships no browser
+bridge — so a page renders into a `Canvas` and cannot write a PNG *file*. That is a
+sensible shape for a browser anyway, but it is **not gated**: no headless-page test runs
+here yet, so treat the browser column as "compiles and should work", not as measured.
 
 ## Provenance
 

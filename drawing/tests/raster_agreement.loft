@@ -9,9 +9,14 @@
 // Pillow draws as spans rather than as crossings, and `off_left` hangs off the
 // canvas so its crossings go NEGATIVE, which is the only place the mirrored
 // `ROUND_DOWN` is visible.
+// ⚠ `use drawing;` must come BEFORE `use raster;`.  `raster` is a sibling module of
+// this package, not a package of its own, so nothing resolves it until the package's
+// entry file has been loaded and pulled it in.  Reversed, the CI gate
+// (`loft --interpret --tests tests`) fails with "Library 'raster' not found" while
+// `loft test` — which sets up the package context first — passes.
 use graphics;
-use raster;
 use drawing;
+use raster;
 
 const N = 16;
 
