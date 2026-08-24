@@ -60,6 +60,13 @@ once at final size is a different picture whatever else is right.
 `graphics::resize_lanczos` is byte-identical to `Image.resize(…, LANCZOS)`, which is why
 this package can reach the oracle's answer at all.
 
+**A gradient is a small ramp ENLARGED, and the enlargement is visible.** `draw.py` computes
+every gradient on a 100×100 grid and resizes it to the shape's bounding box — and
+`Image.resize(size)` with no `resample=` argument is **bicubic**, a filter the call site
+never names. Bicubic has negative lobes, so the result overshoots: a hard 40→200 step
+enlarged 4× spans 28..212. Computing the ramp directly at final size is smoother and
+wrong, so `graphics::resize_bicubic` reproduces the two steps instead.
+
 ## The grammar
 
 Coordinates are FRACTIONS of the paper — origin top-left, y down — so a scene is
@@ -76,16 +83,28 @@ resolution-independent and `size` is the only place a pixel count appears.
 | `landmark <name> = <value>` · `check …` | read and carried; the report channel itself is not in this release |
 | `# …` | a comment, and a searchable note |
 
-`<fill>` is `rgb=R,G,B` or `fill=L` (grey, 0..1). A point may carry `~` (it curves — the
-tangent is half the neighbour chord, so a segment between two corners stays exactly
-straight) and `@N` (the pen width AT that point, which makes a stroke taper).
+`<fill>` is one of:
+
+| | |
+|---|---|
+| `rgb=R,G,B` · `fill=L` | solid (colour, or grey 0..1) |
+| `grad=R,G,B>R,G,B` `[dir=ax,ay,bx,by]` | a linear ramp; without `dir=`, top to bottom over the shape's bounding box |
+| `radial=R,G,B>R,G,B` `[at=cx,cy,r]` | a ramp from a centre outwards; without `at=`, the bounding box's centre and half its longer side |
+
+They are tried in that order and the most specific KIND wins — a line carrying both `rgb=`
+and `radial=` is radial, whichever was written last.
+
+A point may carry `~` (it curves — the tangent is half the neighbour chord, so a segment
+between two corners stays exactly straight) and `@N` (the pen width AT that point, which
+makes a stroke taper).
 
 ## What this release does not draw
 
-`grad=` and `radial=` fills, and the `Petals` / `Fronds` array marks. They **parse** — so
-they cannot be misread as something else — and every one of them is listed in
-`Sketch.deferred` with the line it came from. A caller therefore knows the picture is short
-of a mark instead of finding out by eye.
+The `Petals` and `Fronds` array marks. They **parse** — so they cannot be misread as
+something else, which for `Fronds` would mean `Line`'s pattern finding the two coordinates
+on the line and drawing a segment nobody wrote — and each is listed in `Sketch.deferred`
+with the line it came from. A caller therefore knows the picture is short of a mark instead
+of finding out by eye.
 
 A line that no command accepts at all is different, and lands in `Sketch.unparsed`: a
 typo'd mark has to read as a syntax problem, not as a geometry one.
@@ -101,6 +120,9 @@ typo'd mark has to read as a syntax problem, not as a geometry one.
 - `Elem.` `ename` `seen` `bx0` `by0` `bx1` `by1` — `seen` is false for an element that was
   named and never drawn, which is an absence rather than a box at the origin
 - `circle_pts` · `smooth_pts` · `smooth_vals` · `smooth_applies` · `read_points` · `grey`
+- `PaintKind.` `Stroked` `Solid` `Linear` `Radial` — `Paint.spec` is `ax,ay,bx,by` for a
+  linear fill and `cx,cy,r` for a radial one, or **empty** meaning "derive it from the
+  shape's own bounding box"
 - `raster::` `fill_poly` · `wide_line` · `thin_line` · `round_up` · `round_down` · `pt` ·
   `Pt` — the Pillow-compatible rasteriser, public because anything that wants to agree with
   the same oracle needs it. Reach it with a **second `use`, in this order**:

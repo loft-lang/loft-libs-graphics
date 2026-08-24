@@ -119,3 +119,52 @@ fn test_a_sky_a_grey_fill_and_a_smooth_taper() {
     "524761ff61596bff7f8080ff7c7b7eff7d7c7eff7d7c7eff818281ff828281ff818181ff858683ff686370ff514661ff" +
     "5a4e66ff5b5067ff5d5268ff5c5268ff5c5168ff5d5269ff675f6fff686170ff675f6fff6b6472ff61586bff584c65ff", "the rendered pixels are the oracle's");
 }
+
+fn gradient_source() -> text {
+  `
+  size 14x14
+  Background transparent
+  name dome
+  Circle (0.50,0.48) r=0.42 radial=214,208,198>180,174,162 at=0.50,0.40,0.46
+  name banner
+  Poly (0.08,0.06) (0.92,0.10) (0.90,0.34) (0.10,0.30) grad=30,36,64>92,80,104 dir=0.08,0.06,0.90,0.34
+  name shadow
+  Poly (0.20,0.70)~ (0.50,0.62)~ (0.80,0.72)~ (0.50,0.88)~ radial=40,120,180>10,20,40
+  `
+}
+
+fn test_both_gradients_are_the_oracles() {
+  // A radial with an explicit `at=` whose centre is OFF the shape's own centre, a
+  // linear with an explicit `dir=`, and a radial with NEITHER — so the defaults
+  // derived from the bounding box are exercised too, and the smooth outline means
+  // the mask is not a tidy rectangle.
+  //
+  // The ramp is computed on a 100x100 grid and ENLARGED with a bicubic filter, so
+  // these bytes carry that filter's ringing.  A gradient computed directly at
+  // final size is smoother and wrong.
+  sk = parse_scene(gradient_source());
+  assert(len(sk.unparsed) == 0, "every line parsed");
+  assert(len(sk.deferred) == 0, "nothing deferred — gradients draw now");
+  assert(sk.ops[0]?.paint.pk == Radial, "an at= radial");
+  assert(sk.ops[1]?.paint.pk == Linear, "a dir= linear");
+  assert(len(sk.ops[2]?.paint.spec) == 0, "and a radial with no at=, so the bbox default runs");
+  cv = render(sk);
+  assert(rgba_hex(cv) ==
+"172e450b1e2543221e2d4b11383855122d2d4b1182828229afaaa45addd7c65af8f1d127000000000000000000000000" +
+    "000000000000000018243c15212541e6272a45eb2b2d48eb2f304aeb393951f64f4d63ff736e7bff686471f24a445bac" +
+    "4c445da7514862a8554b649b5c45730b33333305252943c02c304dff2f304bff34344fff373651ff37354ffc36334efc" +
+    "403a56ff4e4862ff534c66ff5b526cff574c65f75a4b6911000000001c203ea3212444fe242543fa282946fe2e2c49fe" +
+    "33304cff393550ff3e3854fe423a56fb463e59f8524763fb544963a900000001000000007c7a7e87979395ff918e90fb" +
+    "969294ff9c9899ff9c979aff756f7dff726d7aff756e7bff756e7afb817785ff6a6072a100000000b9a2a20bc1baadd4" +
+    "cfc9baffcdc6b8fdd2ccbfffd8d1c4ffdcd6caffdcd6caffd7d1c3ffd1cbbeffcbc5b7fdccc7b8ffb9b3a7d5b9a2a20b" +
+    "b8aaaa12b7b1a6eebfb9aeffc0baaffec4beb4ffc7c2b9ffcbc6bdffcbc6bdffc8c3baffc6c0b5ffc1bbb0fec0b9aeff" +
+    "b9b2a7eeb8aaaa12b8aa9b12b7b1a5efbeb8acfec1bbb0fecec6b9ffd4cbbdffd6ccbeffd7cdbeffd1c9bcffc6c0b5ff" +
+    "bdb8adfebeb8adfeb7b1a5efb8aa9b12aaaa7f06b4aea3bdc9c2b5ffc0b8acfb969999ff88939aff8f9ba2ff8b98a0ff" +
+    "99a0a1ffc1baafffcbc3b4fbc8c1b4ffb4aea3bdaaaa7f0600000000ddd0c22692908bfb1b2e46fd0f3458fd104574ff" +
+    "15568aff14558aff154976ff2e4c68fd58626dfda6a29afbc2bbae26000000005555aa03000000008e89837a495867ff" +
+    "0e3760fc185182fa276ea5fb266ea5fb1b5383fa05305bfc1c324cff817f7d7a000000005555550300000000bf7f7f04" +
+    "00000000d3c5b25d879094ff386489ff206296ff246497ff2b5b84ff546b7eff9c99945d000000007f7f7f0400000000" +
+    "00000000000000005555550300000000dcc6b13bafada3706b8290a66e8491a69d9f9d70c6b9a83b0000000055555503" +
+    "0000000000000000000000000000000000000000ffff7f02000000000000000000000000000000000000000000000000" +
+    "007f7f02000000000000000000000000", "the rendered pixels are the oracle's");
+}
