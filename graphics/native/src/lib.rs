@@ -60,7 +60,8 @@ use winit::window::WindowId;
 // `loft_graphics_native::loft_audio_play`.  Keep the in-crate aliases
 // for the bytecode dispatch macro below.
 pub use audio::{
-    loft_audio_load, loft_audio_play, loft_audio_play_raw, loft_audio_set_volume, loft_audio_stop,
+    loft_audio_load, loft_audio_play, loft_audio_play_raw, loft_audio_seek, loft_audio_set_pan,
+    loft_audio_set_volume, loft_audio_stop, loft_audio_stop_all,
 };
 mod audio;
 // `n_audio_play_raw` is re-exported for the same reason as the eight above, and
@@ -76,9 +77,9 @@ pub use audio::n_audio_play_raw;
 // Plan-25 F4: the audio bridges live in the `audio` module; bring them into
 // scope so `loft_register_bridges!` (which takes bare idents) can see them.
 use audio::{
-    loft_audio_load__loft_bridge, loft_audio_play__loft_bridge,
-    loft_audio_set_volume__loft_bridge, loft_audio_stop__loft_bridge,
-    n_audio_play_raw__loft_bridge,
+    loft_audio_load__loft_bridge, loft_audio_play__loft_bridge, loft_audio_seek__loft_bridge,
+    loft_audio_set_pan__loft_bridge, loft_audio_set_volume__loft_bridge,
+    loft_audio_stop__loft_bridge, loft_audio_stop_all__loft_bridge, n_audio_play_raw__loft_bridge,
 };
 mod shader;
 mod text;
@@ -354,7 +355,9 @@ impl ApplicationHandler for JsonApp {
                 MODS.with(|c| c.set(bits));
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                let code = key_index(&event.logical_key).map(|i| i as i64).unwrap_or(-1);
+                let code = key_index(&event.logical_key)
+                    .map(|i| i as i64)
+                    .unwrap_or(-1);
                 if (0..=255).contains(&code) {
                     KEYS.with(|k| k.borrow_mut()[code as usize] = event.state.is_pressed());
                 }
@@ -1009,7 +1012,11 @@ pub unsafe extern "C" fn n_gl_upload_indices(
 
 /// Native path (raw pointer): upload indices from a raw i64 pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn loft_gl_upload_indices_rawptr(vao: i64, idx_ptr: *const i64, count: u32) -> i64 {
+pub unsafe extern "C" fn loft_gl_upload_indices_rawptr(
+    vao: i64,
+    idx_ptr: *const i64,
+    count: u32,
+) -> i64 {
     gl_guard!(0);
     unsafe { upload_ebo(vao as u32, idx_ptr, count) as i64 }
 }
@@ -1883,7 +1890,12 @@ pub extern "C" fn loft_gl_draw_elements(vao: i64, n_indices: i64, mode: i64) {
     };
     unsafe {
         gl::BindVertexArray(vao as u32);
-        gl::DrawElements(gl_mode, n_indices as i32, gl::UNSIGNED_INT, std::ptr::null());
+        gl::DrawElements(
+            gl_mode,
+            n_indices as i32,
+            gl::UNSIGNED_INT,
+            std::ptr::null(),
+        );
         gl::BindVertexArray(0);
     }
 }
@@ -2392,7 +2404,10 @@ loft_ffi::loft_register! {
     loft_audio_load,
     loft_audio_play,
     loft_audio_stop,
+    loft_audio_stop_all,
     loft_audio_set_volume,
+    loft_audio_set_pan,
+    loft_audio_seek,
     loft_audio_play_raw => n_audio_play_raw,
 }
 
@@ -2480,6 +2495,9 @@ loft_ffi::loft_register_bridges! {
     "loft_audio_play" => loft_audio_play__loft_bridge,
     "loft_audio_stop" => loft_audio_stop__loft_bridge,
     "loft_audio_set_volume" => loft_audio_set_volume__loft_bridge,
+    "loft_audio_set_pan" => loft_audio_set_pan__loft_bridge,
+    "loft_audio_seek" => loft_audio_seek__loft_bridge,
+    "loft_audio_stop_all" => loft_audio_stop_all__loft_bridge,
     "loft_audio_play_raw" => n_audio_play_raw__loft_bridge,
 }
 
@@ -2667,7 +2685,11 @@ mod input_event_tests {
         assert_eq!(loft_gl_event_button(), 1);
         assert_eq!(loft_gl_event_x(), 12.0);
         assert_eq!(loft_gl_event_y(), 34.0);
-        assert_eq!(text_of(loft_gl_event_text()), "", "text leaked across events");
+        assert_eq!(
+            text_of(loft_gl_event_text()),
+            "",
+            "text leaked across events"
+        );
 
         // 4 — Wheel.
         assert_eq!(loft_gl_next_event(), EV_WHEEL);
@@ -2692,7 +2714,6 @@ mod input_event_tests {
     }
 }
 
-
 // ── loft-named aliases: the STORE-AWARE entry points own the exported names ──
 //
 // A loft declaration carries `#native "loft_gl_x"`, and a library compiled to a
@@ -2703,21 +2724,39 @@ mod input_event_tests {
 // holds a pointer; they simply no longer shadow (loft-libs-graphics#33).
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn loft_gl_upload_vertices(store: loft_ffi::LoftStore, data: loft_ffi::LoftRef, stride: i64) -> i64 {
+pub unsafe extern "C" fn loft_gl_upload_vertices(
+    store: loft_ffi::LoftStore,
+    data: loft_ffi::LoftRef,
+    stride: i64,
+) -> i64 {
     unsafe { n_gl_upload_vertices(store, data, stride) }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn loft_gl_update_buffer(store: loft_ffi::LoftStore, vbo: i64, data: loft_ffi::LoftRef) {
+pub unsafe extern "C" fn loft_gl_update_buffer(
+    store: loft_ffi::LoftStore,
+    vbo: i64,
+    data: loft_ffi::LoftRef,
+) {
     unsafe { n_gl_update_buffer(store, vbo, data) }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn loft_gl_upload_indices(store: loft_ffi::LoftStore, vao: i64, data: loft_ffi::LoftRef) -> i64 {
+pub unsafe extern "C" fn loft_gl_upload_indices(
+    store: loft_ffi::LoftStore,
+    vao: i64,
+    data: loft_ffi::LoftRef,
+) -> i64 {
     unsafe { n_gl_upload_indices(store, vao, data) }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn loft_gl_set_mat4(store: loft_ffi::LoftStore, program: i64, name_ptr: *const u8, name_len: usize, mat: loft_ffi::LoftRef) {
+pub unsafe extern "C" fn loft_gl_set_mat4(
+    store: loft_ffi::LoftStore,
+    program: i64,
+    name_ptr: *const u8,
+    name_len: usize,
+    mat: loft_ffi::LoftRef,
+) {
     unsafe { n_gl_set_mat4(store, program, name_ptr, name_len, mat) }
 }

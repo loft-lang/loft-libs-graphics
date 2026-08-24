@@ -31,6 +31,33 @@ loft install graphics
   `draw_sprite`); `Painter2D` for fixed-function 2D draws over GL; SFX helpers
   (`sfx_beep` / `sfx_chirp` / `sfx_descend`).
 
+### Audio
+
+`audio_load` a WAV or OGG, then `audio_play(clip, volume, looping, pan, start)`
+— everything past `volume` has a default, so `audio_play(clip, 0.8)` still means
+what it always meant.  A playback answers a handle for `audio_stop`,
+`audio_set_volume`, `audio_set_pan` and `audio_seek`, and `audio_stop_all` ends
+everything at once.
+
+The desktop and the browser are ONE contract, and where the two could differ this
+package takes the Web Audio answer, because that side has a specification and
+rodio has a mixer:
+
+- **Pan** is `StereoPannerNode`'s law — equal-power for a mono clip, so a sweep
+  holds its loudness through the middle instead of dipping; a stereo clip is
+  narrowed toward the near side rather than having the far one muted.
+- **`start` skips into the first pass only.**  A looping clip then repeats whole,
+  which is what `start(when, offset)` with `loop` does in a browser.
+- **A handle is never handed out twice.**  Slots are reused as sounds finish, but
+  the handle carries which use it belongs to, so `audio_stop` on a finished sound
+  stops nothing rather than stopping whatever took its place.
+- **A looping clip cannot seek**, and `audio_seek` answers false rather than
+  leaving the caller believing it moved: repeating needs a buffered source, which
+  has no earlier position to go back to.
+
+The chiptune helpers (`sfx_beep` / `sfx_chirp` / `sfx_descend` / `sfx_noise`)
+synthesise into `audio_play_raw` and need no file at all.
+
 ### Colours and the canvas
 
 A colour is one `integer` packed **0xAARRGGBB** — build it with `rgba` / `rgb`
