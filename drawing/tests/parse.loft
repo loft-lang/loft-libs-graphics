@@ -96,11 +96,32 @@ fn test_name_measures_the_marks_that_follow() {
   assert(e.bx0 == 0.0 && e.bx1 == 1.0, "the box spans everything drawn after it");
 }
 
-fn test_a_fill_this_build_does_not_draw_is_listed() {
+fn test_a_gradient_fill_parses_with_its_own_spec() {
   sc = parse_scene("size 8x8\nCircle (0.5,0.5) r=0.3 radial=10,20,30>40,50,60 at=0.5,0.5,0.3\n");
   assert(len(sc.unparsed) == 0, "a radial fill is not a syntax problem");
-  assert(len(sc.deferred) == 1, "…it is a mark this build does not draw: {len(sc.deferred)}");
-  assert(sc.ops[0]?.paint.pk == Radial, "and it parsed as one");
+  assert(len(sc.deferred) == 0, "…nor a deferred one: this build draws it");
+  assert(sc.ops[0]?.paint.pk == Radial, "it parses as a radial");
+  spec = sc.ops[0]?.paint.spec;
+  assert(len(spec) == 3 && spec[0]? == 0.5 && spec[1]? == 0.5 && spec[2]? == 0.3,
+         "and carries its at= centre and radius");
+  assert(graphics::color_g(sc.ops[0]?.paint.c1) == 20
+         && graphics::color_g(sc.ops[0]?.paint.c2) == 50, "both stops");
+}
+
+fn test_radial_beats_grad_beats_rgb() {
+  // `_paint`'s order, which is not the order a reader would guess from the line:
+  // the LAST-written option does not win, the most specific KIND does.
+  sc = parse_scene("size 8x8\nPoly (0.1,0.1) (0.9,0.1) (0.5,0.9) rgb=1,2,3 grad=4,5,6>7,8,9 radial=10,11,12>13,14,15\n");
+  assert(sc.ops[0]?.paint.pk == Radial, "radial= outranks grad= and rgb=");
+  sc2 = parse_scene("size 8x8\nPoly (0.1,0.1) (0.9,0.1) (0.5,0.9) rgb=1,2,3 grad=4,5,6>7,8,9\n");
+  assert(sc2.ops[0]?.paint.pk == Linear, "grad= outranks rgb=");
+}
+
+fn test_a_gradient_with_no_spec_falls_back_to_the_bounding_box() {
+  sc = parse_scene("size 8x8\nPoly (0.1,0.1) (0.9,0.1) (0.5,0.9) grad=4,5,6>7,8,9\n");
+  assert(sc.ops[0]?.paint.pk == Linear, "a linear fill");
+  assert(len(sc.ops[0]?.paint.spec) == 0,
+         "with no dir=, so the renderer derives a top-to-bottom axis from the shape");
 }
 
 fn test_fronds_and_petals_are_recognised_not_misread() {

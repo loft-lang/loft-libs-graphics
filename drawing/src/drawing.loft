@@ -507,7 +507,6 @@ fn parse_circle(sc: Sketch, s: text) -> Mark {
     } else {
       sc.ops += [Op { kind: Fill, pts: pc_pts, paint: pc_paint, widths: [],
                       w: 3, color: 0, color2: 0 }];
-      note_deferred_paint(sc, s, pc_paint);
     }
     return Mark { matched: true, bad: false, pts: pc_pts }
   }
@@ -585,7 +584,6 @@ fn parse_poly(sc: Sketch, s: text) -> Mark {
     pp_pts = smooth_pts(pp_raw.pts, pp_raw.smooth, true);
     sc.ops += [Op { kind: Fill, pts: pp_pts, paint: pp_paint, widths: [], w: 3,
                     color: 0, color2: 0 }];
-    note_deferred_paint(sc, s, pp_paint);
     return Mark { matched: true, bad: false, pts: pp_pts }
   }
   pp_base = read_width(s, 3);
@@ -608,12 +606,6 @@ fn parse_poly(sc: Sketch, s: text) -> Mark {
   Mark { matched: true, bad: false, pts: pp_line }
 }
 
-/// A fill this build parses but does not draw is LISTED, so a caller can see the
-/// picture is short of a mark rather than discovering it by eye.
-fn note_deferred_paint(sc: Sketch, s: text, p: const Paint) {
-  if p.pk == Linear { sc.deferred += ["grad= fill: {s}"]; }
-  if p.pk == Radial { sc.deferred += ["radial= fill: {s}"]; }
-}
 
 // ── The scene ───────────────────────────────────────────────────────
 
@@ -795,9 +787,116 @@ fn draw_sky(cv: graphics::Canvas, top: integer, bot: integer, bw: integer, bh: i
 }
 
 fn draw_fill(cv: graphics::Canvas, op: const Op, bw: integer, bh: integer) {
-  if op.paint.pk != Solid { return }
+  if op.paint.pk == Stroked { return }
   df_px = to_pixels(op.pts, bw, bh);
-  raster::fill_poly(cv, df_px, op.paint.c1);
+  if op.paint.pk == Solid {
+    raster::fill_poly(cv, df_px, op.paint.c1);
+    return
+  }
+  fill_gradient(cv, op, df_px, bw, bh);
+}
+
+/// The side of the gradient grid `draw.py` computes on.  Not a quality knob: the
+/// picture is this grid ENLARGED by a bicubic filter, so changing it changes
+/// every gradient in the corpus.
+const GRADIENT_GRID = 100;
+
+/// Pillow's `or`-idiom guard: a zero denominator becomes this rather than
+/// dividing by zero.  It is a real number in the arithmetic, not a sentinel — a
+/// degenerate axis therefore saturates `t` instead of blanking the shape.
+const GRADIENT_EPS = 0.000000001;
+
+/// `draw.py`'s `_make_gradient`: the ramp computed small, then ENLARGED.
+///
+/// ⚠ The enlargement is the contract, not an optimisation.  `Image.resize(size)`
+/// with no `resample=` is BICUBIC, whose negative lobes overshoot — a 100x100
+/// ramp blown up to a shape's bounding box carries ringing that computing the
+/// ramp directly at full size would not have. Reproduce the two steps or the
+/// pixels differ.
+fn make_gradient(pa: const Paint, fx0: float, fy0: float, fx1: float, fy1: float,
+                 gw: integer, gh: integer) -> graphics::Canvas {
+  // Defaults, when no `dir=` / `at=` was given: a linear ramp runs top to bottom
+  // over the bounding box, a radial one starts at its centre.
+  mg_ax = (fx0 + fx1) / 2.0;
+  mg_ay = fy0;
+  mg_bx = (fx0 + fx1) / 2.0;
+  mg_by = fy1;
+  mg_cx = (fx0 + fx1) / 2.0;
+  mg_cy = (fy0 + fy1) / 2.0;
+  mg_r = (if fx1 - fx0 > fy1 - fy0 { fx1 - fx0 } else { fy1 - fy0 }) / 2.0;
+  if pa.pk == Linear && len(pa.spec) == 4 {
+    mg_ax = pa.spec[0]?; mg_ay = pa.spec[1]?; mg_bx = pa.spec[2]?; mg_by = pa.spec[3]?;
+  }
+  if pa.pk == Radial && len(pa.spec) == 3 {
+    mg_cx = pa.spec[0]?; mg_cy = pa.spec[1]?; mg_r = pa.spec[2]?;
+  }
+  mg_dx = mg_bx - mg_ax;
+  mg_dy = mg_by - mg_ay;
+  mg_den = mg_dx * mg_dx + mg_dy * mg_dy;
+  if mg_den == 0.0 { mg_den = GRADIENT_EPS; }
+  if mg_r == 0.0 { mg_r = GRADIENT_EPS; }
+  mg_r1 = graphics::color_r(pa.c1); mg_g1 = graphics::color_g(pa.c1); mg_b1 = graphics::color_b(pa.c1);
+  mg_r2 = graphics::color_r(pa.c2); mg_g2 = graphics::color_g(pa.c2); mg_b2 = graphics::color_b(pa.c2);
+  mg_small = graphics::canvas(GRADIENT_GRID, GRADIENT_GRID, 0);
+  mg_g = GRADIENT_GRID as float;
+  for j in 0..GRADIENT_GRID {
+    mg_fy = fy0 + (fy1 - fy0) * (((j as float) + 0.5) / mg_g ?? 0.0);
+    for i in 0..GRADIENT_GRID {
+      mg_fx = fx0 + (fx1 - fx0) * (((i as float) + 0.5) / mg_g ?? 0.0);
+      mg_t = if pa.pk == Linear {
+        (((mg_fx - mg_ax) * mg_dx + (mg_fy - mg_ay) * mg_dy) / mg_den ?? 0.0)
+      } else {
+        (sqrt((mg_fx - mg_cx) * (mg_fx - mg_cx) + (mg_fy - mg_cy) * (mg_fy - mg_cy)) / mg_r ?? 0.0)
+      };
+      if mg_t < 0.0 { mg_t = 0.0; }
+      if mg_t > 1.0 { mg_t = 1.0; }
+      mg_small.set_pixel(i, j, graphics::rgba(
+        ((mg_r1 as float) + ((mg_r2 - mg_r1) as float) * mg_t) as integer,
+        ((mg_g1 as float) + ((mg_g2 - mg_g1) as float) * mg_t) as integer,
+        ((mg_b1 as float) + ((mg_b2 - mg_b1) as float) * mg_t) as integer, 255));
+    }
+  }
+  mg_small.resize_bicubic(if gw < 1 { 1 } else { gw }, if gh < 1 { 1 } else { gh })
+}
+
+/// Fill a shape with a gradient: build the ramp over the shape's bounding box,
+/// then stamp it through the shape as a mask.
+///
+/// ⚠ The mask is a POLYGON FILL on a zero-filled buffer, so it only ever holds
+/// "set" or "unset" — measured, `ImageDraw.polygon` on an `L` image produces
+/// exactly {0, 255} and nothing between. That is what makes the paste a hard
+/// SELECT rather than an alpha blend, and why the gradient's own edge is not
+/// anti-aliased here: the 3x supersample is what smooths it, one step later.
+fn fill_gradient(cv: graphics::Canvas, op: const Op, pxs: const vector<raster::Pt>,
+                 bw: integer, bh: integer) {
+  fg_n = len(op.pts);
+  if fg_n == 0 { return }
+  fg_x0 = op.pts[0]?.ptx; fg_y0 = op.pts[0]?.pty;
+  fg_x1 = fg_x0; fg_y1 = fg_y0;
+  for p in op.pts {
+    if p.ptx < fg_x0 { fg_x0 = p.ptx; }
+    if p.pty < fg_y0 { fg_y0 = p.pty; }
+    if p.ptx > fg_x1 { fg_x1 = p.ptx; }
+    if p.pty > fg_y1 { fg_y1 = p.pty; }
+  }
+  fg_px0 = (fg_x0 * (bw as float)) as integer;
+  fg_py0 = (fg_y0 * (bh as float)) as integer;
+  fg_w = ((fg_x1 * (bw as float)) as integer) + 1 - fg_px0;
+  fg_h = ((fg_y1 * (bh as float)) as integer) + 1 - fg_py0;
+  if fg_w < 1 { fg_w = 1; }
+  if fg_h < 1 { fg_h = 1; }
+  fg_grad = make_gradient(op.paint, fg_x0, fg_y0, fg_x1, fg_y1, fg_w, fg_h);
+  fg_mask = graphics::canvas(fg_w, fg_h, 0);
+  fg_local: vector<raster::Pt> = [];
+  for p in pxs { fg_local += [raster::pt(p.ptx - (fg_px0 as float), p.pty - (fg_py0 as float))]; }
+  raster::fill_poly(fg_mask, fg_local, graphics::rgba(255, 255, 255, 255));
+  for y in 0..fg_h {
+    for x in 0..fg_w {
+      if graphics::color_a(fg_mask.get_pixel(x, y)) != 0 {
+        cv.set_pixel(fg_px0 + x, fg_py0 + y, fg_grad.get_pixel(x, y));
+      }
+    }
+  }
 }
 
 fn draw_stroke(cv: graphics::Canvas, op: const Op, bw: integer, bh: integer) {
