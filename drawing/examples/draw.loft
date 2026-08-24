@@ -1,0 +1,54 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Render one `.draw` scene, report what it measures, and EXIT ON THE VERDICT.
+//
+//     loft draw.loft sword.draw            # renders sword.png beside the scene
+//     loft draw.loft sword.draw out.png    # …or wherever you say
+//
+// The exit status is the whole point: non-zero when a line did not parse, when a
+// mark this build does not draw was recognised, or when a `check` failed — and
+// the report says which.  That is what lets something that cannot look at the
+// PNG still know the sprite is wrong.
+//
+// `--once` is accepted because `draw.py` spells this mode that way; it changes
+// nothing here.  The oracle's other mode watches the file and redraws on save,
+// and this tool does not: a redraw loop belongs to an editor, not to a gate.
+#cwd
+
+use drawing;
+
+fn main() {
+  args = arguments();
+  scene = "";
+  out = "";
+  for a in args {
+    if a == "--once" { continue }
+    if scene == "" { scene = a; continue }
+    if out == "" { out = a; }
+  }
+  if scene == "" {
+    panic("usage: loft draw.loft [--once] <scene.draw> [out.png]");
+  }
+  if out == "" { out = "{drop_suffix(scene)}.png"; }
+
+  sk = render_file(scene, out);
+  rs = eval_checks(sk);
+  print(metric_report(sk, rs));
+  if scene_ok(sk, rs) { return }
+
+  // Name ONE failure in the exit message.  The report above already carries the
+  // rest, and an exit line that quotes a whole report is read by nothing.
+  for u in sk.unparsed { panic("{scene}: {u} — no command accepts this line"); }
+  for d in sk.deferred { panic("{scene}: {d} — recognised, and this build does not draw it"); }
+  for r in rs if !r.ok { panic("{scene}: {r.report}"); }
+}
+
+/// The path without its final `.suffix`, so `sword.draw` picks `sword.png`.
+fn drop_suffix(p: text) -> text {
+  ds_dot = p.rfind(".");
+  if ds_dot == null { return p }
+  ds_at = ds_dot ?? 0;
+  if p[ds_at..size(p)].contains("/") { return p }
+  p[0..ds_at]
+}

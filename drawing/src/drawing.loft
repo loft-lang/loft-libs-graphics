@@ -112,6 +112,10 @@ pub struct Elem {
   by0: float = 0.0,
   bx1: float = 0.0,
   by1: float = 0.0,
+  /// How many marks the scene had drawn when this element first took ink, or
+  /// `-1` for one that never did.  It orders the metric report the way the
+  /// oracle's does — by first ink, not by where the `name` line sits.
+  first_at: integer = -1,
 }
 
 /// A `landmark <name> = <value>` line.
@@ -718,7 +722,8 @@ fn elem_index(sc: Sketch, nm: text) -> integer {
   for i in 0..len(sc.elems) {
     if sc.elems[i]?.ename == nm { return i }
   }
-  sc.elems += [Elem { ename: nm, seen: false, bx0: 0.0, by0: 0.0, bx1: 0.0, by1: 0.0 }];
+  sc.elems += [Elem { ename: nm, seen: false, bx0: 0.0, by0: 0.0, bx1: 0.0, by1: 0.0,
+                      first_at: -1 }];
   len(sc.elems) - 1
 }
 
@@ -743,7 +748,9 @@ fn acc_pts(sc: Sketch, idx: integer, pts: const vector<raster::Pt>) {
     }
   }
   sc.elems[idx] = Elem { ename: ap_e.ename, seen: ap_seen,
-                         bx0: ap_x0, by0: ap_y0, bx1: ap_x1, by1: ap_y1 };
+                         bx0: ap_x0, by0: ap_y0, bx1: ap_x1, by1: ap_y1,
+                         first_at: if ap_e.first_at >= 0 { ap_e.first_at }
+                                   else { len(sc.ops) } };
 }
 
 /// `Background …` — transparent, a colour ramp, or a grey ramp.
@@ -862,6 +869,279 @@ pub fn parse_scene(src: text) -> Sketch {
     sc.unparsed += ["line {ps_no}: {ps_s}"];
   }
   sc
+}
+
+// ── The metric channel: `landmark`, `check`, and the report ──────────
+//
+// A `.draw` scene can state what it MEANS as well as what it draws:
+//
+//     landmark horizon = 0.62
+//     check head.cx ~ 0.333 tol 0.04
+//     check mouth.cy > nose.cy
+//
+// A check reads the boxes the named marks actually covered, so it measures the
+// picture rather than the source.  That is what makes iteration cheap for
+// something that cannot look at the result: a metric report costs a read where a
+// PNG costs a look.  `draw.py` evaluates these into `stats.txt` and turns them
+// into its `--once` exit status; this is that channel, verdict for verdict.
+
+/// A resolved value, or the name that could not be resolved.
+///
+/// The error is a NAME with a `?` after it — `head?`, `head.middle?` — because a
+/// report has to say which spelling was wrong, not that something was.
+struct Val {
+  ok: boolean = false,
+  value: float = 0.0,
+  err: text = "",
+}
+
+fn val_ok(v: float) -> Val { Val { ok: true, value: v, err: "" } }
+fn val_err(name: text) -> Val { Val { ok: false, value: 0.0, err: "{name}?" } }
+
+/// One evaluated `check` line.
+pub struct Check {
+  /// The check as written, with any `tol` clause removed — what the report echoes.
+  claim: text = "",
+  ok: boolean = false,
+  /// The two sides, as measured.  Both `0.0` when a name did not resolve.
+  lhs: float = 0.0,
+  rhs: float = 0.0,
+  /// The tolerance `~` was judged at; the other operators ignore it.
+  ///
+  /// ⚠ Spelled `0.02` and not `DEFAULT_TOL`: a field default that names a
+  /// file-scope constant is an internal compiler error today
+  /// ([loft#1086](https://github.com/loft-lang/loft/issues/1086)).
+  tol: float = 0.02,
+  /// Empty when the check was measured, whatever its verdict.  Otherwise the
+  /// unresolved name (`head.middle?`) or `(unparsed)` for a line with no operator.
+  err: text = "",
+  /// The one-line report, in `draw.py`'s spelling.
+  report: text = "",
+}
+
+/// What `~` means without a `tol` clause: a fraction of the paper.
+pub const DEFAULT_TOL = 0.02;
+
+/// One measurable property of an element's box — `draw.py`'s `props()`.
+fn box_prop(e: const Elem, p: text) -> Val {
+  if p == "left" { return val_ok(e.bx0) }
+  if p == "top" { return val_ok(e.by0) }
+  if p == "right" { return val_ok(e.bx1) }
+  if p == "bottom" { return val_ok(e.by1) }
+  if p == "w" { return val_ok(e.bx1 - e.bx0) }
+  if p == "h" { return val_ok(e.by1 - e.by0) }
+  if p == "cx" { return val_ok((e.bx0 + e.bx1) * 0.5) }
+  if p == "cy" { return val_ok((e.by0 + e.by1) * 0.5) }
+  val_err("{e.ename}.{p}")
+}
+
+/// A literal number, an `element.property`, or a landmark — `draw.py`'s `value_of`.
+///
+/// An element that was named and never drawn resolves like an unknown one: it
+/// has no box, and answering `0,0,0,0` for it would be a measurement rather than
+/// an absence.
+fn value_of(sk: const Sketch, tok: text) -> Val {
+  vo_n = tok as float?;
+  if vo_n != null { return val_ok(vo_n ?? 0.0) }
+  vo_dot = tok.find(".");
+  if vo_dot != null {
+    vo_at = vo_dot ?? 0;
+    vo_e = tok[0..vo_at];
+    vo_p = tok[vo_at + 1..size(tok)];
+    for e in sk.elems if e.ename == vo_e {
+      if e.seen { return box_prop(e, vo_p) }
+      return val_err(vo_e)
+    }
+    return val_err(vo_e)
+  }
+  for l in sk.landmarks if l.lname == tok { return val_ok(l.lvalue) }
+  val_err(tok)
+}
+
+/// A value, or a value plus or minus a literal — `draw.py`'s `term_of`.
+///
+/// The pattern is `^(\S+)\s*([+-])\s*([\d.]+)$`, and its greed decides which `-`
+/// is the operator: the RIGHTMOST one that leaves a space-free base on its left
+/// and nothing but digits and dots on its right.  So `-0.1` is a negative
+/// literal and `x-0.1` is a subtraction, with no rule beyond the pattern.
+fn term_of(sk: const Sketch, expr: text) -> Val {
+  te_s = expr.trim();
+  te_i = size(te_s) - 1;
+  while te_i > 0 {
+    te_b = scan::at(te_s, te_i);
+    if te_b == 43 || te_b == 45 {
+      te_head = te_s[0..te_i];
+      te_base = te_head.trim_end();
+      te_tail = te_s[te_i + 1..size(te_s)];
+      te_num = scan::read_unsigned(te_tail, scan::skip_space(te_tail, 0));
+      if te_base != "" && !te_base.contains(" ") && te_num.ok
+         && te_num.at == size(te_tail) {
+        te_v = value_of(sk, te_base);
+        if !te_v.ok { return te_v }
+        return val_ok(if te_b == 43 { te_v.value + te_num.value }
+                      else { te_v.value - te_num.value })
+      }
+    }
+    te_i -= 1;
+  }
+  value_of(sk, te_s)
+}
+
+/// The first `\btol\s+([\d.]+)` clause: where it starts, and the number it names.
+///
+/// Case-SENSITIVE, unlike every other word in the grammar — the tolerance regex
+/// is the one `draw.py` writes without `re.I`.
+fn find_tol(c: text) -> scan::Scan {
+  ft_n = size(c);
+  ft_i = 0;
+  while ft_i < ft_n {
+    if scan::word_boundary(c, ft_i) && scan::at(c, ft_i) == 116
+       && scan::at(c, ft_i + 1) == 111 && scan::at(c, ft_i + 2) == 108 {
+      ft_j = ft_i + 3;
+      ft_k = scan::skip_space(c, ft_j);
+      if ft_k > ft_j {
+        ft_v = scan::read_unsigned(c, ft_k);
+        if ft_v.ok { return scan::Scan { ok: true, at: ft_i, value: ft_v.value } }
+      }
+    }
+    ft_i += 1;
+  }
+  scan::scan_fail()
+}
+
+/// The comparison operator starting at byte `i`, or `""` — in the alternation
+/// order `draw.py` writes, which is what makes `<=` win over `<`.
+fn op_at(c: text, i: integer) -> text {
+  oa_b = scan::at(c, i);
+  oa_n = scan::at(c, i + 1);
+  if oa_b == 126 { return "~" }
+  if oa_b == 60 { return if oa_n == 61 { "<=" } else { "<" } }
+  if oa_b == 62 { return if oa_n == 61 { ">=" } else { ">" } }
+  if oa_b == 61 && oa_n == 61 { return "==" }
+  ""
+}
+
+/// The `+`-signed rendering of a delta.
+///
+/// `draw.py` writes `{delta:+.3f}` and loft's format spec drops the `+` on a
+/// float, so the sign is written here rather than left to differ silently.
+fn signed3(d: float) -> text { if d < 0.0 { "{d:.3}" } else { "+{d:.3}" } }
+
+/// One `check` line, measured — `draw.py`'s `eval_check`, verdict for verdict.
+pub fn eval_check(sk: const Sketch, raw: text) -> Check {
+  ec_tol = DEFAULT_TOL;
+  ec_c = raw;
+  ec_t = find_tol(raw);
+  if ec_t.ok {
+    ec_tol = ec_t.value;
+    ec_c = raw[0..ec_t.at].trim();
+  }
+  ec_i = size(ec_c) - 1;
+  ec_at = -1;
+  ec_op = "";
+  while ec_i > 0 {
+    ec_try = op_at(ec_c, ec_i);
+    if ec_try != "" && ec_i + size(ec_try) < size(ec_c) {
+      ec_head = ec_c[0..ec_i].trim_end();
+      if ec_head != "" && !ec_head.contains(" ") && !scan::is_space_byte(scan::at(ec_c, 0)) {
+        ec_at = ec_i;
+        ec_op = ec_try;
+        break
+      }
+    }
+    ec_i -= 1;
+  }
+  if ec_at < 0 {
+    return Check { claim: ec_c, ok: false, lhs: 0.0, rhs: 0.0, tol: ec_tol,
+                   err: "(unparsed)", report: "check: {ec_c}  (unparsed)" }
+  }
+  ec_lt = ec_c[0..ec_at].trim_end();
+  ec_rt = ec_c[ec_at + size(ec_op)..size(ec_c)].trim();
+  ec_l = value_of(sk, ec_lt);
+  ec_r = term_of(sk, ec_rt);
+  if !ec_l.ok || !ec_r.ok {
+    ec_e = if ec_l.err != "" { ec_l.err } else { ec_r.err };
+    return Check { claim: ec_c, ok: false, lhs: 0.0, rhs: 0.0, tol: ec_tol,
+                   err: ec_e, report: "check: {ec_c}  ERR {ec_e}" }
+  }
+  ec_d = ec_l.value - ec_r.value;
+  ec_ok = if ec_op == "~" { abs(ec_d) <= ec_tol }
+          else if ec_op == "<" { ec_l.value < ec_r.value }
+          else if ec_op == ">" { ec_l.value > ec_r.value }
+          else if ec_op == "<=" { ec_l.value <= ec_r.value }
+          else if ec_op == ">=" { ec_l.value >= ec_r.value }
+          else { abs(ec_d) < 0.000000001 };
+  ec_v = if ec_ok { "PASS" } else { "FAIL" };
+  ec_sd = signed3(ec_d);
+  ec_lv = ec_l.value;
+  ec_rv = ec_r.value;
+  Check { claim: ec_c, ok: ec_ok, lhs: ec_lv, rhs: ec_rv, tol: ec_tol, err: "",
+          report: "check: {ec_lt} {ec_op} {ec_rt}  ->  {ec_lv:.3} vs {ec_rv:.3}  d={ec_sd}  {ec_v}" }
+}
+
+/// Every `check` the scene states, measured.
+pub fn eval_checks(sk: const Sketch) -> vector<Check> {
+  ev_out: vector<Check> = [];
+  for c in sk.checks { ev_out += [eval_check(sk, c)]; }
+  ev_out
+}
+
+/// Did the scene come out whole — every line understood, every mark drawn, every
+/// check passing?  This is what `--once` exits on.
+///
+/// A DEFERRED mark counts as a failure, where `draw.py` has no such notion: a
+/// mark this build recognises and does not draw means the picture is short of
+/// something the scene asked for, and a renderer that answers "fine" to that is
+/// the one thing this channel exists to prevent.
+pub fn scene_ok(sk: const Sketch, results: const vector<Check>) -> boolean {
+  if len(sk.unparsed) > 0 || len(sk.deferred) > 0 { return false }
+  for r in results if !r.ok { return false }
+  true
+}
+
+/// The metric report: what did not parse, where every named element sits, and
+/// how each check came out.
+///
+/// `draw.py`'s `stats.txt` blocks, in its spelling, minus the two that are
+/// pictures of the render (the density map and the composition notes) —
+/// this channel measures the SCENE, and a picture already has a diff.
+pub fn metric_report(sk: const Sketch, results: const vector<Check>) -> text {
+  mr_out = "";
+  if len(sk.unparsed) > 0 {
+    mr_out += "UNPARSED {len(sk.unparsed)} line(s) — NOT drawn (fix the syntax before judging geometry):\n";
+    for u in sk.unparsed { mr_out += "  {u}\n"; }
+    mr_out += "\n";
+  }
+  if len(sk.deferred) > 0 {
+    mr_out += "DEFERRED {len(sk.deferred)} mark(s) — recognised, not drawn by this build:\n";
+    for d in sk.deferred { mr_out += "  {d}\n"; }
+    mr_out += "\n";
+  }
+  mr_out += "ops: {len(sk.ops)}\npaper: {sk.sw}x{sk.sh}\n\n";
+  mr_out += "elements (bbox frac):\n";
+  for e in seen_in_ink_order(sk) {
+    mr_out += "  {e.ename:8} x[{e.bx0:.2}..{e.bx1:.2}] y[{e.by0:.2}..{e.by1:.2}]\n";
+  }
+  mr_out += "\n";
+  mr_pass = 0;
+  for r in results if r.ok { mr_pass += 1; }
+  mr_out += "CHECKS  {mr_pass}/{len(results)} pass:\n";
+  for r in results { mr_out += "  {r.report}\n"; }
+  mr_out
+}
+
+/// The drawn elements, in the order they first took ink.
+///
+/// `draw.py` keys its element table by name in a dict, so its report's order is
+/// the order each element first got a mark — NOT the order the `name` lines
+/// appear in, which is what a scene that names an element long before drawing it
+/// would show.
+fn seen_in_ink_order(sk: const Sketch) -> vector<Elem> {
+  si_out: vector<Elem> = [];
+  for k in 0..=len(sk.ops) {
+    for e in sk.elems if e.seen && e.first_at == k { si_out += [e]; }
+  }
+  si_out
 }
 
 // ── Rendering ───────────────────────────────────────────────────────

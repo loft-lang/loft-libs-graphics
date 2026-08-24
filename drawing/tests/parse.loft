@@ -124,12 +124,16 @@ fn test_a_gradient_with_no_spec_falls_back_to_the_bounding_box() {
          "with no dir=, so the renderer derives a top-to-bottom axis from the shape");
 }
 
-fn test_fronds_and_petals_are_recognised_not_misread() {
+fn test_fronds_draws_and_petals_is_recognised_not_misread() {
   // Without their own branch these fall through to `Line`, whose regex would
   // find the two coordinates on the line and draw a segment nobody wrote.
+  // `Fronds` draws; `Petals` is recognised and listed, because no scene in the
+  // corpus uses it — so its absence is a fact the caller has rather than one
+  // they discover by eye.
   sc = parse_scene("size 8x8\nFronds (0.5,0.9)-(0.5,0.2) n=8 len=0.1\nPetals (0.5,0.5) n=6 r=0.1 len=0.2 w=0.05\n");
-  assert(len(sc.ops) == 0, "neither draws, got {len(sc.ops)} op(s)");
-  assert(len(sc.deferred) == 2, "both are listed");
+  assert(len(sc.ops) == 8, "the array is eight strokes, got {len(sc.ops)} op(s)");
+  assert(len(sc.deferred) == 1 && sc.deferred[0]?.contains("Petals"),
+         "Petals is listed, and Fronds is not");
   assert(len(sc.unparsed) == 0, "neither is a syntax problem");
 }
 
