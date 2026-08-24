@@ -645,11 +645,24 @@ fn polygon_crossings(pc_pts: const vector<Coord>, pc_y: integer,
 /// Fixed-point fraction bits for resample weights — Pillow's `PRECISION_BITS`.
 RESAMPLE_PREC = 22;
 RESAMPLE_PI = 3.14159265358979323846;
+BICUBIC_A = -0.5;
 
 fn sinc_at(x: float) -> float {
   if x == 0.0 { return 1.0 }
   sc_xp = x * RESAMPLE_PI;
   (sin(sc_xp) / sc_xp)?
+}
+
+/// Pillow's bicubic kernel — the Keys cubic with `a = -0.5`, support 2.
+///
+/// The two branches are one polynomial each and the constant is the whole
+/// identity of the filter: `a = -0.5` is Catmull-Rom, and another `a` is a
+/// different picture, not a rounding difference.
+fn bicubic_at(bc_x0: float) -> float {
+  bc_x = if bc_x0 < 0.0 { -bc_x0 } else { bc_x0 };
+  if bc_x < 1.0 { return ((BICUBIC_A + 2.0) * bc_x - (BICUBIC_A + 3.0)) * bc_x * bc_x + 1.0 }
+  if bc_x < 2.0 { return (((bc_x - 5.0) * bc_x + 8.0) * bc_x - 4.0) * BICUBIC_A }
+  0.0
 }
 
 /// The Lanczos-3 kernel: `sinc(x) * sinc(x/3)` inside a radius of 3, else 0.
@@ -664,15 +677,21 @@ fn lanczos_at(lz_x0: float) -> float {
 /// fixed-point weights appended to `kk`.
 ///
 /// The weights are normalised to sum to 1 in floating point and only then scaled
-/// to integers, rounding AWAY from zero — Lanczos has negative lobes, and rounding
-/// them the same direction as the positive ones is what keeps the taps summing
-/// back to `1 << RESAMPLE_PREC`.
-fn resample_coeffs(in_size: integer, out_size: integer, starts: &vector<integer>,
+/// to integers, rounding AWAY from zero — both filters here have negative lobes,
+/// and rounding them the same direction as the positive ones is what keeps the
+/// taps summing back to `1 << RESAMPLE_PREC`.
+///
+/// `support0` and `filt` are the ONLY things that differ between Pillow's
+/// filters, which is why they are parameters rather than two copies of this
+/// function: the window arithmetic, the normalisation and the fixed-point
+/// rounding are one derived fact and belong in one place.
+fn resample_coeffs(in_size: integer, out_size: integer, support0: float,
+                   filt: fn(float) -> float, starts: &vector<integer>,
                    counts: &vector<integer>, kk: &vector<integer>) {
   rc_scale = ((in_size as float) / (out_size as float))?;
   // Upscaling does not widen the kernel: the filter scale floors at 1.
   rc_fscale = if rc_scale < 1.0 { 1.0 } else { rc_scale };
-  rc_support = 3.0 * rc_fscale;
+  rc_support = support0 * rc_fscale;
   rc_ss = (1.0 / rc_fscale)?;
   for xx in 0..out_size {
     rc_centre = ((xx as float) + 0.5) * rc_scale;
@@ -684,7 +703,7 @@ fn resample_coeffs(in_size: integer, out_size: integer, starts: &vector<integer>
     rc_row: vector<float> = [];
     rc_ww = 0.0;
     for x in 0..rc_max {
-      rc_w = lanczos_at((((x + rc_min) as float) - rc_centre + 0.5) * rc_ss);
+      rc_w = filt((((x + rc_min) as float) - rc_centre + 0.5) * rc_ss);
       rc_row += [rc_w];
       rc_ww += rc_w;
     }
@@ -726,6 +745,31 @@ fn resample_clip(rq_v: integer) -> integer {
 // Example: @GFX-007 — why a 3x supersample plus this is not the same picture as
 // drawing once at final size.
 pub fn resize_lanczos(self: const Canvas, ow: integer, oh: integer) -> Canvas {
+  resample(self, ow, oh, 3.0, lanczos_at)
+}
+
+/// Resample with a BICUBIC filter — Pillow's `Image.resize` default.
+///
+/// The default is the reason this exists: `resize(size)` with no `resample=`
+/// argument is bicubic, and code that builds a small image and enlarges it (a
+/// gradient computed at 100x100, say) takes that path without naming it. Read
+/// the call site's filter off the ARGUMENT LIST and it looks like there isn't
+/// one.
+///
+/// ⚠ Bicubic has negative lobes, so an ENLARGEMENT overshoots: a hard 40→200
+/// step upscaled 4x spans 28..212 in Pillow and here alike. That is the filter,
+/// not a defect — clamping it away would be the defect.
+pub fn resize_bicubic(self: const Canvas, ow: integer, oh: integer) -> Canvas {
+  resample(self, ow, oh, 2.0, bicubic_at)
+}
+
+/// Pillow's two-pass resample, with the filter left to the caller.
+///
+/// One body, because the passes, the premultiply and the fixed-point
+/// accumulation are the same derived fact for every filter — only the kernel and
+/// its support differ.
+fn resample(self: const Canvas, ow: integer, oh: integer, support0: float,
+            filt: fn(float) -> float) -> Canvas {
   if ow < 1 || oh < 1 || self.width < 1 || self.height < 1 {
     return canvas(if ow < 1 { 1 } else { ow }, if oh < 1 { 1 } else { oh }, 0);
   }
@@ -742,7 +786,7 @@ pub fn resize_lanczos(self: const Canvas, ow: integer, oh: integer) -> Canvas {
                rl_a];
   }
   hs: vector<integer> = []; hc: vector<integer> = []; hk: vector<integer> = [];
-  resample_coeffs(rl_iw, ow, hs, hc, hk);
+  resample_coeffs(rl_iw, ow, support0, filt, hs, hc, hk);
   rl_mid: vector<integer> = [];
   for _ in 0..(ow * rl_ih * 4) { rl_mid += [0]; }
   rl_base = 0;
@@ -761,7 +805,7 @@ pub fn resize_lanczos(self: const Canvas, ow: integer, oh: integer) -> Canvas {
     rl_base += rl_n;
   }
   vs: vector<integer> = []; vc: vector<integer> = []; vk: vector<integer> = [];
-  resample_coeffs(rl_ih, oh, vs, vc, vk);
+  resample_coeffs(rl_ih, oh, support0, filt, vs, vc, vk);
   rl_out = canvas(ow, oh, 0);
   rl_od = &rl_out.data;
   rl_vbase = 0;
