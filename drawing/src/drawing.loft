@@ -573,6 +573,110 @@ fn read_at_width(s: text, i: integer) -> Scan {
   ra_n
 }
 
+/// `\b<key>\s*=\s*([-\d.]+)` anywhere on the line, or `dflt` — `draw.py`'s `optf`.
+///
+/// The word boundary is what keeps `w=` out of `w2=` and `ang=` out of `ang2=`,
+/// which on a `Fronds` line are four different options sharing two prefixes.
+fn opt_num(s: text, key: text, dflt: float) -> float {
+  on_o = scan::find_option(s, key);
+  if !on_o.ok { return dflt }
+  on_n = scan::read_number(s, on_o.at);
+  if !on_n.ok { return dflt }
+  on_n.value
+}
+
+/// `Fronds (x,y)-(x,y) n=N len=L [len2= w= w2= ang= ang2= mirror= jitter= field=
+/// fray= bow= seed= depth= sub= stroke=]`
+///
+/// The two endpoints and `n=` / `len=` are REQUIRED and positional — everything
+/// else is found anywhere on the line, which is why the defaults live here rather
+/// than in `FrondSpec`: they are `draw.py`'s, and two of them chain (`len2`
+/// defaults to `len`, `ang2` to `ang`, `w2` to `w`).
+fn parse_fronds(sc: Sketch, s: text) -> Mark {
+  pf_from = 0;
+  while true {
+    pf_w = scan::find_word_from(s, "fronds", pf_from);
+    if !pf_w.ok { return no_mark() }
+    pf_from = pf_w.at;
+    pf_i = scan::skip_space(s, pf_w.at);
+    if scan::at(s, pf_i) != 40 { continue }
+    pf_x0 = scan::read_number(s, scan::skip_space(s, pf_i + 1));
+    if !pf_x0.ok { continue }
+    pf_i = scan::skip_space(s, pf_x0.at);
+    if scan::at(s, pf_i) != 44 { continue }
+    pf_y0 = scan::read_number(s, scan::skip_space(s, pf_i + 1));
+    if !pf_y0.ok { continue }
+    pf_i = scan::skip_space(s, pf_y0.at);
+    if scan::at(s, pf_i) != 41 { continue }
+    pf_i = scan::skip_space(s, pf_i + 1);
+    if scan::at(s, pf_i) != 45 { continue }
+    pf_i = scan::skip_space(s, pf_i + 1);
+    if scan::at(s, pf_i) != 40 { continue }
+    pf_x1 = scan::read_number(s, scan::skip_space(s, pf_i + 1));
+    if !pf_x1.ok { continue }
+    pf_i = scan::skip_space(s, pf_x1.at);
+    if scan::at(s, pf_i) != 44 { continue }
+    pf_y1 = scan::read_number(s, scan::skip_space(s, pf_i + 1));
+    if !pf_y1.ok { continue }
+    pf_i = scan::skip_space(s, pf_y1.at);
+    if scan::at(s, pf_i) != 41 { continue }
+    // `\s+n\s*=\s*(\d+)\s+len\s*=\s*(n)` — required, in this order.
+    pf_j = scan::skip_space(s, pf_i + 1);
+    if pf_j == pf_i + 1 { continue }
+    if scan::lower_byte(scan::at(s, pf_j)) != 110 { continue }
+    pf_j = scan::skip_space(s, pf_j + 1);
+    if scan::at(s, pf_j) != 61 { continue }
+    pf_cnt = scan::read_uint(s, scan::skip_space(s, pf_j + 1));
+    if !pf_cnt.ok { continue }
+    pf_k = scan::skip_space(s, pf_cnt.at);
+    if pf_k == pf_cnt.at { continue }
+    if !scan::matches_at(s, pf_k, "len") { continue }
+    pf_k = scan::skip_space(s, pf_k + 3);
+    if scan::at(s, pf_k) != 61 { continue }
+    pf_len = scan::read_number(s, scan::skip_space(s, pf_k + 1));
+    if !pf_len.ok { continue }
+    pf_wv = opt_num(s, "w", 3.0);
+    pf_av = opt_num(s, "ang", 30.0);
+    pf_spec = FrondSpec {
+      count: pf_cnt.value as integer,
+      len1: pf_len.value,
+      len2: opt_num(s, "len2", pf_len.value),
+      wid1: pf_wv,
+      wid2: opt_num(s, "w2", pf_wv),
+      ang1: pf_av,
+      ang2: opt_num(s, "ang2", pf_av),
+      mirror: (opt_num(s, "mirror", 0.0) as integer) != 0,
+      jitter: opt_num(s, "jitter", 0.5),
+      clump: opt_num(s, "field", 0.6),
+      fray: opt_num(s, "fray", 0.4),
+      bow: opt_num(s, "bow", 0.0),
+      seed: opt_num(s, "seed", 1.0) as integer,
+      depth: opt_num(s, "depth", 1.0) as integer,
+      sub: opt_num(s, "sub", 0.32),
+    };
+    pf_ink = read_stroke_colour(s);
+    pf_all: vector<raster::Pt> = [];
+    for f in fronds(pf_x0.value, pf_y0.value, pf_x1.value, pf_y1.value, pf_spec, sc.sw, sc.sh) {
+      // A bowed frond is three control points with only the MIDDLE one smooth —
+      // a fixed pattern, not one derived from the points, so the curve is the
+      // bow and nothing else.
+      pf_line = f.fpts;
+      pf_wids = f.fwid;
+      if len(f.fpts) > 2 {
+        pf_flags: vector<boolean> = [false, true, false];
+        pf_line = smooth_pts(f.fpts, pf_flags, false);
+        pf_wids = smooth_vals(f.fwid, false);
+      }
+      sc.ops += [Op { kind: Stroke, pts: pf_line,
+                      paint: Paint { pk: Stroked, c1: 0, c2: 0, spec: [] },
+                      widths: pf_wids, w: 3, color: pf_ink, color2: 0 }];
+      for p in pf_line { pf_all += [p]; }
+    }
+    return Mark { matched: true, bad: false, pts: pf_all }
+  }
+  no_mark()
+}
+
 /// `Poly (x,y)… [w=N] [<fill>]` — the workhorse: filled when it names a fill,
 /// a pen stroke when it does not.
 fn parse_poly(sc: Sketch, s: text) -> Mark {
@@ -742,7 +846,11 @@ pub fn parse_scene(src: text) -> Sketch {
     // `Line` and be read as something else — and listed, so their absence from
     // the picture is a fact the caller has rather than one they discover.
     if ps_low.starts_with("petals") { sc.deferred += ["line {ps_no}: Petals"]; continue }
-    if ps_low.starts_with("fronds") { sc.deferred += ["line {ps_no}: Fronds"]; continue }
+    if ps_low.starts_with("fronds") {
+      ps_f = parse_fronds(sc, ps_s);
+      if ps_f.matched { acc_pts(sc, ps_cur, ps_f.pts); }
+      continue
+    }
     if ps_low.starts_with("poly") {
       ps_p = parse_poly(sc, ps_s);
       if ps_p.bad { sc.unparsed += ["line {ps_no}: {ps_s}"]; }
@@ -989,4 +1097,168 @@ pub fn render_file(src: text, out: text) -> Sketch {
   rf_cv = render(rf_sc);
   _ = rf_cv.save_png(out);
   rf_sc
+}
+
+// ── Fronds: a seeded, deliberately non-uniform array of tapered strokes ──────
+
+/// A reproducible pseudo-random float in [-1, 1) from three small non-negative
+/// integers.
+///
+/// ⚠ NOT a PRNG, and deliberately not the `random` package. `draw.py` says so in
+/// its own docstring — *"never random()/hash() (those break reproducible
+/// renders)"* — and the corpus is defined by THIS hash: swap in PCG-64 and every
+/// jittered frond moves, so the substitution fails the gate it was meant to help
+/// pass.
+///
+/// Three details are load-bearing. The masking is 32-bit throughout, and the
+/// widest product it forms (`0xFFFFFFFF * 1274126177`) is 5.47e18 — inside i64 by
+/// a hair, so this needs no widening but has none to spare. And the final divide
+/// is a REAL division: `x / 0xFFFFFFFF` in integer arithmetic is 0 for every input
+/// and would give a perfectly smooth, entirely wrong field.
+pub fn hash01(hseed: integer, hidx: integer, hsalt: integer) -> float {
+  hx = ((hseed * 73856093) ^ (hidx * 19349663) ^ (hsalt * 83492791)) & 0xFFFFFFFF;
+  hx = (hx ^ (hx >> 13)) & 0xFFFFFFFF;
+  hx = (hx * 1274126177) & 0xFFFFFFFF;
+  ((hx as float) / 4294967295.0 ?? 0.0) * 2.0 - 1.0
+}
+
+/// A smooth low-frequency wave over [0,1], two harmonics with seed-derived phases.
+///
+/// Smooth in `u` is the point: neighbouring fronds see nearby values, so they
+/// CLUMP and leave gaps. White noise would scatter them evenly, which reads as
+/// man-made — the opposite of what this is for.
+pub fn lowfreq(lseed: integer, lu: float) -> float {
+  lp1 = hash01(lseed, 0, 11) * PI;
+  lp2 = hash01(lseed, 0, 22) * PI;
+  0.6 * sin(2.0 * PI * lu + lp1) + 0.4 * sin(4.0 * PI * lu + lp2)
+}
+
+/// One frond: a centreline in paper fractions and a width per point.
+pub struct Frond {
+  fpts: vector<raster::Pt>,
+  fwid: vector<float>,
+}
+
+/// Everything a `Fronds` line says about the array, past its two endpoints.
+///
+/// A struct rather than twenty parameters, because the fractal recursion builds a
+/// MODIFIED copy of it — a parameter list that long is one a caller gets wrong in
+/// order, and the recursion is the caller.
+pub struct FrondSpec {
+  count: integer = 8,
+  len1: float = 0.1,
+  len2: float = 0.1,
+  wid1: float = 3.0,
+  wid2: float = 3.0,
+  ang1: float = 30.0,
+  ang2: float = 30.0,
+  mirror: boolean = false,
+  jitter: float = 0.5,
+  clump: float = 0.6,
+  fray: float = 0.4,
+  bow: float = 0.0,
+  seed: integer = 1,
+  depth: integer = 1,
+  sub: float = 0.32,
+}
+
+/// A linear array of tapered strokes rooted along the spine `(x1,y1)-(x2,y2)`.
+///
+/// Every frond is the same template placed at `u` along the spine and tilted off
+/// the normal, then made NON-UNIFORM three ways at once: placement clumps on the
+/// seeded low-frequency field, length / width / angle ramp along the run and are
+/// then jittered per frond, and the ends FRAY. Zero all three and it is a comb.
+///
+/// ⚠ `mirror` reuses the SAME sample on both sides — length, angle and width are
+/// drawn once, outside the side loop, and reflected. Drawing them per side would
+/// consume the hash twice as fast and desynchronise every frond after the first.
+///
+/// Built in PIXEL space and handed back in fractions, so the array stays correct
+/// on non-square paper.
+pub fn fronds(x1: float, y1: float, x2: float, y2: float, sp: const FrondSpec,
+              pw: integer, ph: integer) -> vector<Frond> {
+  fd_out: vector<Frond> = [];
+  fd_p1x = x1 * (pw as float);
+  fd_p1y = y1 * (ph as float);
+  fd_dx = x2 * (pw as float) - fd_p1x;
+  fd_dy = y2 * (ph as float) - fd_p1y;
+  fd_ln = sqrt(fd_dx * fd_dx + fd_dy * fd_dy);
+  if fd_ln == 0.0 { fd_ln = 0.000000001; }
+  fd_ux = (fd_dx / fd_ln ?? 0.0);
+  fd_uy = (fd_dy / fd_ln ?? 0.0);
+  fd_nx = -fd_uy;
+  fd_ny = fd_ux;
+  fd_n = sp.count;
+  for i in 0..fd_n {
+    fd_ub = (((i as float) + 0.5) / (fd_n as float) ?? 0.0);
+    fd_u = fd_ub + sp.clump * lowfreq(sp.seed, fd_ub) * (0.5 / (fd_n as float) ?? 0.0);
+    if fd_u < 0.0 { fd_u = 0.0; }
+    if fd_u > 1.0 { fd_u = 1.0; }
+    fd_ltr = sp.len1 + (sp.len2 - sp.len1) * fd_u;
+    fd_dte = if fd_u < 1.0 - fd_u { fd_u } else { 1.0 - fd_u };
+    fd_edge = 1.0 - (fd_dte / 0.25 ?? 0.0);
+    if fd_edge < 0.0 { fd_edge = 0.0; }
+    fd_lpx = fd_ltr * (1.0 - sp.fray * fd_edge)
+             * (1.0 + sp.jitter * 0.4 * hash01(sp.seed, i, 1)) * (pw as float);
+    fd_an = (sp.ang1 + (sp.ang2 - sp.ang1) * fd_u) + sp.jitter * 15.0 * hash01(sp.seed, i, 2);
+    fd_phi = fd_an * PI / 180.0;
+    fd_wi = (sp.wid1 + (sp.wid2 - sp.wid1) * fd_u)
+            * (1.0 + sp.jitter * 0.3 * hash01(sp.seed, i, 3));
+    fd_rx = fd_p1x + fd_u * fd_dx;
+    fd_ry = fd_p1y + fd_u * fd_dy;
+    // ⚠ Built imperatively, NOT `= if sp.mirror { [1.0, -1.0] } else { [1.0] }`.
+    // A vector literal produced by an `if` EXPRESSION leaks a store per evaluation —
+    // one of them keyed `kt=65535 ?`, the unknown-type sentinel — and in a program
+    // this size that sentinel eventually reaches an index and panics
+    // (`index out of bounds: the len is 30 but the index is 65535`).  loft#1104.
+    fd_sides: vector<float> = [1.0];
+    if sp.mirror { fd_sides += [-1.0]; }
+    for s in fd_sides {
+      fd_fx = fd_nx * s * cos(fd_phi) + fd_ux * sin(fd_phi);
+      fd_fy = fd_ny * s * cos(fd_phi) + fd_uy * sin(fd_phi);
+      fd_tx = fd_rx + fd_lpx * fd_fx;
+      fd_ty = fd_ry + fd_lpx * fd_fy;
+      fd_tip = fd_wi * 0.15;
+      if fd_tip < 0.5 { fd_tip = 0.5; }
+      fd_pts: vector<raster::Pt> = [];
+      fd_wid: vector<float> = [];
+      if sp.bow != 0.0 {
+        fd_mx = (fd_rx + fd_tx) / 2.0 + sp.bow * fd_lpx * (-fd_fy);
+        fd_my = (fd_ry + fd_ty) / 2.0 + sp.bow * fd_lpx * fd_fx;
+        fd_pts += [raster::pt((fd_rx / (pw as float) ?? 0.0), (fd_ry / (ph as float) ?? 0.0)),
+                   raster::pt((fd_mx / (pw as float) ?? 0.0), (fd_my / (ph as float) ?? 0.0)),
+                   raster::pt((fd_tx / (pw as float) ?? 0.0), (fd_ty / (ph as float) ?? 0.0))];
+        fd_wid += [fd_wi, (fd_wi + fd_tip) / 2.0, fd_tip];
+      } else {
+        fd_pts += [raster::pt((fd_rx / (pw as float) ?? 0.0), (fd_ry / (ph as float) ?? 0.0)),
+                   raster::pt((fd_tx / (pw as float) ?? 0.0), (fd_ty / (ph as float) ?? 0.0))];
+        fd_wid += [fd_wi, fd_tip];
+      }
+      fd_out += [Frond { fpts: fd_pts, fwid: fd_wid }];
+    }
+  }
+  if sp.depth <= 1 { return fd_out }
+  // FRACTAL: every frond's own centreline becomes the spine of a smaller array.
+  // ⚠ The sub-arrays are appended AFTER every base frond, so the draw order is
+  // all of level 1 then all of level 2 — not depth-first per frond.  Under a
+  // stroke that overlaps, order is what the picture shows.
+  fd_base = len(fd_out);
+  fd_cn = round_half_even((fd_n as float) * 0.55) as integer;
+  if fd_cn < 2 { fd_cn = 2; }
+  for k in 0..fd_base {
+    fd_f = fd_out[k]?;
+    fd_a = fd_f.fpts[0]?;
+    fd_b = fd_f.fpts[len(fd_f.fpts) - 1]?;
+    fd_sub = FrondSpec {
+      count: fd_cn, len1: sp.len1 * sp.sub, len2: sp.len1 * sp.sub * 0.5,
+      wid1: sp.wid1 * 0.5, wid2: if sp.wid2 * 0.5 > 0.6 { sp.wid2 * 0.5 } else { 0.6 },
+      ang1: sp.ang1, ang2: sp.ang2, mirror: true,
+      jitter: sp.jitter, clump: sp.clump, fray: sp.fray, bow: sp.bow,
+      seed: sp.seed * 31 + k + 1, depth: sp.depth - 1, sub: sp.sub,
+    };
+    for f in fronds(fd_a.ptx, fd_a.pty, fd_b.ptx, fd_b.pty, fd_sub, pw, ph) {
+      fd_out += [f];
+    }
+  }
+  fd_out
 }
