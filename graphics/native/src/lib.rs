@@ -16,13 +16,43 @@
 
 use loft_ffi_macros::loft_native;
 
-use glutin::prelude::*;
 use std::cell::{Cell, RefCell};
+
+// ── Headless targets ──────────────────────────────────────────────────────
+//
+// wasm32 has no display server, and neither winit nor glutin builds for it, so
+// the window + GL-context layer below is desktop-only (Cargo.toml splits the
+// two crates out along the same line).  What stays shared is everything that
+// only needs `gl`, which compiles anywhere.
+//
+// The five entry points that talk to a window rather than to GL — create,
+// create_fullscreen, set_fullscreen, poll_events, swap_buffers — get a wasm32
+// twin right beside the desktop original, so a reader sees both answers at
+// once.  Each twin gives the value the function already documents for "no
+// window": `false` from the two constructors and from `poll_events`, nothing
+// from the two setters.  That is a real answer, not a stub — a caller that
+// checks `gl_create_window` the way the signature asks learns there is no
+// window, which is the disposition loft#709 settled ("unavailability is a fact
+// about this run on this target, not about whether the program is well-formed").
+//
+// No other GL function needs a twin, because `GL_READY` is only set inside
+// `loft_gl_create_window` and every `gl::*` call already passes `gl_guard!`
+// (P130).  Without a window the flag stays false, so the ~90 remaining entry
+// points return their documented default on this target by the mechanism they
+// already use, and desktop and wasm32 cannot drift apart.
+#[cfg(not(target_arch = "wasm32"))]
+use glutin::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
 use winit::application::ApplicationHandler;
+#[cfg(not(target_arch = "wasm32"))]
 use winit::event::WindowEvent;
+#[cfg(not(target_arch = "wasm32"))]
 use winit::event_loop::ActiveEventLoop;
+#[cfg(not(target_arch = "wasm32"))]
 use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
+#[cfg(not(target_arch = "wasm32"))]
 use winit::window::WindowId;
 
 // Re-export audio functions at the crate root so external crates
@@ -34,7 +64,16 @@ pub use audio::{
     loft_audio_set_volume, loft_audio_stop, loft_audio_stop_all,
 };
 mod audio;
-use audio::n_audio_play_raw;
+// `n_audio_play_raw` is re-exported for the same reason as the eight above, and
+// it is the store-aware entry point `audio_play_raw` actually resolves to.  The
+// two backends reach it by different routes and only one of them needed it
+// public: `--native` loads the cdylib and binds the `#[unsafe(no_mangle)]`
+// SYMBOL, which a private `use` still exports, while `--native-wasm` links the
+// rlib statically (wasm has no dlopen) and generated code calls the Rust PATH
+// `loft_graphics_native::n_audio_play_raw`.  Private, that path was `E0603` and
+// any program calling `audio_play_raw` failed to compile for wasm — with the
+// native build green beside it.
+pub use audio::n_audio_play_raw;
 // Plan-25 F4: the audio bridges live in the `audio` module; bring them into
 // scope so `loft_register_bridges!` (which takes bare idents) can see them.
 use audio::{
@@ -44,10 +83,12 @@ use audio::{
 };
 mod shader;
 mod text;
+#[cfg(not(target_arch = "wasm32"))]
 mod window;
 
 // ── Thread-local GL state ───────────────────────────────────────────────
 
+#[cfg(not(target_arch = "wasm32"))]
 struct GlState {
     #[allow(dead_code)] // kept alive to prevent window destruction
     window: winit::window::Window,
@@ -58,6 +99,17 @@ struct GlState {
     // GL viewport size chosen at creation (selected-monitor size for
     // fullscreen) — returned by the window-size getters so callers don't
     // race the async inner_size update after a monitor move.
+    viewport_w: u32,
+    viewport_h: u32,
+}
+
+/// The headless shape of the same state: the fields that describe a window
+/// rather than hold one, so the readers below (`loft_gl_window_width` and its
+/// siblings) compile from the one source on both targets.  Nothing constructs
+/// it — the only two constructors are the desktop-only window functions — so
+/// `GL` stays `None` here and those readers return their no-window default.
+#[cfg(target_arch = "wasm32")]
+struct GlState {
     viewport_w: u32,
     viewport_h: u32,
 }
@@ -91,6 +143,7 @@ fn with_gl<R>(f: impl FnOnce(&GlState) -> R) -> Option<R> {
     GL.with(|cell| cell.borrow().as_ref().map(f))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn with_gl_mut<R>(f: impl FnOnce(&mut GlState) -> R) -> Option<R> {
     GL.with(|cell| cell.borrow_mut().as_mut().map(f))
 }
@@ -138,14 +191,27 @@ const EV_TOUCH_MOVE: i64 = 9;
 const EV_TOUCH_END: i64 = 10;
 const EV_RESIZE: i64 = 11;
 // Modifier bitmask — mirror the MOD_* constants in src/graphics.loft.
+//
+// These four, `InEvent` and `enqueue` are the queue's PRODUCER side, and its
+// only producer is the winit handler — so on a target with no window they are
+// compiled and never reached.  The DRAIN side stays live on every target:
+// `loft_gl_next_event` and the `loft_gl_event_*` readers are exported
+// everywhere and answer `EV_NONE` from the empty queue, which is what a loft
+// program draining input sees here.  They are kept compiled rather than
+// `cfg`'d away so the protocol has one definition that cannot drift.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 const MOD_SHIFT: i64 = 1;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 const MOD_CTRL: i64 = 2;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 const MOD_ALT: i64 = 4;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 const MOD_SUPER: i64 = 8;
 
 /// One queued input event.  A single enum + a single `enqueue` keep each winit
 /// arm a pure translation, so no arm can silently diverge from the queue.
 #[derive(Clone)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum InEvent {
     KeyDown { key: i64, mods: i64, repeat: bool },
     KeyUp { key: i64, mods: i64 },
@@ -199,11 +265,13 @@ thread_local! {
 }
 
 /// The single enqueue chokepoint — every winit arm routes here.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn enqueue(ev: InEvent) {
     EVENTS.with(|q| q.borrow_mut().push_back(ev));
 }
 
 // Map winit key codes to a simple 0-255 index.
+#[cfg(not(target_arch = "wasm32"))]
 fn key_index(key: &winit::keyboard::Key) -> Option<u8> {
     use winit::keyboard::NamedKey;
     match key {
@@ -258,10 +326,12 @@ fn key_index(key: &winit::keyboard::Key) -> Option<u8> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct JsonApp {
     should_close: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ApplicationHandler for JsonApp {
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
     fn window_event(&mut self, _el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -400,6 +470,7 @@ impl ApplicationHandler for JsonApp {
 
 // ── C-ABI exports ───────────────────────────────────────────────────────
 
+#[cfg(not(target_arch = "wasm32"))]
 #[loft_native]
 #[unsafe(no_mangle)]
 pub extern "C" fn loft_gl_create_window(
@@ -422,9 +493,26 @@ pub extern "C" fn loft_gl_create_window(
     }
 }
 
+/// No display server, so no window — the same `false` the desktop function
+/// returns when creation fails, and the answer the declaration already tells
+/// callers to check.  Leaving `GL_READY` unset is what makes the rest of the
+/// GL surface answer consistently on this target.
+#[cfg(target_arch = "wasm32")]
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_create_window(
+    _width: u32,
+    _height: u32,
+    _title_ptr: *const u8,
+    _title_len: usize,
+) -> bool {
+    false
+}
+
 /// Initiative 03 Phase 0: borderless fullscreen companion to
 /// `loft_gl_create_window`.  Opens on the primary monitor at its
 /// native resolution.  Returns `true` on success.
+#[cfg(not(target_arch = "wasm32"))]
 #[loft_native]
 #[unsafe(no_mangle)]
 pub extern "C" fn loft_gl_create_fullscreen_window(title_ptr: *const u8, title_len: usize) -> bool {
@@ -442,12 +530,24 @@ pub extern "C" fn loft_gl_create_fullscreen_window(title_ptr: *const u8, title_l
     }
 }
 
+/// There is no monitor to go fullscreen on — see `loft_gl_create_window`.
+#[cfg(target_arch = "wasm32")]
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_create_fullscreen_window(
+    _title_ptr: *const u8,
+    _title_len: usize,
+) -> bool {
+    false
+}
+
 /// Initiative 03 Phase 4: toggle fullscreen on the existing window.
 /// Cheaper than destroying + recreating the GL context — winit flips
 /// the window mode at runtime and all GL resources (textures, VAOs,
 /// shaders, FBOs) survive.  Pass `true` for borderless fullscreen on
 /// the current monitor, `false` to return to the windowed size
 /// `gl_create_window` originally opened.
+#[cfg(not(target_arch = "wasm32"))]
 #[loft_native]
 #[unsafe(no_mangle)]
 pub extern "C" fn loft_gl_set_fullscreen(on: bool) {
@@ -460,6 +560,14 @@ pub extern "C" fn loft_gl_set_fullscreen(on: bool) {
         }
     });
 }
+
+/// Flipping the mode of a window that does not exist.  The desktop function
+/// is equally silent when no window has been created — `with_gl` runs nothing
+/// — so both targets do the same thing here.
+#[cfg(target_arch = "wasm32")]
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_set_fullscreen(_on: bool) {}
 
 /// Current window inner size in physical pixels.  Needed because a
 /// fullscreen window opens at the monitor's native resolution, so callers
@@ -480,6 +588,7 @@ pub extern "C" fn loft_gl_window_height() -> i64 {
     with_gl(|s| s.viewport_h as i64).unwrap_or(0)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[loft_native]
 #[unsafe(no_mangle)]
 pub extern "C" fn loft_gl_poll_events() -> bool {
@@ -516,6 +625,19 @@ pub extern "C" fn loft_gl_poll_events() -> bool {
     .unwrap_or(false)
 }
 
+/// `false` is "the window wants to close", which is what a loop reading this
+/// needs to hear when there is no window to pump: `while gl_poll_events()`
+/// ends on its first turn instead of spinning forever on a target that can
+/// never deliver an event.  The desktop function answers the same `false`
+/// whenever no window has been created.
+#[cfg(target_arch = "wasm32")]
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_poll_events() -> bool {
+    false
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[loft_native]
 #[unsafe(no_mangle)]
 pub extern "C" fn loft_gl_swap_buffers() {
@@ -533,6 +655,14 @@ pub extern "C" fn loft_gl_swap_buffers() {
         let _ = s.surface.swap_buffers(&s.context);
     });
 }
+
+/// No surface to present.  The desktop function stops at its own `gl_guard!`
+/// in the same situation, so this is that early return spelled out for a
+/// target where the guard can never open.
+#[cfg(target_arch = "wasm32")]
+#[loft_native]
+#[unsafe(no_mangle)]
+pub extern "C" fn loft_gl_swap_buffers() {}
 
 #[loft_native]
 #[unsafe(no_mangle)]
@@ -2571,6 +2701,7 @@ mod input_event_tests {
     }
 
     /// The terminal's named keys resolve to their (non-shifting) codes.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn named_keys_mapped() {
         use winit::keyboard::{Key, NamedKey};
