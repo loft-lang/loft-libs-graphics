@@ -45,6 +45,30 @@ nothing.
 `loft_graphics_native` cdylib backs the GL + PNG + font + audio calls via
 `glutin` / `gl` / `winit` / `fontdue` / `png` / `image` / `rodio`.
 
+### Targets
+
+The package builds and runs on `--interpret`, `--native`, `--native-wasm` and
+`--html`.  What differs between them is not which calls exist — every one is
+present everywhere — but whether a **window** does.
+
+The software canvas, the mesh and scene maths, `save_png` and the font metrics
+need no display, so they compute the same answers on every target; the wasm
+build writes a real PNG through WASI.  The `gl_*` and `loft_audio_*` calls need
+a display server and a host audio device, which `--native-wasm` has neither of.
+There they answer what their signatures already document for "no window":
+`gl_create_window` and `gl_poll_events` return `false`, handle-returning calls
+return `0`, and setters do nothing.  So a program that checks
+`gl_create_window` — as the declaration asks — learns on that target that it
+has no window, instead of the build refusing or the page dying at load.
+
+That split is why `winit` and `glutin` are the only dependencies under
+`[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`: they are the two
+that cannot build for wasm32 at all.  While they were unconditional, the whole
+package was off `--native-wasm`, including the canvas and PNG halves that never
+wanted a window.  `native/tests/headless_safety.rs` holds both sides of the
+contract — the GL surface staying safe with no context, and the dependency list
+staying wasm-clean.
+
 ## Worked examples
 
 The contracts a signature cannot state are demonstrated by running tests
