@@ -1,14 +1,42 @@
 [package]
 name = "drawing"
-version = "0.2.0"
+version = "0.3.0"
 loft = ">=2026.8.0"
 repository = "loft-libs-graphics"
 description = "Render a .draw scene — a sprite authored as lines of text — pixel-identically to the Python renderer it replaces"
 categories = ["graphics", "asset-format"]
 
-# ⚠ FIRST release, so both floors are this release itself.
-api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
-data_compatible_with = "0.1.0"   # oldest own release whose stored data this reads
+# DECLARED BREAK, and only one of its two halves is real — worth knowing which,
+# because a floor is a promise withdrawn from everyone below it.
+#
+# REAL: `pub struct Elem` gained `first_at`, so the record grows a slot and a
+# store written by 0.2.0 is read shifted by this one.  That is the DATA break,
+# and it is what forces the floor.
+#
+# NOT REAL: the API half.  `compat check` reports one because `aggregate_break`
+# holds that an added field breaks literal construction — true for a bare field,
+# false for one carrying a default.  Measured: a 0.2.0-era
+# `Elem { ename:…, seen:…, bx0:…, by0:…, bx1:…, by1:… }` still compiles against
+# this release and `first_at` takes its declared `-1`.  It is the same shape as
+# loft#1191 (a defaulted PARAMETER read as a break), one axis over.
+#
+# Both floors move anyway: the gate reads `api_compatible_with` for the combined
+# verdict, so a genuine data break cannot be declared on its own.
+api_compatible_with  = "0.3.0"
+                                 # `first_at`, which the metric report needs to
+                                 # order elements by first ink rather than by
+                                 # where the `name` line sits.  It reads as
+                                 # additive and is not, the same way imaging's
+                                 # `Pixel.a` did: the field carries `= -1`, so
+                                 # source writing `Elem{...}` without it still
+                                 # compiles — that is the direction an author
+                                 # probes.  The two axes it does not reach: the
+                                 # WRITE side gains a key (`{e:j}` and any
+                                 # reflection walk), and the record grows a slot,
+                                 # so a store written by 0.2.0 is not read by
+                                 # this one.  Declaring it is the supported move.
+data_compatible_with = "0.3.0"   # Elem gained a slot; a persisted sketch from an
+                                 # older release reads shifted
 
 [dependencies]
 graphics = ">=0.8.0"
