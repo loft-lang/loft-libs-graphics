@@ -21,7 +21,13 @@
 // ## The smallest thing that does something
 //
 // `file(path).png()` decodes the whole file in one call. Afterwards the width,
-// height, name and every pixel are already in memory:
+// height, name and every pixel are already in memory.
+//
+// A relative path resolves against the FILE that names it, not the working
+// directory — so `../tests/map.png` below is the 256x256 fixture this package
+// ships beside its tests, reached from `docs/`. In your own program the path is
+// just the path: `file("sprites.png").png()`. (Add `#cwd` above the `use` line
+// if you would rather have paths resolve against the working directory.)
 use imaging;
 
 fn main() {
