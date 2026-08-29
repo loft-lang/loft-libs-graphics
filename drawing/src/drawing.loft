@@ -1486,13 +1486,7 @@ pub fn fronds(x1: float, y1: float, x2: float, y2: float, sp: const FrondSpec,
             * (1.0 + sp.jitter * 0.3 * hash01(sp.seed, i, 3));
     fd_rx = fd_p1x + fd_u * fd_dx;
     fd_ry = fd_p1y + fd_u * fd_dy;
-    // ⚠ Built imperatively, NOT `= if sp.mirror { [1.0, -1.0] } else { [1.0] }`.
-    // A vector literal produced by an `if` EXPRESSION leaks a store per evaluation —
-    // one of them keyed `kt=65535 ?`, the unknown-type sentinel — and in a program
-    // this size that sentinel eventually reaches an index and panics
-    // (`index out of bounds: the len is 30 but the index is 65535`).  loft#1104.
-    fd_sides: vector<float> = [1.0];
-    if sp.mirror { fd_sides += [-1.0]; }
+    fd_sides: vector<float> = if sp.mirror { [1.0, -1.0] } else { [1.0] };
     for s in fd_sides {
       fd_fx = fd_nx * s * cos(fd_phi) + fd_ux * sin(fd_phi);
       fd_fy = fd_ny * s * cos(fd_phi) + fd_uy * sin(fd_phi);
