@@ -47,9 +47,13 @@ nothing.
 
 ### Targets
 
-The package builds and runs on `--interpret`, `--native`, `--native-wasm` and
-`--html`.  What differs between them is not which calls exist — every one is
-present everywhere — but whether a **window** does.
+The package builds and runs on `--interpret`, `--native` and `--native-wasm`,
+and the three agree: the same canvas program answers the same pixel on each.
+There is **no `--html` path** — that needs a `[wasm.bridge]` retargeting the
+`loft_gl_*` calls onto the browser's WebGL2 runtime, which is designed but
+parked (loft-lang/plans @PLN111).  What differs between the three targets is not
+which calls exist — every one is present everywhere — but whether a **window**
+does.
 
 The software canvas, the mesh and scene maths, `save_png` and the font metrics
 need no display, so they compute the same answers on every target; the wasm
