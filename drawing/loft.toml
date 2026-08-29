@@ -6,22 +6,19 @@ repository = "loft-libs-graphics"
 description = "Render a .draw scene — a sprite authored as lines of text — pixel-identically to the Python renderer it replaces"
 categories = ["graphics", "asset-format"]
 
-# DECLARED BREAK, and only one of its two halves is real — worth knowing which,
-# because a floor is a promise withdrawn from everyone below it.
+# DECLARED BREAK — `pub struct Elem` gained `first_at`, and both halves are real,
+# on two axes a caller reaches differently.
 #
-# REAL: `pub struct Elem` gained `first_at`, so the record grows a slot and a
-# store written by 0.2.0 is read shifted by this one.  That is the DATA break,
-# and it is what forces the floor.
+# DATA: the record grows a slot, so a store written by 0.2.0 is read shifted.
 #
-# NOT REAL: the API half.  `compat check` reports one because `aggregate_break`
-# holds that an added field breaks literal construction — true for a bare field,
-# false for one carrying a default.  Measured: a 0.2.0-era
-# `Elem { ename:…, seen:…, bx0:…, by0:…, bx1:…, by1:… }` still compiles against
-# this release and `first_at` takes its declared `-1`.  It is the same shape as
-# loft#1191 (a defaulted PARAMETER read as a break), one axis over.
-#
-# Both floors move anyway: the gate reads `api_compatible_with` for the combined
-# verdict, so a genuine data break cannot be declared on its own.
+# API: a whole-record read answers differently — `{e:j}` gains a key, as does any
+# reflection walk over the fields.  Note what it is NOT: construction.  A literal
+# may omit any field in loft (`Elem { }` compiles, and each omitted field takes
+# its declared default or its type's zero), so source written against 0.2.0 keeps
+# compiling.  That is the direction an author probes, which is what makes this
+# read additive when it is not — the same trap imaging's `Pixel.a` documents.
+# (An earlier version of this comment called the API half a false positive, on
+# loft#1192; measuring it closed that issue the other way.)
 api_compatible_with  = "0.3.0"
                                  # `first_at`, which the metric report needs to
                                  # order elements by first ink rather than by
