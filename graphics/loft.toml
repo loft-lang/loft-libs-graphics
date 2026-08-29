@@ -2,6 +2,13 @@
 name = "graphics"
 version = "0.9.0"
 loft = ">=2026.7.2"
+# ⚠ 0.9.0 leaves these UNCHANGED on purpose, and `loft compat check` reports a
+# FAIL against 0.8.1 that is wrong.  The only difference it can be reading is
+# `audio_play` gaining `looping` / `pan` / `seek` as DEFAULTED parameters, and a
+# default is additive — a caller written against the old two-argument spelling
+# compiles and runs against this release, which was measured before deciding.
+# Raising the floor would tell every consumer on 0.4.2-0.8.1 they are cut off
+# when they are not, so the advisory FAIL stands instead.  loft#1191.
 api_compatible_with  = "0.4.2"   # oldest own release this is a drop-in for
 data_compatible_with = "0.4.2"   # oldest own release whose stored data this reads
 repository = "loft-libs-graphics"
