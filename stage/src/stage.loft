@@ -18,6 +18,37 @@
 // it, because a single out-of-order insert would make `compose` read a parent's
 // world transform before it was written — and produce a *plausible* wrong answer
 // rather than an error.
+//
+// ── Using it ─────────────────────────────────────────────────────────────────
+//
+// Build the tree once, then mutate it.  A parent composes into its children, so
+// moving the cart moves whatever rides on it:
+//
+//     st    = stage::stage_new();
+//     cart  = st.node_add(-1,   stage::Place { pl_x: 100.0, pl_y: 80.0,
+//                                              pl_w: 40.0, pl_h: 20.0 });
+//     crate = st.node_add(cart, stage::Place { pl_x: 8.0, pl_y: -12.0,
+//                                              pl_w: 12.0, pl_h: 12.0 });
+//
+//     st.compose();              // ONE forward pass; every world transform
+//     st.world_origin(crate);    // -> (108, 68)
+//
+//     st.set_camera(30.0, 0.0);  // a draw-time offset: the tree is not touched
+//     st.set_prop(cart, stage::Prop.X, 140.0);
+//     st.compose();
+//     st.world_origin(crate);    // -> (148, 68) — the crate came along
+//
+//     st.pick(124.0, 74.0);      // -> the crate.  Picking is SCREEN space, so
+//                                //    the camera is already taken back off
+//
+// Then draw: `render_stage(cv)` onto a `graphics::Canvas`, or `batches` +
+// `pack_instances` + `gl_render` for the instanced path.  `compose` is what makes
+// a frame current — every reader above answers about the last one.
+//
+// The rest of the surface is that loop at more resolutions: P2 the camera, P4
+// animation, C2 tweened properties, D1/D2 widget states and an editable field,
+// P6 several views over the one scene, L1-L3 light and atmosphere.  Each section
+// header below says what its own group is for.
 
 use graphics;
 use tween;
@@ -259,6 +290,8 @@ pub struct P2 {
     p_y: float,
 }
 
+// An empty stage: no nodes, one view, the camera at the origin and ambient
+// light full.  Everything else here is a mutation of this.
 pub fn stage_new() -> Stage {
     Stage { st_nodes: [], st_masks: [], st_capture: -1, st_order: [],
             st_cue: false, st_cue_near: 0.0, st_cue_far: 1.0,
@@ -273,6 +306,8 @@ pub fn stage_new() -> Stage {
             st_focus: -1, st_fields: [], st_clip: "" }
 }
 
+// How many nodes the tree holds.  Every index this library hands out is below
+// it, so it is also the bound for a walk over the scene.
 pub fn node_count(self: const Stage) -> integer {
     len(self.st_nodes)
 }
@@ -1136,6 +1171,9 @@ pub fn released_on(self: const Stage, idx: integer, sx: float, sy: float) -> boo
     idx >= 0 and hits(self, idx, sx, sy)
 }
 
+// The node `press` is holding, or -1.  A drag reads this to know what it is
+// dragging — the capture survives the pointer leaving the node, which is what
+// makes dragging off a button and back onto it work.
 pub fn capture(self: const Stage) -> integer { self.st_capture }
 
 
@@ -1185,6 +1223,8 @@ pub fn set_pointer(self: Stage, kind: integer) {
     self.st_pointer = if kind == POINTER_TOUCH { POINTER_TOUCH } else { POINTER_MOUSE };
 }
 
+// Which kind is in force.  `ui_state` reads it to decide whether `Over` is a
+// state this device can show at all — a finger is never merely hovering.
 pub fn pointer(self: const Stage) -> integer { self.st_pointer }
 
 // The pointer moved without a button.  A touch stream never sends this.
@@ -1205,6 +1245,8 @@ pub fn set_enabled(self: Stage, idx: integer, on: boolean) {
     }
 }
 
+// Is this node in use?  False for an index out of range too, so a stale index
+// reads as unusable rather than as a live widget.
 pub fn enabled(self: const Stage, idx: integer) -> boolean {
     if idx >= 0 {
         if idx < len(self.st_nodes) { return !self.st_nodes[idx].nd_disabled; }
@@ -1341,6 +1383,8 @@ pub fn focusable(self: const Stage, idx: integer) -> boolean {
     false
 }
 
+// Put a node into the tab order, or take it out.  `focus_next` / `focus_prev`
+// walk exactly the nodes this says yes to, in declaration order.
 pub fn set_focusable(self: Stage, idx: integer, on: boolean) {
     if idx >= 0 {
         if idx < len(self.st_nodes) { self.st_nodes[idx].nd_focusable = on; }
@@ -1362,6 +1406,8 @@ pub fn set_focus(self: Stage, idx: integer) {
 // a second ordering to keep in step with the first, and the two disagree the
 // moment someone inserts a node.
 pub fn focus_next(self: Stage) { focus_step(self, 1); }
+// One step back through that same order — the same walk reversed, so the two
+// directions cannot disagree about what is focusable.
 pub fn focus_prev(self: Stage) { focus_step(self, -1); }
 
 fn focus_step(self: Stage, dir: integer) {
@@ -1446,8 +1492,12 @@ fn set_mark(self: Stage, at: integer, v: integer) {
     }
 }
 
+// Does this node carry an editable text field?  Every `field_*` reader answers
+// a harmless default where this is false, so asking first is optional.
 pub fn is_field(self: const Stage, idx: integer) -> boolean { field_at(self, idx) >= 0 }
 
+// What the field holds right now.  The buffer is the truth; the caret and the
+// mark are positions into it, counted in CHARACTERS.
 pub fn field_text(self: const Stage, idx: integer) -> text {
     buf_of(self, field_at(self, idx))
 }
@@ -1481,6 +1531,7 @@ pub fn field_place_caret(self: Stage, idx: integer, at_char: integer, extend: bo
 
 // Our own clipboard — see the header.
 pub fn clipboard(self: const Stage) -> text { self.st_clip }
+// Fill it — how the host's clipboard reaches a paste.
 pub fn set_clipboard(self: Stage, s: text) { self.st_clip = s; }
 
 // Commit text into the focused field, replacing any selection.
@@ -1794,7 +1845,10 @@ fn paint_band(self: const Stage, view: integer, cv: graphics::Canvas,
 // flat scrolling is every factor at 1.0 instead of a separate path.
 pub fn set_camera(self: Stage, x: float, y: float) { set_view_camera(self, 0, x, y); }
 
+// Where the camera stands.  An unsplit stage IS a one-view stage, so this is
+// view 0 rather than a second place a camera can live.
 pub fn camera_x(self: const Stage) -> float { view_camera_x(self, 0) }
+// The other half of the same pair.
 pub fn camera_y(self: const Stage) -> float { view_camera_y(self, 0) }
 
 // How much of the camera a layer feels.  1.0 is the world; below that is a
@@ -1806,6 +1860,8 @@ pub fn set_parallax(self: Stage, layer: integer, factor: float) {
     self.st_layers[layer].ly_parallax = factor;
 }
 
+// What a layer's factor is now.  A layer nobody configured reads 1.0 — the
+// world's own rate — so asking about one is always safe.
 pub fn parallax_of(self: const Stage, layer: integer) -> float {
     layer_at(self, layer).ly_parallax
 }
@@ -1860,6 +1916,7 @@ pub fn uploads(self: const Stage) -> integer { self.st_uploads }
 // whole point of deriving the phase rather than stepping it.
 pub fn set_time(self: Stage, t: float) { self.st_time = t; }
 
+// The ambient clock, which is the `t` every sway phase is derived from.
 pub fn time_of(self: const Stage) -> float { self.st_time }
 
 // How far node `idx` is displaced right now, in pixels.  Bounded by its amplitude
@@ -2145,10 +2202,14 @@ pub const TOP_DOWN: integer = 0;
 // so the facing selects a sequence and the other side is a flip.
 pub const SIDE_ON: integer = 1;
 
+// Pick `TOP_DOWN` or `SIDE_ON`.  It decides what `face` does with an angle:
+// rotate the one sprite, or resolve a sequence and mirror it.
 pub fn set_projection(self: Stage, mode: integer) { self.st_proj = mode; }
 
+// Which of the two models is in force.
 pub fn projection(self: const Stage) -> integer { self.st_proj }
 
+// How many sequences are registered; also the bound on a `pl_seq` index.
 pub fn sequence_count(self: const Stage) -> integer { len(self.st_seqs) }
 
 // Register a sequence under a NAME, so `face` and `set_action` can resolve it.
@@ -2253,11 +2314,15 @@ pub fn set_action(self: Stage, idx: integer, action: text) {
     if self.st_proj == SIDE_ON { resolve_facing(self, idx); }
 }
 
+// Where the node points, in radians.  Kept in BOTH models — side-on holds the
+// angle even though what it draws for it is a chosen sequence and a flip.
 pub fn facing_of(self: const Stage, idx: integer) -> float {
     if idx < 0 or idx >= len(self.st_nodes) { return 0.0; }
     self.st_nodes[idx].nd_facing
 }
 
+// What the node is doing, as `set_action` last left it.  Name resolution reads
+// this together with the key and the facing.
 pub fn action_of(self: const Stage, idx: integer) -> text {
     if idx < 0 or idx >= len(self.st_nodes) { return ""; }
     self.st_nodes[idx].nd_action
@@ -2269,6 +2334,8 @@ pub fn rotation_of(self: const Stage, idx: integer) -> float {
     self.st_nodes[idx].nd_rot
 }
 
+// Is this node drawn flipped?  Only side-on ever sets it: mirroring is how the
+// other half of the facings exists without another atlas cell.
 pub fn mirrored(self: const Stage, idx: integer) -> boolean {
     if idx < 0 or idx >= len(self.st_nodes) { return false; }
     self.st_nodes[idx].nd_mirror
@@ -2299,6 +2366,8 @@ pub fn add_view(self: Stage, x: integer, y: integer, w: integer,
     len(self.st_views) - 1
 }
 
+// Move or resize a view's rectangle on screen.  The camera it carries is left
+// alone, so a split-screen resize does not move what either half is looking at.
 pub fn set_view_rect(self: Stage, view: integer, x: integer, y: integer,
                      w: integer, h: integer) {
     if view < 0 or view >= len(self.st_views) { return; }
@@ -2332,10 +2401,13 @@ fn view_at(self: const Stage, view: integer) -> View {
            vw_y: v.vw_y, vw_w: v.vw_w, vw_h: v.vw_h }
 }
 
+// Where this view's camera stands.  A view out of range answers 0.0 rather than
+// failing, which is `view_at`'s verdict and not a second rule.
 pub fn view_camera_x(self: const Stage, view: integer) -> float {
     view_at(self, view).vw_cam_x
 }
 
+// The other half of the same pair.
 pub fn view_camera_y(self: const Stage, view: integer) -> float {
     view_at(self, view).vw_cam_y
 }
@@ -2431,6 +2503,9 @@ pub fn add_light(self: Stage, x: float, y: float, radius: float, colour: integer
     len(self.st_lights) - 1
 }
 
+// Carry a light to a new place.  DIRTIES the buffer, exactly as adding one does
+// — a moving torch therefore re-packs every frame, which is the cost L2's
+// composite pass exists to take off the per-sprite path.
 pub fn move_light(self: Stage, i: integer, x: float, y: float) {
     if i < 0 or i >= len(self.st_lights) { return; }
     self.st_lights[i].lt_x = x;
@@ -2438,6 +2513,7 @@ pub fn move_light(self: Stage, i: integer, x: float, y: float) {
     self.st_dirty = true;
 }
 
+// How many lights the scene holds; the bound for `move_light`.
 pub fn light_count(self: const Stage) -> integer { len(self.st_lights) }
 
 // How lit the world is before any light: 1.0 leaves the material untouched, so a
@@ -2448,6 +2524,7 @@ pub fn set_ambient(self: Stage, level: float) {
     self.st_dirty = true;
 }
 
+// The level `set_ambient` left.
 pub fn ambient(self: const Stage) -> float { self.st_ambient }
 
 // What a light contributes at a point: linear in the radius, clamped at both ends.
@@ -2540,16 +2617,20 @@ pub struct Lit {
     li_b: float,
 }
 
+// Switch the composite pass on.  Off, light is L1's per-sprite tint, which is
+// one colour for a whole sprite; on, it is resolved per pixel.
 pub fn set_light_map(self: Stage, on: boolean) {
     self.st_light_map = on;
     self.st_dirty = true;
 }
 
+// Is the composite pass on?
 pub fn light_map(self: const Stage) -> boolean { self.st_light_map }
 
 // Layers at or above `n` draw AFTER the composite and take no light.
 pub fn set_hud_layer(self: Stage, n: integer) { self.st_hud_layer = n; }
 
+// The first layer that draws after the composite, or `HUD_NONE`.
 pub fn hud_layer(self: const Stage) -> integer { self.st_hud_layer }
 
 // The light standing at a world point, per channel.
@@ -2654,10 +2735,13 @@ pub fn set_layer_fog(self: Stage, layer: integer, colour: integer, density: floa
     self.st_dirty = true;
 }
 
+// The colour this layer fades toward.  An unset layer reads the plain layer's,
+// so a scene that never asked for fog cannot be tinted by this existing.
 pub fn layer_fog_colour(self: const Stage, layer: integer) -> integer {
     layer_at(self, layer).ly_fog
 }
 
+// How far it fades: 0 is clear.
 pub fn layer_fog_density(self: const Stage, layer: integer) -> float {
     layer_at(self, layer).ly_density
 }
@@ -2674,6 +2758,7 @@ pub fn set_layer_blur(self: Stage, layer: integer, radius: integer) {
     self.st_layers[layer].ly_blur = radius;
 }
 
+// This layer's blur radius in pixels; 0 is sharp.
 pub fn layer_blur(self: const Stage, layer: integer) -> integer {
     layer_at(self, layer).ly_blur
 }
