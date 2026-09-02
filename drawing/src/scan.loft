@@ -26,8 +26,12 @@ pub struct Scan {
   value: float,
 }
 
+/// The did-not-land answer, which every reader below returns when it cannot
+/// match.  A caller tests `ok` and never has to know a sentinel position.
 pub fn scan_fail() -> Scan { Scan { ok: false, at: 0, value: 0.0 } }
 
+/// A regex `[0-9]`, ASCII only — which costs nothing here, because a `.draw`
+/// command line is ASCII by construction.
 pub fn is_digit(b: integer) -> boolean { b >= 48 && b <= 57 }
 
 /// A regex `\w`: letters, digits and underscore.

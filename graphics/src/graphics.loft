@@ -1,6 +1,36 @@
 // Copyright (c) 2026 Jurjen Stellingwerff
 // SPDX-License-Identifier: LGPL-3.0-or-later
-// Graphics library — 2D pixel canvas with drawing primitives.
+// graphics — a 2-D pixel canvas, and the window/GPU layer under it.
+//
+// TWO HALVES, and which one you want decides everything else.  The `Canvas` half
+// is a flat vector of packed RGBA integers: it needs no window, no driver and no
+// GL context, so it runs under `loft test` and answers questions about pixels.
+// The `gl_*` half is the real window — shaders, VBOs, framebuffers — and every
+// one of those is a native call that answers *"native function not loaded"* where
+// there is no context.  Write the drawing against `Canvas` and it stays testable.
+//
+// ── Using it ─────────────────────────────────────────────────────────────────
+//
+//     cv = graphics::canvas(64, 48, graphics::rgb(20, 20, 30));
+//     cv.fill_rect(8, 8, 20, 12, graphics::rgb(200, 60, 40));
+//     cv.draw_line(0, 0, 63, 47, graphics::rgb(255, 255, 255));
+//
+//     // Alpha COMPOSITES; `set_pixel` would have replaced instead.
+//     cv.blend_pixel(10, 10, graphics::rgba(0, 0, 255, 128));
+//     px = cv.get_pixel(10, 10);          // -> r 99, g 29, b 147, a 255:
+//                                         //    half the red rect, half the blue
+//     cv.save_png("out.png");
+//
+// ⚠ COLOUR IS 0xAARRGGBB, so a bare `0xFF0000` literal is red at alpha ZERO and
+// composites to nothing.  `rgb()` is the same pack with alpha 255 — reach for it
+// rather than for a literal, and `color_r`/`_g`/`_b`/`_a` take the channels back
+// out.
+//
+// The rest of the canvas surface is more primitives at the same level: lines,
+// rects, circles, ellipses, beziers, an anti-aliased line, triangles and
+// polygons, plus two resamplers (`resize_lanczos`, `resize_bicubic`).  The `gl_*`
+// surface below them mirrors the OpenGL calls it wraps, and `stage` is the
+// retained scene that drives either half.
 
 use mesh3d;
 use glb;
@@ -28,9 +58,15 @@ pub fn rgb(cr: integer, cg: integer, cb: integer) -> integer {
   rgba(cr, cg, cb, 255)
 }
 
+// The channels back out of a packed colour, matching `rgba`'s layout — red,
+// green, blue, then alpha off the high byte.
 pub fn color_r(color: integer) -> integer { (color >> 16) & 255 }
+// Green.
 pub fn color_g(color: integer) -> integer { (color >> 8) & 255 }
+// Blue.
 pub fn color_b(color: integer) -> integer { color & 255 }
+// Alpha.  255 is opaque; a colour written as a bare 0xRRGGBB literal reads 0
+// here, which is what makes it composite to nothing.
 pub fn color_a(color: integer) -> integer {
   // integer is i64 post-2c, so the shift is logical on the high byte.
   ((color & 0xFF000000) >> 24) & 255
@@ -886,6 +922,7 @@ pub fn gl_set_fullscreen(on: boolean);
 // the real resolution rather than a windowed hint.
 pub fn gl_window_width() -> integer;
 #native "loft_gl_window_width"
+// And its height — the pair is what a projection or a 2-D ortho is built from.
 pub fn gl_window_height() -> integer;
 #native "loft_gl_window_height"
 
@@ -1391,6 +1428,12 @@ pub fn gl_font_ascent(font: integer, size: float) -> float;
 fn rasterize_text_into(font: integer, content: text, size: float, buf: vector<integer>) -> integer;
 #native "loft_rasterize_text_into"
 
+// Rasterise text into the canvas at (x, y), anchored by the TOP-left.
+//
+// ⚠ NEEDS THE NATIVE RASTERISER, so this is one of the canvas routines that
+// does NOT work headless: without it the call is a no-op and the canvas keeps
+// whatever was under the text.  `text2d` exists for exactly that case — it
+// carries a baked face and draws through `set_pixel`, so text always appears.
 pub fn draw_text(self: Canvas, font: integer, content: text, size: float,
                  dt_x: integer, dt_y: integer, color: integer) {
   dt_tw = gl_measure_text(font, content, size) as integer + 1;
