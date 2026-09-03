@@ -1,0 +1,140 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The metric channel: what a `check` measures, what it says, and when a scene
+// counts as whole.
+//
+// Every expected line below is `draw.py`'s own output for the same source — the
+// report is a wire format two tools have to agree on, so the strings are pinned
+// rather than described.  The scene is the one @PLN146's `w5.sh` runs, at a size
+// small enough that no test here draws anything.
+use drawing;
+
+fn source() -> text {
+  `
+  size 40x30
+  Background transparent
+  name a
+  Poly (0.10,0.10) (0.30,0.10) (0.30,0.30) (0.10,0.30) rgb=200,10,10
+  name b
+  Poly (0.50,0.50) (0.90,0.50) (0.90,0.70) (0.50,0.70) rgb=10,200,10
+  landmark mid = 0.5
+  landmark low = 0.75
+  check a.cx ~ 0.2
+  check a.w ~ 0.2 tol 0.001
+  check a.left < b.left
+  check b.right > a.right
+  check a.top <= 0.1
+  check b.bottom >= mid
+  check a.cy == 0.2
+  check b.cx ~ mid + 0.2
+  check b.cy ~ low - 0.15
+  check a.h ~ 0.25
+  `
+}
+
+fn test_every_operator_reaches_its_verdict() {
+  sc = parse_scene(source());
+  rs = eval_checks(sc);
+  assert(len(rs) == 10, "ten checks, got {len(rs)}");
+  for r in rs {
+    if r.claim == "a.h ~ 0.25" { assert(!r.ok, "0.200 is not 0.250 within 0.02") }
+    else { assert(r.ok, "{r.claim} should pass: {r.report}") }
+  }
+}
+
+fn test_the_report_line_is_the_oracles() {
+  sc = parse_scene(source());
+  rs = eval_checks(sc);
+  assert(rs[0]?.report == "check: a.cx ~ 0.2  ->  0.200 vs 0.200  d=+0.000  PASS",
+         "got {rs[0]?.report}");
+  assert(rs[9]?.report == "check: a.h ~ 0.25  ->  0.200 vs 0.250  d=-0.050  FAIL",
+         "got {rs[9]?.report}");
+  // The tolerance clause comes OFF the echoed claim, and a delta that is
+  // negative but tiny still renders with its sign.
+  assert(rs[1]?.report == "check: a.w ~ 0.2  ->  0.200 vs 0.200  d=-0.000  PASS",
+         "got {rs[1]?.report}");
+}
+
+fn test_a_tolerance_clause_is_read() {
+  sc = parse_scene("size 8x8\nname a\nPoly (0.1,0.1) (0.3,0.1) (0.3,0.3) rgb=1,2,3\n"
+                   + "check a.cx ~ 0.25 tol 0.001\ncheck a.cx ~ 0.25 tol 0.06\n");
+  rs = eval_checks(sc);
+  assert(rs[0]?.tol == 0.001 && !rs[0]?.ok, "0.2 is not 0.25 within 0.001");
+  assert(rs[1]?.tol == 0.06 && rs[1]?.ok, "…and is within 0.06");
+}
+
+fn test_a_landmark_and_arithmetic_on_the_right() {
+  sc = parse_scene(source());
+  rs = eval_checks(sc);
+  assert(rs[7]?.rhs == 0.7, "mid + 0.2 is 0.7, got {rs[7]?.rhs}");
+  assert(rs[8]?.rhs == 0.6, "low - 0.15 is 0.6, got {rs[8]?.rhs}");
+}
+
+fn test_a_negative_literal_is_not_a_subtraction() {
+  // `^(\S+)\s*([+-])\s*([\d.]+)$` needs a base on the left of the sign, so a
+  // bare `-0.1` has none and stays a number.
+  sc = parse_scene("size 8x8\nname a\nPoly (0.1,0.1) (0.3,0.1) (0.3,0.3) rgb=1,2,3\n"
+                   + "check a.cx > -0.1\n");
+  rs = eval_checks(sc);
+  assert(rs[0]?.ok && rs[0]?.rhs == -0.1, "got {rs[0]?.report}");
+}
+
+fn test_a_name_that_does_not_resolve_is_named() {
+  sc = parse_scene("size 8x8\nname a\nPoly (0.1,0.1) (0.3,0.1) (0.3,0.3) rgb=1,2,3\n"
+                   + "name ghost\ncheck ghost.cx ~ 0.5\ncheck nobody.cx ~ 0.5\n"
+                   + "check a.middle ~ 0.5\ncheck somewhere ~ 0.5\ncheck a.cx\n");
+  rs = eval_checks(sc);
+  assert(rs[0]?.err == "ghost?", "an element named and never drawn has no box");
+  assert(rs[1]?.err == "nobody?", "got {rs[1]?.err}");
+  assert(rs[2]?.err == "a.middle?", "the property is named too");
+  assert(rs[3]?.err == "somewhere?", "got {rs[3]?.err}");
+  assert(rs[4]?.err == "(unparsed)", "a line with no operator is not a check");
+  assert(rs[4]?.report == "check: a.cx  (unparsed)", "got {rs[4]?.report}");
+  for r in rs { assert(!r.ok, "an unresolved check never passes: {r.report}"); }
+}
+
+fn test_the_element_report_is_in_ink_order() {
+  // `late` is NAMED first and INKED second: the oracle keys its table by name in
+  // a dict, so its order is first-ink and not first-mention.
+  sc = parse_scene("size 8x8\nname late\nname early\n"
+                   + "Poly (0.1,0.1) (0.3,0.1) (0.3,0.3) rgb=1,2,3\nname late\n"
+                   + "Poly (0.5,0.5) (0.9,0.5) (0.9,0.7) rgb=1,2,3\n");
+  rep = metric_report(sc, eval_checks(sc));
+  early = rep.find("early");
+  late = rep.find("  late");
+  assert(early != null && late != null, "both elements are reported");
+  assert((early ?? 0) < (late ?? 0), "early took ink first, so it is reported first");
+}
+
+fn test_a_scene_is_whole_only_when_nothing_is_missing() {
+  ok = parse_scene("size 8x8\nname a\nPoly (0.1,0.1) (0.3,0.1) (0.3,0.3) rgb=1,2,3\n"
+                   + "check a.cx ~ 0.2\n");
+  assert(scene_ok(ok, eval_checks(ok)), "every line parsed and the check passes");
+
+  failed = parse_scene("size 8x8\nname a\nPoly (0.1,0.1) (0.3,0.1) (0.3,0.3) rgb=1,2,3\n"
+                       + "check a.cx ~ 0.9\n");
+  assert(!scene_ok(failed, eval_checks(failed)), "a failing check is not whole");
+
+  bad = parse_scene("size 8x8\nWobble (0.1,0.2) r=3\n");
+  assert(!scene_ok(bad, eval_checks(bad)), "an unparsed line is not whole");
+
+  short = parse_scene("size 8x8\nPetals (0.5,0.5) n=6 r=0.1 len=0.2 w=0.05\n");
+  assert(!scene_ok(short, eval_checks(short)),
+         "a mark this build does not draw leaves the picture short");
+}
+
+fn test_the_report_counts_what_passed() {
+  sc = parse_scene(source());
+  rep = metric_report(sc, eval_checks(sc));
+  assert(rep.contains("CHECKS  9/10 pass:"), "got:\n{rep}");
+  assert(rep.contains("  a        x[0.10..0.30] y[0.10..0.30]"), "the boxes are reported:\n{rep}");
+  assert(rep.contains("ops: 2"), "and how many marks were drawn:\n{rep}");
+}
+
+fn test_an_unparsed_line_is_reported_before_the_geometry() {
+  sc = parse_scene("size 8x8\nWobble (0.1,0.2) r=3\n");
+  rep = metric_report(sc, eval_checks(sc));
+  assert(rep.starts_with("UNPARSED 1 line(s)"), "got:\n{rep}");
+  assert(rep.contains("line 2: Wobble (0.1,0.2) r=3"), "naming the line:\n{rep}");
+}

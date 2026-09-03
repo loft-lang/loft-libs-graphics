@@ -1,0 +1,190 @@
+// Copyright (c) 2024-2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// @NAME: Getting Started
+// @TITLE: Decoding a PNG, reading its pixels, and writing one back out.
+//
+// `imaging` gives a loft program two things: PNG files as `Image` values, and
+// `Image` values back as PNG files. In between, every pixel is an ordinary struct
+// field you can read. Every PNG colour type decodes — RGBA, greyscale, grey+alpha,
+// palette, 16-bit — and all of them arrive as 8-bit RGBA.
+//
+// It is not a drawing library. Nothing here rasterises a line, a shape or a glyph;
+// that is `graphics` (a canvas, with `drawing` and `text2d` on top), and an
+// `Image` decoded here hands over to it directly through `Pixel.rgba()`. It is not
+// an image-processing library either — no resize, blur or convolve — and it reads
+// exactly one format, so a JPEG is a `null`, not an error message.
+//
+// Install it once, then import it:
+//
+//   loft install imaging
+//
+// ## The smallest thing that does something
+//
+// `file(path).png()` decodes the whole file in one call. Afterwards the width,
+// height, name and every pixel are already in memory.
+//
+// A relative path resolves against the FILE that names it, not the working
+// directory — so `../tests/map.png` below is the 256x256 fixture this package
+// ships beside its tests, reached from `docs/`. In your own program the path is
+// just the path: `file("sprites.png").png()`. (Add `#cwd` above the `use` line
+// if you would rather have paths resolve against the working directory.)
+use imaging;
+
+fn main() {
+  img = file("../tests/map.png").png();
+  // `png()` answers null when there is nothing to decode. Past that check the
+  // image is COMPLETE — there is no half-filled `Image` to guard against.
+  assert(img, "map.png should decode");
+  println("{img.name} is {img.width}x{img.height}, {len(img.data)} pixels");
+  assert(len(img.data) == img.width * img.height, "the vector is the whole image");
+
+  // Every section below is a function and `main` calls each one. A section `main`
+  // does not call still COMPILES — so a renamed API would still be caught while
+  // its assertions, the half that checks the example is RIGHT rather than merely
+  // spelled correctly, silently never run.
+  addressing();
+  channels();
+  round_trip();
+  the_surprise();
+}
+
+// That prints:
+//
+//     map.png is 256x256, 65536 pixels
+//
+// ## Finding a pixel
+//
+// `img.data` is one FLAT `vector<Pixel>` in row-major order. The pixel at column
+// x, row y is `data[y * width + x]`, and `len(data) == width * height` always
+// holds on an image `png()` handed back. There is no per-row vector and no
+// two-dimensional index — the arithmetic is the interface.
+
+fn addressing() {
+  img = file("../tests/map.png").png();
+  assert(img, "map.png should decode");
+
+  // The centre pixel of a 256x256 image.
+  centre = img.data[128 * img.width + 128];
+  assert(centre, "the centre pixel is in range");
+
+  // Scanning every pixel is a `for` over the vector, in row order.
+  bright = 0;
+  for px in img.data {
+    if (px.r + px.g + px.b) / 3 > 200 {
+      bright += 1
+    }
+  }
+  assert(bright >= 0 && bright <= len(img.data), "bright pixels: {bright}");
+
+  // `png()` answers null for all three ways there is nothing to decode: the path
+  // does not exist, it names a directory, or the bytes are not a PNG.
+  assert(!file("no_such_image.png").png(), "a missing file is null");
+}
+
+// ## The four channels, and the two packed forms
+//
+// A `Pixel` carries `r`, `g`, `b` and `a`, each 0-255. Alpha is CARRIED, not
+// dropped: a source file with no alpha channel arrives fully opaque (`a == 255`),
+// never invisible.
+//
+// Two packed forms exist because they answer different questions.
+// `value()` is `0xRRGGBB` and deliberately has no alpha in it — that is the
+// pre-alpha contract, so a colour comparison written years ago keeps answering
+// what it answered. `rgba()` is `0xAARRGGBB`, the byte order `graphics::Canvas`
+// uses, so a decoded image hands over to a canvas without a per-channel loop.
+
+fn channels() {
+  img = file("../tests/map.png").png();
+  assert(img, "map.png should decode");
+
+  first = img.data[0];
+  assert(first, "the first pixel is in range");
+  assert(first.r >= 0 && first.r <= 255, "red is a byte: {first.r}");
+  assert(first.a == 255, "a PNG without alpha arrives opaque, not invisible");
+  assert(first.value() == first.r * 0x10000 + first.g * 0x100 + first.b,
+         "value() packs RGB and nothing else");
+  assert(first.rgba() == first.a * 0x1000000 + first.value(), "rgba() adds alpha on top");
+
+  // `opaque()` asks the question a collision proxy, a trim box and a colour key
+  // all want: is this texel covered? It takes a THRESHOLD rather than testing
+  // `a == 255`, because antialiased art has a fringe of partly-transparent texels
+  // that belong to the silhouette. The default cutoff is half opacity.
+  assert(first.opaque(), "an opaque pixel is opaque at the default cutoff");
+  ghost = imaging::Pixel { r: 10, g: 20, b: 30, a: 40 };
+  assert(!ghost.opaque(), "40 is below the 128 default");
+  assert(ghost.opaque(32), "and above a cutoff of 32");
+}
+
+// ## Building an image and writing it out
+//
+// An `Image` is a struct like any other: fill a `vector<Pixel>`, give it a
+// matching width and height, and call `save_png`. The `name` field is not used by
+// the encoder — the path argument decides where the file lands.
+
+fn round_trip() {
+  swatch = imaging::Image {
+    name: "swatch",
+    width: 2,
+    height: 2,
+    data: [
+      imaging::Pixel { r: 255, g: 0,   b: 0 },
+      imaging::Pixel { r: 0,   g: 255, b: 0 },
+      imaging::Pixel { r: 0,   g: 0,   b: 255 },
+      imaging::Pixel { r: 128, g: 128, b: 128 }
+    ]
+  };
+  // `a` is omitted above and that is safe here for one declared reason: the field
+  // carries `= 255`. An omitted field otherwise takes its type's ZERO, and zero
+  // alpha is invisible — so without that default every `Pixel{r, g, b}` ever
+  // written would quietly become fully transparent.
+  assert(swatch.data[0].a == 255, "the declared default made the red pixel opaque");
+
+  scratch = "../tests/_tmp_guide_swatch.png";
+  assert(swatch.save_png(scratch), "save_png reports success");
+
+  reloaded = file(scratch).png();
+  assert(reloaded, "the file we just wrote decodes");
+  assert(reloaded.width == 2 && reloaded.height == 2, "dimensions survive the round trip");
+  assert(reloaded.data[0].r == 255 && reloaded.data[0].g == 0 && reloaded.data[0].b == 0,
+         "and so does the red pixel");
+  assert(reloaded.data[3].r == 128, "and the grey one");
+  delete(scratch);
+}
+
+// ## The one that surprises people
+//
+// A pixel's channels are `const`, so a pixel is REPLACED, never edited:
+//
+//     img.data[i] = imaging::Pixel { r: 0, g: 0, b: 0 };   // yes
+//     img.data[i].r = 0;                                    // not a thing
+//
+// And `limit(0, 255)` is a RANGE, not a clamp. A channel built outside it stores
+// **0** rather than saturating at 255 — so the obvious way to brighten an image
+// turns its brightest pixels black, which looks like a decoding bug and is not.
+// Clamp the value yourself before you build the pixel.
+
+fn the_surprise() {
+  bright = imaging::Pixel { r: 200, g: 100, b: 50 };
+
+  // Doubling without a clamp: 400 is outside the range, so it stores 0.
+  doubled = imaging::Pixel { r: bright.r * 2, g: bright.g * 2, b: bright.b * 2 };
+  assert(doubled.r == 0, "400 is out of range and stores 0, not 255");
+  assert(doubled.g == 200 && doubled.b == 100, "the channels that stayed in range are fine");
+
+  // The cure is one `min` at the call site.
+  safe = imaging::Pixel {
+    r: min(bright.r * 2, 255),
+    g: min(bright.g * 2, 255),
+    b: min(bright.b * 2, 255)
+  };
+  assert(safe.r == 255, "clamped before the pixel is built");
+}
+
+// ## Where to go next
+//
+// The API reference lists every signature with its contract. The package's own
+// tests are the best-explained calls in it — `tests/worked-examples.loft` carries
+// `@IMG-001` (whole-image-or-null, and the addressing rule), `@IMG-002` (every
+// colour type arrives as RGBA), `@IMG-003` (replacing a pixel, and why the local
+// you read one into is a view of its slot rather than a snapshot) and `@IMG-004`
+// (the range that is not a clamp, above).

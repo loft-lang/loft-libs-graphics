@@ -53,52 +53,75 @@ fn test_load_answers_a_whole_image_or_null() {
   assert(bottom_right.value() == 0xFFFF00, "(1,1) is yellow");
 }
 
-// @IMG-002 — every PNG colour type loads, and every one of them arrives as plain
-// 8-bit RGB.  A `Pixel` has three channels and a loft `Image` is exactly
-// `width * height` of them, so the decoder folds each file down to that: RGBA and
-// grey+alpha lose their alpha, greyscale is replicated across r/g/b, a palette is
-// resolved to its entries, 16-bit samples drop to their high byte.  The one that
-// bites is the discarded ALPHA — it is dropped, not composited, so a fully
-// transparent pixel arrives carrying whatever colour was stored under it and
-// nothing in the `Image` says it was ever transparent.  A sprite sheet therefore
-// needs a colour key, not a transparency test; there is no transparency left to
-// test.
-fn test_every_colour_type_arrives_as_rgb() {
-  // RGBA — alphas in the file are 255, 128, 0, 255.  The third pixel is fully
-  // transparent and still comes back with its colour.
+// @IMG-002 — every PNG colour type loads, and every one of them arrives as 8-bit
+// RGBA.  A `Pixel` has four channels and a loft `Image` is exactly
+// `width * height` of them, so the decoder expands each file to that: greyscale is
+// replicated across r/g/b, a palette is resolved to its entries, 16-bit samples
+// drop to their high byte — and **alpha is carried**, so a sprite sheet can be
+// tested for transparency instead of needing a colour key.
+//
+// The case to hold on to is the file with NO alpha channel.  Its texels arrive at
+// `a == 255`, never 0: an omitted channel means opaque, and defaulting it to zero
+// would make every RGB PNG in the world decode to nothing at all.
+fn test_every_colour_type_arrives_as_rgba() {
+  // RGBA — alphas in the file are 255, 128, 0, 255.
   rgba = file("fixture-rgba.png").png();
-  assert(len(rgba.data) == 4, "four pixels — not the byte stream re-cut into threes");
-  rgba0 = rgba.data[0] ?? Pixel{r: 0, g: 0, b: 0};
-  rgba1 = rgba.data[1] ?? Pixel{r: 0, g: 0, b: 0};
-  rgba2 = rgba.data[2] ?? Pixel{r: 0, g: 0, b: 0};
-  rgba3 = rgba.data[3] ?? Pixel{r: 0, g: 0, b: 0};
-  assert(rgba0.r == 10 && rgba0.g == 20 && rgba0.b == 30, "opaque pixel keeps its colour");
-  assert(rgba1.r == 40 && rgba1.g == 50 && rgba1.b == 60, "half-transparent: colour, no alpha");
-  assert(rgba2.r == 70 && rgba2.g == 80 && rgba2.b == 90,
-         "FULLY transparent, and indistinguishable from an opaque pixel of that colour");
-  assert(rgba3.r == 100 && rgba3.g == 110 && rgba3.b == 120, "last pixel");
+  assert(len(rgba.data) == 4, "four pixels — not the byte stream re-cut into fours");
+  rgba0 = rgba.data[0]?;
+  rgba1 = rgba.data[1]?;
+  rgba2 = rgba.data[2]?;
+  rgba3 = rgba.data[3]?;
+  assert(rgba0.r == 10 && rgba0.g == 20 && rgba0.b == 30 && rgba0.a == 255, "opaque");
+  assert(rgba1.r == 40 && rgba1.g == 50 && rgba1.b == 60 && rgba1.a == 128, "half");
+  assert(rgba2.r == 70 && rgba2.g == 80 && rgba2.b == 90 && rgba2.a == 0,
+         "FULLY transparent, and now distinguishable from an opaque pixel of that colour");
+  assert(rgba3.a == 255, "last pixel opaque");
+  // `opaque()` is the question a proxy / trim / colour-key actually asks, and it
+  // takes a THRESHOLD because antialiased art has a partly-transparent fringe.
+  assert(rgba0.opaque() && rgba1.opaque() && !rgba2.opaque(), "default cutoff 128");
+  assert(!rgba1.opaque(129), "the cutoff is a parameter, not a constant");
+  assert(rgba0.rgba() == 0xFF0A141E, "packed 0xAARRGGBB, the Canvas byte order");
 
-  // Greyscale — one sample becomes r == g == b.
+  // Greyscale — one sample becomes r == g == b, and NO alpha channel means opaque.
   grey = file("fixture-gray.png").png();
   assert(len(grey.data) == 4, "four pixels, not one");
-  grey1 = grey.data[1] ?? Pixel{r: 0, g: 0, b: 0};
+  grey1 = grey.data[1]?;
   assert(grey1.r == 85 && grey1.g == 85 && grey1.b == 85, "luminance replicated");
+  assert(grey1.a == 255, "a source with no alpha channel is OPAQUE, not invisible");
 
-  // Grey + alpha folds to the same four greys.
+  // Grey + alpha carries both.
   greya = file("fixture-gray-alpha.png").png();
-  greya2 = greya.data[2] ?? Pixel{r: 0, g: 0, b: 0};
-  assert(greya2.r == 170 && greya2.g == 170 && greya2.b == 170, "alpha dropped here too");
+  greya2 = greya.data[2]?;
+  assert(greya2.r == 170 && greya2.g == 170 && greya2.b == 170, "luminance");
+  assert(greya2.a == 0, "and its alpha, which used to be dropped here");
 
   // A palette is resolved to its entries, never handed over as indices.
   pal = file("fixture-palette.png").png();
-  pal2 = pal.data[2] ?? Pixel{r: 0, g: 0, b: 0};
+  pal2 = pal.data[2]?;
   assert(pal2.value() == 0x0000FF, "palette index 2 resolved to blue, not left as 2");
+  assert(pal2.value() == 0x0000FF && pal2.a == 255, "`value()` stays 24-bit RGB");
 
   // 16-bit samples drop to their high byte: 0x0000 0x5500 0xAA00 0xFFFF.
   wide = file("fixture-gray16.png").png();
   assert(len(wide.data) == 4, "four pixels, not eight bytes' worth");
-  wide3 = wide.data[3] ?? Pixel{r: 0, g: 0, b: 0};
+  wide3 = wide.data[3]?;
   assert(wide3.r == 255, "0xFFFF becomes 0xFF");
+}
+
+// @IMG-005 — a `Pixel` written without an alpha is OPAQUE.
+//
+// `a` carries a declared default of 255, and that default is the whole reason
+// adding a channel did not break every consumer at once: an omitted field takes
+// its type's ZERO, and zero alpha is invisible.  Without the default, every
+// `Pixel{r, g, b}` literal written before alpha existed would have started
+// producing nothing on screen, silently, with the colour still right in the
+// struct — loft#914's `omitted-field-zero` in its purest form.
+fn test_a_pixel_written_without_an_alpha_is_opaque() {
+  p = Pixel{r: 1, g: 2, b: 3};
+  assert(p.a == 255, "the omitted channel defaults to opaque, not to zero");
+  assert(p.opaque(), "so a literal from before alpha existed still draws");
+  clear = Pixel{r: 1, g: 2, b: 3, a: 0};
+  assert(!clear.opaque(), "and naming it zero still means transparent");
 }
 
 // @IMG-003 — a pixel is REPLACED, never edited, and the local you read it into is

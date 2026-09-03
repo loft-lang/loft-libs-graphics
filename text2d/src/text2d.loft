@@ -146,6 +146,9 @@ pub fn atlas_new(scale: integer, capacity: integer) -> Atlas {
   }
 }
 
+// How many distinct glyphs the sheet holds.  It rises only when a code is met
+// for the FIRST time, so it measures what the atlas actually cost rather than
+// how much text has been drawn through it.
 pub fn atlas_glyph_count(self: const Atlas) -> integer { self.a_next }
 
 // How many times the sheet has been WRITTEN.  A GL consumer uploads on exactly
@@ -273,8 +276,11 @@ pub fn advance64(self: const Metrics) -> integer { self.m_adv64 }
 // describing one distance drift apart the moment either is edited.
 pub fn advance(self: const Metrics) -> integer { (self.m_adv64 + 32) / 64 ?? 0 }
 
+// The line height in pixels — what to advance y by between two lines.
 pub fn height(self: const Metrics) -> integer { self.m_line_h }
 
+// Is the pitch fixed?  True is what makes `width` exact instead of an
+// over-estimate, so a caller laying out columns can trust the number.
 pub fn is_mono(self: const Metrics) -> boolean { self.m_mono }
 
 // The ADVANCE width of `s` — what to reserve a box by.
@@ -292,6 +298,9 @@ pub fn width(self: const Metrics, s: text) -> integer {
     (len(s) * self.m_adv64 + 63) / 64 ?? 0
 }
 
+// Does `s` fit in `px`?  Asks the ADVANCE width, which rounds outwards, so a
+// true here means drawing it will not spill — the direction a caller needs.
+// `fit_text` is what to reach for when the answer is no.
 pub fn fits(self: const Metrics, s: text, px: integer) -> boolean {
     width(self, s) <= px
 }

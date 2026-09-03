@@ -1,6 +1,36 @@
 // Copyright (c) 2026 Jurjen Stellingwerff
 // SPDX-License-Identifier: LGPL-3.0-or-later
-// Graphics library — 2D pixel canvas with drawing primitives.
+// graphics — a 2-D pixel canvas, and the window/GPU layer under it.
+//
+// TWO HALVES, and which one you want decides everything else.  The `Canvas` half
+// is a flat vector of packed RGBA integers: it needs no window, no driver and no
+// GL context, so it runs under `loft test` and answers questions about pixels.
+// The `gl_*` half is the real window — shaders, VBOs, framebuffers — and every
+// one of those is a native call that answers *"native function not loaded"* where
+// there is no context.  Write the drawing against `Canvas` and it stays testable.
+//
+// ── Using it ─────────────────────────────────────────────────────────────────
+//
+//     cv = graphics::canvas(64, 48, graphics::rgb(20, 20, 30));
+//     cv.fill_rect(8, 8, 20, 12, graphics::rgb(200, 60, 40));
+//     cv.draw_line(0, 0, 63, 47, graphics::rgb(255, 255, 255));
+//
+//     // Alpha COMPOSITES; `set_pixel` would have replaced instead.
+//     cv.blend_pixel(10, 10, graphics::rgba(0, 0, 255, 128));
+//     px = cv.get_pixel(10, 10);          // -> r 99, g 29, b 147, a 255:
+//                                         //    half the red rect, half the blue
+//     cv.save_png("out.png");
+//
+// ⚠ COLOUR IS 0xAARRGGBB, so a bare `0xFF0000` literal is red at alpha ZERO and
+// composites to nothing.  `rgb()` is the same pack with alpha 255 — reach for it
+// rather than for a literal, and `color_r`/`_g`/`_b`/`_a` take the channels back
+// out.
+//
+// The rest of the canvas surface is more primitives at the same level: lines,
+// rects, circles, ellipses, beziers, an anti-aliased line, triangles and
+// polygons, plus two resamplers (`resize_lanczos`, `resize_bicubic`).  The `gl_*`
+// surface below them mirrors the OpenGL calls it wraps, and `stage` is the
+// retained scene that drives either half.
 
 use mesh3d;
 use glb;
@@ -28,9 +58,15 @@ pub fn rgb(cr: integer, cg: integer, cb: integer) -> integer {
   rgba(cr, cg, cb, 255)
 }
 
+// The channels back out of a packed colour, matching `rgba`'s layout — red,
+// green, blue, then alpha off the high byte.
 pub fn color_r(color: integer) -> integer { (color >> 16) & 255 }
+// Green.
 pub fn color_g(color: integer) -> integer { (color >> 8) & 255 }
+// Blue.
 pub fn color_b(color: integer) -> integer { color & 255 }
+// Alpha.  255 is opaque; a colour written as a bare 0xRRGGBB literal reads 0
+// here, which is what makes it composite to nothing.
 pub fn color_a(color: integer) -> integer {
   // integer is i64 post-2c, so the shift is logical on the high byte.
   ((color & 0xFF000000) >> 24) & 255
@@ -534,6 +570,311 @@ pub fn fill_triangle(self: Canvas, tx0: integer, ty0: integer, tx1: integer, ty1
   }
 }
 
+/// A point on the canvas, in pixels.
+///
+/// Exists because a polygon is a LIST of them and `fill_triangle`'s six loose
+/// integers do not generalise — six is already the edge of what a caller gets
+/// right in order, and a polygon has no fixed count.
+///
+/// NOT called `Point`: `mesh3d::LightType` has a `Point` variant and `graphics`
+/// depends on mesh3d, so the name is taken and the collision is a hard error
+/// ("struct 'Point' conflicts with a enumvalue of the same name"). `Vertex` is
+/// mesh3d's too. Reach for `Coord` in 2-D graphics code and the 3-D names stay
+/// where they belong.
+pub struct Coord {
+  px: integer,
+  py: integer,
+}
+
+/// Fill a closed polygon under the EVEN-ODD rule.
+///
+/// The polygon closes itself: the last point joins the first, so a triangle is
+/// three points and not four. Fewer than three points draws nothing.
+///
+/// Even-odd means a point is inside when a ray from it crosses the outline an odd
+/// number of times, so a self-intersecting outline leaves its overlap EMPTY — the
+/// classic five-point star is a pentagon-shaped hole with five filled arms. That
+/// is a choice, not a bug: the alternative (non-zero winding) fills the middle,
+/// and the two disagree on exactly the shapes people draw deliberately.
+///
+/// Matches `fill_triangle` pixel for pixel on a triangle, which is the reason the
+/// row rule below is inclusive rather than the half-open rule a scanline filler
+/// usually takes. See the note on `polygon_crossings`.
+// Example: @GFX-006 — the star's hollow middle, and the triangle agreement.
+pub fn fill_polygon(self: Canvas, pts: const vector<Coord>, color: integer) {
+  fp_n = len(pts);
+  if fp_n < 3 { return; }
+  fp_top = pts[0]?.py;
+  fp_bot = fp_top;
+  for p in pts {
+    if p.py < fp_top { fp_top = p.py; }
+    if p.py > fp_bot { fp_bot = p.py; }
+  }
+  if fp_top < 0 { fp_top = 0; }
+  if fp_bot >= self.height { fp_bot = self.height - 1; }
+  for fp_y in fp_top..=fp_bot {
+    fp_xs = polygon_crossings(pts, fp_y, fp_y == fp_bot);
+    fp_i = 0;
+    while fp_i + 1 < len(fp_xs) {
+      // Inclusive span, like `fill_triangle`: `hline` takes a half-open end, so
+      // the right edge is +1.
+      self.hline(fp_xs[fp_i]?, fp_xs[fp_i + 1]? + 1, fp_y, color);
+      fp_i += 2;
+    }
+  }
+}
+
+/// Where the outline crosses scanline `y`, left to right.
+///
+/// The rule is HALF-OPEN on an edge's lower end (`ylo <= y < yhi`) and that is
+/// what makes even-odd work: a vertex the outline passes straight through belongs
+/// to exactly one of its two edges, so it counts once. Count it twice — the
+/// obvious inclusive rule — and a through-vertex yields two crossings at the same
+/// x, which pair with each other and fill a single pixel where a whole span
+/// belonged.
+///
+/// The cost is that the polygon's LOWEST row loses every edge, so `closing` turns
+/// the rule inclusive for exactly that row. It is safe there and nowhere else: the
+/// half-open rule exists to disambiguate a vertex the outline passes THROUGH, and
+/// the extreme row has none — every edge meeting it goes back up, so no crossing
+/// is counted twice. Measured: left half-open throughout, a triangle loses its
+/// bottom vertex (1 px) or its whole base (34 px on a 34-wide one), which was the
+/// entire `fill_triangle` disagreement.
+fn polygon_crossings(pc_pts: const vector<Coord>, pc_y: integer,
+                     closing: boolean) -> vector<integer> {
+  pc_out: vector<integer> = [];
+  pc_n = len(pc_pts);
+  for i in 0..pc_n {
+    pc_a = pc_pts[i]?;
+    pc_b = pc_pts[(i + 1) % pc_n]?;
+    pc_ylo = if pc_a.py < pc_b.py { pc_a.py } else { pc_b.py };
+    pc_yhi = if pc_a.py < pc_b.py { pc_b.py } else { pc_a.py };
+    // A horizontal edge crosses no scanline: its endpoints are already carried by
+    // the two edges that meet it, and counting it would flip parity along a row it
+    // only touches.
+    if pc_ylo == pc_yhi { continue }
+    if pc_y < pc_ylo { continue }
+    if pc_y > pc_yhi { continue }
+    if pc_y == pc_yhi && !closing { continue }
+    // Interpolate from the edge's TOP end, and multiply before dividing — the
+    // same integer-precision rule `fill_triangle` documents.
+    pc_ty = if pc_a.py < pc_b.py { pc_a } else { pc_b };
+    pc_by = if pc_a.py < pc_b.py { pc_b } else { pc_a };
+    pc_out += [pc_ty.px + ((pc_by.px - pc_ty.px) * (pc_y - pc_ty.py) / (pc_by.py - pc_ty.py) ?? 0)];
+  }
+  // Insertion sort: a crossing list is a handful of numbers, and a fresh vector
+  // per scanline would cost more than the compare.
+  for i in 1..len(pc_out) {
+    pc_v = pc_out[i]?;
+    pc_j = i;
+    while pc_j > 0 && pc_out[pc_j - 1]? > pc_v {
+      pc_out[pc_j] = pc_out[pc_j - 1]?;
+      pc_j -= 1;
+    }
+    pc_out[pc_j] = pc_v;
+  }
+  pc_out
+}
+
+// ── Resampling ──────────────────────────────────────────────────────
+
+/// Fixed-point fraction bits for resample weights — Pillow's `PRECISION_BITS`.
+RESAMPLE_PREC = 22;
+RESAMPLE_PI = 3.14159265358979323846;
+BICUBIC_A = -0.5;
+
+fn sinc_at(x: float) -> float {
+  if x == 0.0 { return 1.0 }
+  sc_xp = x * RESAMPLE_PI;
+  (sin(sc_xp) / sc_xp)?
+}
+
+/// Pillow's bicubic kernel — the Keys cubic with `a = -0.5`, support 2.
+///
+/// The two branches are one polynomial each and the constant is the whole
+/// identity of the filter: `a = -0.5` is Catmull-Rom, and another `a` is a
+/// different picture, not a rounding difference.
+fn bicubic_at(bc_x0: float) -> float {
+  bc_x = if bc_x0 < 0.0 { -bc_x0 } else { bc_x0 };
+  if bc_x < 1.0 { return ((BICUBIC_A + 2.0) * bc_x - (BICUBIC_A + 3.0)) * bc_x * bc_x + 1.0 }
+  if bc_x < 2.0 { return (((bc_x - 5.0) * bc_x + 8.0) * bc_x - 4.0) * BICUBIC_A }
+  0.0
+}
+
+/// The Lanczos-3 kernel: `sinc(x) * sinc(x/3)` inside a radius of 3, else 0.
+fn lanczos_at(lz_x0: float) -> float {
+  lz_x = if lz_x0 < 0.0 { -lz_x0 } else { lz_x0 };
+  if lz_x < 3.0 { return sinc_at(lz_x) * sinc_at(lz_x / 3.0) }
+  0.0
+}
+
+/// One axis of Pillow's `precompute_coeffs`, flattened into three parallel
+/// vectors: each output index gets a window START, a TAP COUNT, and that many
+/// fixed-point weights appended to `kk`.
+///
+/// The weights are normalised to sum to 1 in floating point and only then scaled
+/// to integers, rounding AWAY from zero — both filters here have negative lobes,
+/// and rounding them the same direction as the positive ones is what keeps the
+/// taps summing back to `1 << RESAMPLE_PREC`.
+///
+/// `support0` and `filt` are the ONLY things that differ between Pillow's
+/// filters, which is why they are parameters rather than two copies of this
+/// function: the window arithmetic, the normalisation and the fixed-point
+/// rounding are one derived fact and belong in one place.
+fn resample_coeffs(in_size: integer, out_size: integer, support0: float,
+                   filt: fn(float) -> float, starts: &vector<integer>,
+                   counts: &vector<integer>, kk: &vector<integer>) {
+  rc_scale = ((in_size as float) / (out_size as float))?;
+  // Upscaling does not widen the kernel: the filter scale floors at 1.
+  rc_fscale = if rc_scale < 1.0 { 1.0 } else { rc_scale };
+  rc_support = support0 * rc_fscale;
+  rc_ss = (1.0 / rc_fscale)?;
+  for xx in 0..out_size {
+    rc_centre = ((xx as float) + 0.5) * rc_scale;
+    rc_min = (rc_centre - rc_support + 0.5) as integer;
+    if rc_min < 0 { rc_min = 0; }
+    rc_max = (rc_centre + rc_support + 0.5) as integer;
+    if rc_max > in_size { rc_max = in_size; }
+    rc_max -= rc_min;
+    rc_row: vector<float> = [];
+    rc_ww = 0.0;
+    for x in 0..rc_max {
+      rc_w = filt((((x + rc_min) as float) - rc_centre + 0.5) * rc_ss);
+      rc_row += [rc_w];
+      rc_ww += rc_w;
+    }
+    for x in 0..rc_max {
+      rc_k = rc_row[x]?;
+      if rc_ww != 0.0 { rc_k = (rc_k / rc_ww)?; }
+      rc_scaled = rc_k * ((1 << RESAMPLE_PREC) as float);
+      kk += [if rc_k < 0.0 { (rc_scaled - 0.5) as integer }
+             else { (rc_scaled + 0.5) as integer }];
+    }
+    starts += [rc_min];
+    counts += [rc_max];
+  }
+}
+
+/// Fixed-point accumulator to a byte: shift the fraction off and clamp.
+fn resample_clip(rq_v: integer) -> integer {
+  rq_s = rq_v >> RESAMPLE_PREC;
+  if rq_s < 0 { return 0 }
+  if rq_s > 255 { return 255 }
+  rq_s
+}
+
+/// Resample this canvas to `ow` x `oh` with a Lanczos-3 filter.
+///
+/// Byte-identical to Pillow's `Image.resize(..., Image.LANCZOS)`, which is the
+/// point: the `.draw` corpus renders at 3x and downscales with exactly that, so a
+/// renderer that resamples any other way cannot be pixel-compared against it
+/// however good it looks (@PLN146 W0 finding 5).
+///
+/// **Alpha is premultiplied across the resample and undone after**, because
+/// Pillow defines `resize` on an image with alpha as
+/// `convert("RGBa") -> resize -> convert("RGBA")`. That is a contract, not an
+/// optimisation: resampling straight RGBA lets a transparent texel's colour bleed
+/// into its neighbours, and the two disagree on any edge where alpha varies.
+/// Both roundings are Pillow's and neither is the obvious one — `(v*a + 127)/255`
+/// going in, a TRUNCATING divide coming out, and alpha 0 passes its colour
+/// through untouched rather than going black.
+// Example: @GFX-007 — why a 3x supersample plus this is not the same picture as
+// drawing once at final size.
+pub fn resize_lanczos(self: const Canvas, ow: integer, oh: integer) -> Canvas {
+  resample(self, ow, oh, 3.0, lanczos_at)
+}
+
+/// Resample with a BICUBIC filter — Pillow's `Image.resize` default.
+///
+/// The default is the reason this exists: `resize(size)` with no `resample=`
+/// argument is bicubic, and code that builds a small image and enlarges it (a
+/// gradient computed at 100x100, say) takes that path without naming it. Read
+/// the call site's filter off the ARGUMENT LIST and it looks like there isn't
+/// one.
+///
+/// ⚠ Bicubic has negative lobes, so an ENLARGEMENT overshoots: a hard 40→200
+/// step upscaled 4x spans 28..212 in Pillow and here alike. That is the filter,
+/// not a defect — clamping it away would be the defect.
+pub fn resize_bicubic(self: const Canvas, ow: integer, oh: integer) -> Canvas {
+  resample(self, ow, oh, 2.0, bicubic_at)
+}
+
+/// Pillow's two-pass resample, with the filter left to the caller.
+///
+/// One body, because the passes, the premultiply and the fixed-point
+/// accumulation are the same derived fact for every filter — only the kernel and
+/// its support differ.
+fn resample(self: const Canvas, ow: integer, oh: integer, support0: float,
+            filt: fn(float) -> float) -> Canvas {
+  if ow < 1 || oh < 1 || self.width < 1 || self.height < 1 {
+    return canvas(if ow < 1 { 1 } else { ow }, if oh < 1 { 1 } else { oh }, 0);
+  }
+  rl_iw = self.width;
+  rl_ih = self.height;
+  // Premultiplied channel planes, in Pillow's RGBA byte order.
+  rl_pre: vector<integer> = [];
+  for i in 0..(rl_iw * rl_ih) {
+    rl_c = self.data[i]?;
+    rl_a = (rl_c >> 24) & 255;
+    rl_pre += [(((rl_c >> 16) & 255) * rl_a + 127) / 255 ?? 0,
+               (((rl_c >> 8) & 255) * rl_a + 127) / 255 ?? 0,
+               ((rl_c & 255) * rl_a + 127) / 255 ?? 0,
+               rl_a];
+  }
+  hs: vector<integer> = []; hc: vector<integer> = []; hk: vector<integer> = [];
+  resample_coeffs(rl_iw, ow, support0, filt, hs, hc, hk);
+  rl_mid: vector<integer> = [];
+  for _ in 0..(ow * rl_ih * 4) { rl_mid += [0]; }
+  rl_base = 0;
+  for xx in 0..ow {
+    rl_xmin = hs[xx]?;
+    rl_n = hc[xx]?;
+    for yy in 0..rl_ih {
+      for ch in 0..4 {
+        rl_acc = 1 << (RESAMPLE_PREC - 1);
+        for x in 0..rl_n {
+          rl_acc += rl_pre[(yy * rl_iw + rl_xmin + x) * 4 + ch]? * hk[rl_base + x]?;
+        }
+        rl_mid[(yy * ow + xx) * 4 + ch] = resample_clip(rl_acc);
+      }
+    }
+    rl_base += rl_n;
+  }
+  vs: vector<integer> = []; vc: vector<integer> = []; vk: vector<integer> = [];
+  resample_coeffs(rl_ih, oh, support0, filt, vs, vc, vk);
+  rl_out = canvas(ow, oh, 0);
+  rl_od = &rl_out.data;
+  rl_vbase = 0;
+  for yy in 0..oh {
+    rl_ymin = vs[yy]?;
+    rl_n = vc[yy]?;
+    for xx in 0..ow {
+      rl_ch: vector<integer> = [];
+      for ch in 0..4 {
+        rl_acc = 1 << (RESAMPLE_PREC - 1);
+        for y in 0..rl_n {
+          rl_acc += rl_mid[((rl_ymin + y) * ow + xx) * 4 + ch]? * vk[rl_vbase + y]?;
+        }
+        rl_ch += [resample_clip(rl_acc)];
+      }
+      // Undo the premultiply and repack to 0xAARRGGBB.
+      rl_a = rl_ch[3]?;
+      rl_rgb: vector<integer> = [];
+      for ch in 0..3 {
+        rl_v = rl_ch[ch]?;
+        if rl_a == 0 { rl_rgb += [rl_v]; }
+        else {
+          rl_u = (rl_v * 255) / rl_a ?? 0;
+          rl_rgb += [if rl_u > 255 { 255 } else { rl_u }];
+        }
+      }
+      rl_od[yy * ow + xx] = (rl_a << 24) | (rl_rgb[0]? << 16) | (rl_rgb[1]? << 8) | rl_rgb[2]?;
+    }
+    rl_vbase += rl_n;
+  }
+  rl_out
+}
+
 // Native: write packed pixel data to a PNG file.
 fn save_png_raw(path: text, width: integer, height: integer, data: const vector<integer>) -> boolean;
 #native "loft_save_png"
@@ -581,6 +922,7 @@ pub fn gl_set_fullscreen(on: boolean);
 // the real resolution rather than a windowed hint.
 pub fn gl_window_width() -> integer;
 #native "loft_gl_window_width"
+// And its height — the pair is what a projection or a 2-D ortho is built from.
 pub fn gl_window_height() -> integer;
 #native "loft_gl_window_height"
 
@@ -1086,6 +1428,12 @@ pub fn gl_font_ascent(font: integer, size: float) -> float;
 fn rasterize_text_into(font: integer, content: text, size: float, buf: vector<integer>) -> integer;
 #native "loft_rasterize_text_into"
 
+// Rasterise text into the canvas at (x, y), anchored by the TOP-left.
+//
+// ⚠ NEEDS THE NATIVE RASTERISER, so this is one of the canvas routines that
+// does NOT work headless: without it the call is a no-op and the canvas keeps
+// whatever was under the text.  `text2d` exists for exactly that case — it
+// carries a baked face and draws through `set_pixel`, so text always appears.
 pub fn draw_text(self: Canvas, font: integer, content: text, size: float,
                  dt_x: integer, dt_y: integer, color: integer) {
   dt_tw = gl_measure_text(font, content, size) as integer + 1;
@@ -1402,15 +1750,45 @@ pub fn create_text_texture(font: integer, content: text, size: float, color: int
 // Load an audio clip (WAV or OGG). Returns handle (>= 0) or null on failure.
 pub fn audio_load(path: text) -> integer;
 #native "loft_audio_load"
-// Play a loaded clip at the given volume (0.0-1.0). Returns playback handle.
-pub fn audio_play(clip: integer, volume: float) -> integer;
+// Play a loaded clip.  Returns a playback handle, or -1 when it will not play.
+//
+// `volume` is 0.0-1.0, `looping` repeats the clip until it is stopped, `pan`
+// places it across the stereo field (-1 left, 0 centre, 1 right), and `start`
+// begins that many seconds in.  Everything past `volume` has a default, so an
+// existing `audio_play(clip, 0.8)` keeps meaning what it meant.
+//
+// `start` skips into the FIRST pass only: a looping clip then repeats whole,
+// which is what a browser's `start(when, offset)` with `loop` does.
+//
+// A handle is never handed out twice.  When a clip finishes its slot is reused,
+// but the handle carries which use it belongs to, so an `audio_stop` on a
+// finished sound stops nothing instead of stopping whatever took its place.
+pub fn audio_play(clip: integer, volume: float, looping: boolean = false,
+                  pan: float = 0.0, start: float = 0.0) -> integer;
 #native "loft_audio_play"
 // Stop a playing clip by its playback handle.
 pub fn audio_stop(sink: integer);
 #native "loft_audio_stop"
+// Stop every playing clip — a pause menu, a scene change, a game over.
+pub fn audio_stop_all();
+#native "loft_audio_stop_all"
 // Set volume of a playing clip (0.0-1.0).
 pub fn audio_set_volume(sink: integer, volume: float);
 #native "loft_audio_set_volume"
+// Move a playing clip across the stereo field: -1 left, 0 centre, 1 right.
+//
+// The law is Web Audio's `StereoPannerNode`, equal-power for a mono clip: a
+// sweep holds its loudness through the middle rather than dipping.  A stereo
+// clip is narrowed toward the near side rather than having the far one muted.
+pub fn audio_set_pan(sink: integer, pan: float);
+#native "loft_audio_set_pan"
+// Jump a playing clip to `seconds` from its start.  Answers whether it moved.
+//
+// A LOOPING clip cannot seek — repeating needs a buffered source, which has no
+// earlier position to go back to — and this answers false rather than leaving
+// the caller believing a jump happened.
+pub fn audio_seek(sink: integer, seconds: float) -> boolean;
+#native "loft_audio_seek"
 // Play raw PCM samples (mono, values -1.0 to 1.0) at the given sample rate.
 // Returns playback handle, or null on failure.
 pub fn audio_play_raw(samples: vector<single>, sample_rate: integer, volume: float) -> integer;

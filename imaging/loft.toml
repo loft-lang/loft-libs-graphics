@@ -1,9 +1,23 @@
 [package]
 name = "imaging"
-version = "0.2.2"
+version = "0.3.2"
 loft = ">=0.8"
-api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
-data_compatible_with = "0.1.0"   # oldest own release whose stored data this reads
+api_compatible_with  = "0.3.0"   # DECLARED BREAK: `Pixel` gained `a`.  Source that
+                                 # writes `Pixel{r,g,b}` is unaffected — the field
+                                 # defaults to 255 — and that is the direction an
+                                 # author naturally probes, which is why this felt
+                                 # additive.  Two axes it does not reach, both
+                                 # measured: the WRITE side gains a key
+                                 # (`{p:j}` goes from {"r","g","b"} to
+                                 # {"r","g","b","a"}, as does any reflection walk),
+                                 # while reading an old document is clean; and the
+                                 # LAYOUT changes width, so a store written by an
+                                 # older build is not readable by this one.
+                                 # `compat check --full` reads the type and calls it
+                                 # API+DATA break against every prior release.
+                                 # Declaring it is the supported move.
+data_compatible_with = "0.3.0"   # Pixel went 3 bytes -> 4; a persisted Image from
+                                 # an older release reads as shifted colour
 repository = "loft-libs-graphics"
 
 [library]

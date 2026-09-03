@@ -47,6 +47,8 @@ pub fn axial_dq(d: integer) -> integer {
   if d == 0 { return 1; } if d == 1 { return 0; } if d == 2 { return 0 - 1; }
   if d == 3 { return 0 - 1; } if d == 4 { return 0; } 1
 }
+// The r half of that same direction.  Read as a PAIR with `axial_dq` — one
+// direction, two components, and neither is meaningful alone.
 pub fn axial_dr(d: integer) -> integer {
   if d == 0 { return 0; } if d == 1 { return 1; } if d == 2 { return 1; }
   if d == 3 { return 0; } if d == 4 { return 0 - 1; } 0 - 1
@@ -62,6 +64,8 @@ pub fn step_x(x: integer, y: integer, d: integer, k: integer) -> integer {
   p2 = r2 - (r2 / 2) * 2; if p2 < 0 { p2 = p2 + 2; }
   q2 + (r2 - p2) / 2
 }
+// The y half of the pair.  Row parity does not reach it — a step along an axis
+// moves whole rows — which is why this ignores x where `step_x` cannot.
 pub fn step_y(_x: integer, y: integer, d: integer, k: integer) -> integer {
   y + k * axial_dr(d)
 }
@@ -103,6 +107,9 @@ pub struct SegMesh {
   cell_ix: vector<integer>,
 }
 
+// An empty segment mesh: the nine parallel arrays `emit_segment` appends into.
+// Flat and parallel rather than a vector of records, so a chunk rebuild
+// concatenates (`seg_mesh_append`) instead of walking a structure.
 pub fn seg_mesh_new() -> SegMesh {
   SegMesh{ kinds: [], x0s: [], y0s: [], z0s: [], x1s: [], y1s: [], z1s: [],
            colors: [], cell_ix: [] }

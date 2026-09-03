@@ -1,0 +1,170 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The whole pipeline, against the picture the oracle actually produced.
+//
+// One 16x16 scene with a fill, a circle, a smooth stroke, a tapered stroke and a
+// pen line — drawn at 3x and resampled down, exactly as `draw.py` does it.  The
+// expected bytes below are `draw.py`'s own output for this source, so this test
+// is the corpus gate in miniature: it needs no Python to run, and it fails the
+// moment any stage of the pipeline stops agreeing.
+use drawing;
+use graphics;
+
+const HEX_DIGITS = "0123456789abcdef";
+
+fn byte_hex(v: integer) -> text {
+  hi = (v >> 4) & 15;
+  lo = v & 15;
+  HEX_DIGITS[hi..hi + 1] + HEX_DIGITS[lo..lo + 1]
+}
+
+/// The canvas as Pillow lays an RGBA image out in memory: R, G, B, A per pixel.
+fn rgba_hex(cv: const graphics::Canvas) -> text {
+  h = "";
+  for i in 0..(cv.width * cv.height) {
+    c = cv.data[i]?;
+    h += byte_hex(graphics::color_r(c)) + byte_hex(graphics::color_g(c))
+       + byte_hex(graphics::color_b(c)) + byte_hex(graphics::color_a(c));
+  }
+  h
+}
+
+fn scene_source() -> text {
+  `
+  size 16x16
+  Background transparent
+  name body
+  Poly (0.15,0.20) (0.80,0.25) (0.70,0.85) (0.20,0.80) rgb=190,60,50
+  Circle (0.50,0.45) r=0.22 rgb=40,120,180
+  name trim
+  Poly (0.10,0.90)~ (0.50,0.55)~ (0.90,0.92)~ stroke=20,220,90 w=2
+  Poly (0.20,0.30)@6 (0.85,0.40)@1 stroke=250,240,60
+  Line (0.05,0.05) - (0.95,0.15) w=1
+  `
+}
+
+fn test_the_rendered_picture_is_the_oracles() {
+  sc = parse_scene(scene_source());
+  assert(len(sc.unparsed) == 0, "every line parsed");
+  assert(len(sc.deferred) == 0, "every mark is one this build draws");
+  cv = render(sc);
+  assert(cv.width == 16 && cv.height == 16, "16x16 out");
+  assert(rgba_hex(cv) ==
+"231f2341282226782521236c150d2260151523243a3427273f3f1f100000000000000000000000000000000000000000" +
+    "00000000000000000000000000000000241d24232820256526212463564e28a22f2926a10d0722861d1623a72b26249a" +
+    "2a25259b272024942821236428202566281f2438271f27202920291f1f1f1f08000000000100000000000000ffff3f95" +
+    "ffff42d2ffff3f64c3be373300001815000000100b161e432427246120232366221f239c261f249a282026a4251e254b" +
+    "7f3f3f0466663305bc423187fae73ee6fffe3fffffff41fffdf33df2ffff3aa0e6e65c53d8534d2e0400000007000000" +
+    "ffff7f02020200000000000033333305bf7f3f0400000000c44d33b8ffee40fffbf43bf9f9ee3bfbfcf23dffffff3fff" +
+    "fffd45fff4d93effdda437f2c75734f3b83231d9000000000000000101000000bf7f3f0400000000c34a328dfde43efe" +
+    "f9f43cfbf7ed3efff6ee3dfef5ed3dfcf7ef3bfbf9f43dfeffff3bfffff53dfff0d03ae8f9ee3b5edfdf3f0800000001" +
+    "ffbf3f0400000000f1cc394bffff41fffffa35fbfff833fffff834fffff636fffff735fffff734ffece742fef0e740fb" +
+    "ffff3ef7f9ef3cc7ffff5506ffff7f02ffff3f0400000000f5e53c6ef3c53affbcc359fbb2ca67ff9eb773ff68a489ff" +
+    "6fa687ff6e9791ff2c85b5fb6a728bffe04d1e63aaaa0003aa005503ffff0001bf3f3f0400000000c155385fd0342bff" +
+    "754671fb117eb9ff0fba75ff09d162ff0aca68ff159e8eff1b7bbdfc85516ffad81d153c00000000ff55550300000000" +
+    "bf3f3f0400000000b53a3457d73a32ffa95039fb1ad461ff0aef55ff10dc64ff10dd63ff0ceb55fe1ece65ffa2513aee" +
+    "ff27000dffff0001ff00000100000000ff00000200ff0001d9312529af4e37f426cd56fd0fe456fd518d62fe546b89ff" +
+    "506f89ff3fb053fe0aec5afe27cd56f0d05c2e0b00000000007f0002000000007f7f000200010000ff00000534bd52ed" +
+    "00f762ff778145ffd52b2dffc3382dfcc4372ffbc8332efb39b851f904f461fd16db5aa000ff550300cc6605007f0002" +
+    "000000000000000014dd5aa10ef463ff2bc554efba3e32efbe3c31f1c64136ffc84236ffcd3e35ffbf4a37ff3aba51ff" +
+    "0ffb65ff18d6587100000000000000000fdf5f1014de5ba418ff69ff13dc5aa1728c4c14c6382a12b24c3314bc3b3251" +
+    "c03b3256b7453355e0242a5b688d45750ce55cf316e45eff14db5a8a12d95e1b11dd5d1e13e05be914de5ba500000000" +
+    "000000000000000000000000000000000000000000000000000000000000000017d6562c14e25cee14e25de213dd5a5a" +
+    "0000000014d6511924b648070000000000ff7f02ff000001ff000001bf3f3f04bf3f3f04bf3f3f04bf3f3f0455aa5503" +
+    "0000000015db552413d74e0d00000000", "the rendered pixels are the oracle's");
+}
+
+fn test_the_supersample_factor_is_part_of_the_contract() {
+  // Not a preference: every golden in the corpus was drawn at this factor, and a
+  // scene resampled from any other one is a different picture.
+  assert(drawing::SUPERSAMPLE == 3, "3x");
+}
+
+fn sky_source() -> text {
+  `
+  size 12x12
+  Background topc=30,36,64 botc=92,80,104
+  name mass
+  Poly (0.10,0.55) (0.90,0.60) (0.85,0.95) (0.15,0.90) fill=0.5
+  name whisker
+  Poly (0.15,0.20)~@5 (0.50,0.05)~@3 (0.85,0.25)~@1 stroke=230,210,120
+  landmark horizon = 0.55
+  `
+}
+
+fn test_a_sky_a_grey_fill_and_a_smooth_taper() {
+  // The other half of the grammar: an opaque background (so the resample has no
+  // alpha to work through), the grey `fill=L` spelling, a stroke whose width
+  // varies AND whose points curve — the one path where the widths have to be
+  // interpolated across the same expansion as the points — and a `landmark`,
+  // which draws nothing and must still not read as a syntax problem.
+  sc = parse_scene(sky_source());
+  assert(len(sc.unparsed) == 0, "every line parsed");
+  assert(!sc.transparent, "an opaque background");
+  assert(len(sc.landmarks) == 1 && sc.landmarks[0]?.lname == "horizon", "the landmark is read");
+  assert(sc.landmarks[0]?.lvalue == 0.55, "…with its value");
+  cv = render(sc);
+  assert(rgba_hex(cv) ==
+"545250ffebd67affe5d177ffe6d278ffe6d278ffe3cf77ffe3cf77ffe5d178ff958c62ff222742ff1c2240ff202641ff" +
+    "1d2242ffb3a66afff1dc7bffe3cf77ffe6d278fff2dc7bfff2dc7bfff0db7bfff9e37dffaea169ff232744ff252944ff" +
+    "1f2245ff595654ffeed97affe6d278ffebd679ff958b64ff5f5b56ff81795fffd8c674ffffeb7fff7f775eff1c2045ff" +
+    "31324cff262849ffb9ab6dfff9e27dff6e685aff1d1f46ff242648ff242748ff38384dff7e765eff4c4a52ff282b4aff" +
+    "37364fff2c2c4dff66605aff7b735fff26264bff3a3850ff38374fff37364fff32314eff28294bff31304dff36354fff" +
+    "393752ff373450ff312f4eff2d2b4dff383550ff36334fff393651ff393751ff3a3752ff3c3952ff3a3752ff3a3752ff" +
+    "444058ff595766ff555263ff565464ff545263ff535162ff444158ff433f57ff434058ff434058ff433f57ff3f3c55ff" +
+    "46415aff7a797cff868785ff848483ff848583ff848482ff7d7d7eff7c7c7dff7c7c7eff7d7d7eff79787bff49435cff" +
+    "453e59ff6c6a73ff838382ff7e7e7eff7f7f7fff7f7f7fff818181ff818181ff808080ff848483ff737177ff49425bff" +
+    "4c435eff6a6772ff848583ff808081ff818181ff818181ff7f7f80ff7f7f80ff7e7e7fff838382ff6f6c75ff4b425dff" +
+    "524761ff61596bff7f8080ff7c7b7eff7d7c7eff7d7c7eff818281ff828281ff818181ff858683ff686370ff514661ff" +
+    "5a4e66ff5b5067ff5d5268ff5c5268ff5c5168ff5d5269ff675f6fff686170ff675f6fff6b6472ff61586bff584c65ff", "the rendered pixels are the oracle's");
+}
+
+fn gradient_source() -> text {
+  `
+  size 14x14
+  Background transparent
+  name dome
+  Circle (0.50,0.48) r=0.42 radial=214,208,198>180,174,162 at=0.50,0.40,0.46
+  name banner
+  Poly (0.08,0.06) (0.92,0.10) (0.90,0.34) (0.10,0.30) grad=30,36,64>92,80,104 dir=0.08,0.06,0.90,0.34
+  name shadow
+  Poly (0.20,0.70)~ (0.50,0.62)~ (0.80,0.72)~ (0.50,0.88)~ radial=40,120,180>10,20,40
+  `
+}
+
+fn test_both_gradients_are_the_oracles() {
+  // A radial with an explicit `at=` whose centre is OFF the shape's own centre, a
+  // linear with an explicit `dir=`, and a radial with NEITHER — so the defaults
+  // derived from the bounding box are exercised too, and the smooth outline means
+  // the mask is not a tidy rectangle.
+  //
+  // The ramp is computed on a 100x100 grid and ENLARGED with a bicubic filter, so
+  // these bytes carry that filter's ringing.  A gradient computed directly at
+  // final size is smoother and wrong.
+  sk = parse_scene(gradient_source());
+  assert(len(sk.unparsed) == 0, "every line parsed");
+  assert(len(sk.deferred) == 0, "nothing deferred — gradients draw now");
+  assert(sk.ops[0]?.paint.pk == Radial, "an at= radial");
+  assert(sk.ops[1]?.paint.pk == Linear, "a dir= linear");
+  assert(len(sk.ops[2]?.paint.spec) == 0, "and a radial with no at=, so the bbox default runs");
+  cv = render(sk);
+  assert(rgba_hex(cv) ==
+"172e450b1e2543221e2d4b11383855122d2d4b1182828229afaaa45addd7c65af8f1d127000000000000000000000000" +
+    "000000000000000018243c15212541e6272a45eb2b2d48eb2f304aeb393951f64f4d63ff736e7bff686471f24a445bac" +
+    "4c445da7514862a8554b649b5c45730b33333305252943c02c304dff2f304bff34344fff373651ff37354ffc36334efc" +
+    "403a56ff4e4862ff534c66ff5b526cff574c65f75a4b6911000000001c203ea3212444fe242543fa282946fe2e2c49fe" +
+    "33304cff393550ff3e3854fe423a56fb463e59f8524763fb544963a900000001000000007c7a7e87979395ff918e90fb" +
+    "969294ff9c9899ff9c979aff756f7dff726d7aff756e7bff756e7afb817785ff6a6072a100000000b9a2a20bc1baadd4" +
+    "cfc9baffcdc6b8fdd2ccbfffd8d1c4ffdcd6caffdcd6caffd7d1c3ffd1cbbeffcbc5b7fdccc7b8ffb9b3a7d5b9a2a20b" +
+    "b8aaaa12b7b1a6eebfb9aeffc0baaffec4beb4ffc7c2b9ffcbc6bdffcbc6bdffc8c3baffc6c0b5ffc1bbb0fec0b9aeff" +
+    "b9b2a7eeb8aaaa12b8aa9b12b7b1a5efbeb8acfec1bbb0fecec6b9ffd4cbbdffd6ccbeffd7cdbeffd1c9bcffc6c0b5ff" +
+    "bdb8adfebeb8adfeb7b1a5efb8aa9b12aaaa7f06b4aea3bdc9c2b5ffc0b8acfb969999ff88939aff8f9ba2ff8b98a0ff" +
+    "99a0a1ffc1baafffcbc3b4fbc8c1b4ffb4aea3bdaaaa7f0600000000ddd0c22692908bfb1b2e46fd0f3458fd104574ff" +
+    "15568aff14558aff154976ff2e4c68fd58626dfda6a29afbc2bbae26000000005555aa03000000008e89837a495867ff" +
+    "0e3760fc185182fa276ea5fb266ea5fb1b5383fa05305bfc1c324cff817f7d7a000000005555550300000000bf7f7f04" +
+    "00000000d3c5b25d879094ff386489ff206296ff246497ff2b5b84ff546b7eff9c99945d000000007f7f7f0400000000" +
+    "00000000000000005555550300000000dcc6b13bafada3706b8290a66e8491a69d9f9d70c6b9a83b0000000055555503" +
+    "0000000000000000000000000000000000000000ffff7f02000000000000000000000000000000000000000000000000" +
+    "007f7f02000000000000000000000000", "the rendered pixels are the oracle's");
+}
