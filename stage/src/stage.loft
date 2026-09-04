@@ -167,6 +167,9 @@ pub struct StageLight {
     lt_power: float,         // intensity multiplier; 1.0 is full at the centre
 }
 
+// The whole scene a `stage` program draws: its nodes and masks, the views and layers they are
+// drawn through, the lights, tweens and animation sequences, the depth cue, and where the
+// pointer is.  Built by `stage_new` and changed only through this library's functions.
 pub struct Stage {
     st_nodes: vector<StageNode>,
     st_masks: vector<Mask>,
@@ -285,6 +288,7 @@ pub struct Bounds {
     b_y1: float,
 }
 
+// A point in stage space: an x and a y in world units.
 pub struct P2 {
     p_x: float,
     p_y: float,
@@ -602,6 +606,8 @@ pub struct DrawRect {
     dr_colour: integer,
 }
 
+// One text-drawing command in the emitted command list: the string, where its line's top-left
+// goes, and its colour.
 pub struct DrawText {
     dt_text: text,
     dt_x: integer,

@@ -196,6 +196,9 @@ struct ChunkBucket {
   cell_ixs: vector<integer>,
 }
 
+// A field of hex cells kept in chunks: every cell's coordinates and index, which chunk owns it,
+// and which chunks are dirty — maintained on every change so a rebuild touches only the dirty
+// chunks rather than rescanning the field.
 pub struct ChunkField {
   layout:      integer,                // HexLayout tag (Phase A: OffsetPointy = 0)
   xs:          vector<integer>,        // cell coords (index 0 = oldest)
@@ -413,6 +416,8 @@ pub fn collect_dirty_inputs(f: ChunkField, halo_k: integer) -> vector<ChunkInput
 // caches a mesh per chunk and assembles a group's VBO from its chunks'
 // cached meshes, re-uploading only groups that contain a dirty chunk.
 
+// The key of a group of chunks: its encoded coordinate, used as the hash key, beside the group
+// coordinates it encodes.
 pub struct GroupKey { gk: integer, gx: integer, gy: integer }
 
 // The chunk ck's a group contains that actually hold cells (the assemble

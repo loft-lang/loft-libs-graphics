@@ -110,7 +110,6 @@ pub fn write_centred(cv: graphics::Canvas, s: text, bx: integer, by: integer,
 // per size per colour, so a score that ticks uploads a texture every frame, and
 // Brick Buster pre-baked digits 0-9 and one texture per level numeral to avoid it.
 // A glyph sheet is written once; a new string only re-lays-out quads over it.
-
 pub struct Atlas {
   a_cv: graphics::Canvas,
   a_codes: vector<integer>,   // codepoint held in each cell, in cell order

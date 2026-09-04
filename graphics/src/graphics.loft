@@ -74,7 +74,6 @@ pub fn color_a(color: integer) -> integer {
 
 // A 2D pixel canvas backed by a flat vector of RGBA integers.
 // Pixels are stored row-major: data[y * width + x].
-
 pub struct Canvas {
   const width: integer,
   const height: integer,
@@ -1019,6 +1018,9 @@ struct GroupVbo {
   const min_x: single, const min_z: single, const max_x: single, const max_z: single,   // world bounds (future cull)
 }
 
+// The vertex buffers of a chunked mesh, one per group, all sharing one vertex stride and one
+// draw mode.  `group_vbos_new` makes an empty set; a group's buffer is (re)uploaded only when
+// that group changed.
 pub struct GroupVboSet {
   slots:     hash<GroupVbo[gk]>,   // not const: reassigned (`set.slots = []`) + grown via `+=`
   const stride:    integer,   // floats per vertex (e.g. 14 crystal, 10 ground)

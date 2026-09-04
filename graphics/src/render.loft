@@ -110,6 +110,9 @@ void main() {{
 
 // ── Renderer struct ──────────────────────────────────────────────────────
 
+// The 3-D renderer: a window of a fixed size, the compiled PBR and shadow shaders, the shadow
+// map's framebuffer and texture, and the vertex arrays uploaded so far.  Made by
+// `create_renderer`; `upload_scene` fills it and `render_frame` / `render_loop` draw from it.
 pub struct Renderer {
   const width: integer,
   const height: integer,
