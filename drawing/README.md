@@ -214,11 +214,15 @@ generated code: `--native-emit` shows every vector element read or written throu
 store runtime (`vector::get_vector` / `vec_get_or_raise_runtime` + a null-record test — 1
 read and 7 writes per painted pixel), struct scalars re-read per pixel, every float
 comparison expanded to NaN-aware branches, integer arithmetic through sentinel helpers,
-and on every call — `--native-release` included — the hot-reload check and the shadow-stack
-push. That is the class loft's own `PERFORMANCE.md` measures at 18–25× on matrix / sort and
-names **N1** (collections through the store), with **N2/N4** (per-call instrumentation) on
-top. Measured: hoisting the scalars, inlining the per-pixel call and passing the arrays
-directly — all hash-preserving — take the `lock` row from 30.2 to 27.0 ms; Rust is 1.03.
+and on every call the hot-reload check and the shadow-stack push (`--native-release` keeps
+both; `--lean` drops the check, not the push). That is the class loft's own
+`PERFORMANCE.md` measures at 18–25× on matrix / sort and names **N1** (collections through
+the store), with **N2/N4** (per-call instrumentation) on top. It is not the optimisation
+level: the emitted Rust rebuilt by hand at `-O` reproduces the number, `opt-level=3` +
+`codegen-units=1` + `target-cpu=native` does not move it, and LTO is impossible because the
+shipped `libloft.rlib` carries no bitcode. Measured: hoisting the scalars, inlining the
+per-pixel call and passing the arrays directly — all hash-preserving — take the `lock` row
+from 30.2 to 27.0 ms; Rust is 1.03.
 The `hash` row loses two-thirds of its time when the callee is inlined: ~7 ns of every
 call is entry instrumentation. Recorded as the open deviation `D-draw-2` in crawler's
 `formal/draw.md` and filed as [loft#1426](https://github.com/loft-lang/loft/issues/1426);
