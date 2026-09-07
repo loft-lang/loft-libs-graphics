@@ -339,18 +339,24 @@ fn raster_segment(lay: Lay, ax: float, ay: float, bx: float, by: float, hwa: flo
   rs_y1 = -floor_i(-((if ay > by { ay } else { by }) + rs_hm));
   if rs_y1 > lay.y0 + lay.lh - 1 { rs_y1 = lay.y0 + lay.lh - 1; }
   if rs_x1 < rs_x0 || rs_y1 < rs_y0 { return }
+  // Hoisted: a struct field read costs a store lookup per pixel in the native build, and
+  // nothing hoists it for us (loft#1426).
+  rs_ly0 = lay.y0;
+  rs_llw = lay.lw;
+  rs_lx0 = lay.x0;
   for yy in rs_y0..(rs_y1 + 1) {
     rs_cy = (yy as float) + 0.5;
     for xx in rs_x0..(rs_x1 + 1) {
       rs_cx = (xx as float) + 0.5;
-      rs_u = clampf((((rs_cx - ax) * rs_dx + (rs_cy - ay) * rs_dy) / rs_l2) ?? 0.0, 0.0, 1.0);
+      rs_u = (((rs_cx - ax) * rs_dx + (rs_cy - ay) * rs_dy) / rs_l2) ?? 0.0;
+      if rs_u < 0.0 { rs_u = 0.0; } else if rs_u > 1.0 { rs_u = 1.0; }   // clampf, inlined: a call per pixel costs ~7 ns of entry instrumentation
       rs_hw = hwa + (hwb - hwa) * rs_u;
       if rs_hw <= 0.01 { continue }
       rs_dist = (rs_cx - ax - rs_u * rs_dx) * rs_nx + (rs_cy - ay - rs_u * rs_dy) * rs_ny;
       rs_s = (rs_dist / rs_hw) ?? 0.0;
       rs_a = if rs_s >= 0.0 { rs_s } else { -rs_s };
       if rs_a > 1.0 { continue }
-      rs_idx = (yy - lay.y0) * lay.lw + (xx - lay.x0);
+      rs_idx = (yy - rs_ly0) * rs_llw + (xx - rs_lx0);
       if rs_a < lay.best[rs_idx]? {
         lay.best[rs_idx] = rs_a;
         lay.sl[rs_idx] = rs_s;

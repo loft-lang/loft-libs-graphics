@@ -208,17 +208,24 @@ absolute numbers are directional and the ratios are the point):
 | `resize_lanczos` 768²→256² (`graphics`) | — | 280,735,840 | — | 63 |
 
 **The verdict is FAIL on every judged routine, and the finding is loft's, not this
-package's.** The algorithms are the same to the byte; the gap is the loft native runtime
-on this workload class — vectors of floats and structs in tight loops, `??`-discharged
-arithmetic, per-call crossings into a library's cdylib (the `hash` row is 100 000 of
-those) — the class loft's own `PERFORMANCE.md` measures at 18–25× on matrix / sort and
-names **N1** (the `codegen_runtime` / `DbRef` indirection). A sprite plain Rust renders in
-1 ms takes loft 30 ms: fine for a build step, not for anything that draws at runtime.
-Recorded as the open deviation `D-draw-2` in crawler's `formal/draw.md` and filed
-upstream; the pass is the reproduction, and closes the deviation the day every judged
-routine is within the bar. `LOFT_PROFILE=1` on the interpreter lane attributes the brush
-time to `raster_segment`'s per-pixel projection — the algorithm's own hot loop, shared with
-the Rust port — and 84 % of the whole interpreted run to `graphics`' resample.
+package's.** The algorithms are the same to the byte, and the library boundary is not the
+cause (the brush inlined into one standalone program gives the same numbers). It is the
+generated code: `--native-emit` shows every vector element read or written through the
+store runtime (`vector::get_vector` / `vec_get_or_raise_runtime` + a null-record test — 1
+read and 7 writes per painted pixel), struct scalars re-read per pixel, every float
+comparison expanded to NaN-aware branches, integer arithmetic through sentinel helpers,
+and on every call — `--native-release` included — the hot-reload check and the shadow-stack
+push. That is the class loft's own `PERFORMANCE.md` measures at 18–25× on matrix / sort and
+names **N1** (collections through the store), with **N2/N4** (per-call instrumentation) on
+top. Measured: hoisting the scalars, inlining the per-pixel call and passing the arrays
+directly — all hash-preserving — take the `lock` row from 30.2 to 27.0 ms; Rust is 1.03.
+The `hash` row loses two-thirds of its time when the callee is inlined: ~7 ns of every
+call is entry instrumentation. Recorded as the open deviation `D-draw-2` in crawler's
+`formal/draw.md` and filed as [loft#1426](https://github.com/loft-lang/loft/issues/1426);
+the pass is the reproduction, and closes the deviation the day every judged routine is
+within the bar. `LOFT_PROFILE=1` on the interpreter lane attributes the brush time to
+`raster_segment`'s per-pixel projection — the algorithm's own hot loop, shared with the
+Rust port — and 84 % of the whole interpreted run to `graphics`' resample.
 
 ## Targets
 
