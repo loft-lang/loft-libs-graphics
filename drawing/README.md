@@ -164,6 +164,62 @@ typo'd mark has to read as a syntax problem, not as a geometry one.
 `graphics` depends on mesh3d, so the collision is a hard error — the same trap
 `graphics::Coord` hit with `Point`.
 
+## Performance — the pass
+
+Every public routine has to **pull its weight**: a benchmark row, and — for the routines
+that define the picture — a **pure-Rust reference** it is judged against, so that "is loft
+fast enough here?" is a measurement and not an opinion. The pass is `bench/`:
+
+| | |
+|---|---|
+| `bench/bench.loft` | every routine on a fixed workload: `name  iters  µs  ns/op  px  ns/px  hash` — the hash is FNV-1a-32 of the output, and a `sink` folds each iteration's result so no backend can drop the work |
+| `bench/bench.rs` | the same workloads with the same arithmetic in the same order, one file built with `rustc -O` exactly as loft's own `bench/` builds its references — plain Rust, no cleverness, the speed an industry implementation reaches without effort |
+| `bench/compare.py` | joins the three lanes (Rust, `loft --native-release`, the interpreter with `LOFT_NO_NATIVE_LIBS=1`), best of 3 for the judged lanes, and FAILS a routine whose hashes disagree or whose native time is over `--bar` (4×). It knows nothing about the routines — any package printing the same rows can use it unchanged |
+
+```sh
+python3 bench/compare.py                    # ~5 min: the interpreter lane is the slow one
+python3 bench/compare.py --skip-interp      # the verdict alone, ~2 min
+```
+
+The hash agreement is the precondition: a row whose lanes disagree is not one algorithm,
+and its speeds are not comparable. **All fourteen rows agree** — including Pillow's
+rasteriser with its f32 crossings, the frond array and the lock — which is also the third
+validation of the algorithms after draw.py and the goldens.
+
+**Measured 2026-09-07** (best of 3, `rustc -O` vs `loft --native-release` with the libraries
+as their auto-built cdylibs, i.e. what a consumer gets; one shared Linux box, so the
+absolute numbers are directional and the ratios are the point):
+
+| routine | Rust ns/op | loft-native ns/op | native / Rust | interp / native |
+|---|---:|---:|---:|---:|
+| `hash` (100 000 `hash01`) | 162,320 | 1,771,660 | **10.9** | 75 |
+| `hair_brush` | 13,260 | 57,200 | **4.3** | 62 |
+| `smooth_pts` (61 pts) | 220 | 57,640 | **262** | 7 |
+| `fronds` (depth 2, 1296 pts) | 43,620 | 2,149,200 | **49** | 6 |
+| `lock_layer` (22 080 px) | 1,032,340 | 30,850,860 | **30** | 38 |
+| `lock_layer` curved (38 250 px) | 779,600 | 26,213,820 | **34** | 20 |
+| `composite_layer` | 63,100 | 1,656,000 | **26** | 61 |
+| `fill_poly` circle (31 497 px) | 34,620 | 594,740 | **17** | 35 |
+| `fill_poly` pentagram | 13,460 | 225,100 | **17** | 34 |
+| `wide_line` | 4,500 | 78,340 | **17** | 38 |
+| `parse_scene` | — | 338,700 | — | 18 |
+| `render` 120×60 lock scene | — | 64,696,320 | — | 50 |
+| `render` 64×64 marks scene | — | 17,788,320 | — | 87 |
+| `resize_lanczos` 768²→256² (`graphics`) | — | 280,735,840 | — | 63 |
+
+**The verdict is FAIL on every judged routine, and the finding is loft's, not this
+package's.** The algorithms are the same to the byte; the gap is the loft native runtime
+on this workload class — vectors of floats and structs in tight loops, `??`-discharged
+arithmetic, per-call crossings into a library's cdylib (the `hash` row is 100 000 of
+those) — the class loft's own `PERFORMANCE.md` measures at 18–25× on matrix / sort and
+names **N1** (the `codegen_runtime` / `DbRef` indirection). A sprite plain Rust renders in
+1 ms takes loft 30 ms: fine for a build step, not for anything that draws at runtime.
+Recorded as the open deviation `D-draw-2` in crawler's `formal/draw.md` and filed
+upstream; the pass is the reproduction, and closes the deviation the day every judged
+routine is within the bar. `LOFT_PROFILE=1` on the interpreter lane attributes the brush
+time to `raster_segment`'s per-pixel projection — the algorithm's own hot loop, shared with
+the Rust port — and 84 % of the whole interpreted run to `graphics`' resample.
+
 ## Targets
 
 | target | state |
