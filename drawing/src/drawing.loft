@@ -14,7 +14,8 @@
 // ── ⚠⚠ THE INVARIANT ────────────────────────────────────────────────
 //
 // > **The picture is the one `draw.py` renders — pixel for pixel, not
-// > approximately.**
+// > approximately.**  (@FR-Oracle-Bytes — crawler's `formal/draw.md`, the register
+// > every `@FR-` tag in this package cites.)
 //
 // That is not a quality bar, it is the definition.  A corpus of `.draw` scenes
 // already exists and already has art in it; the Python renderer is what made
@@ -38,17 +39,20 @@
 // ── WHAT THIS BUILD DRAWS ───────────────────────────────────────────
 //
 // `size`, `Background`, `name`, `Line`, `Circle`, `Poly`, with solid fills
-// (`rgb=` / `fill=`), coloured strokes (`stroke=`), pen widths (`w=`, and the
-// per-point `@N` taper), and smooth points (`~`).  `grad=` / `radial=` fills and
-// the `Petals` / `Fronds` arrays parse and are listed in `Sketch.deferred` — they
-// are recognised, and a caller can see they were not drawn.
+// (`rgb=` / `fill=`), `grad=` / `radial=` gradients, coloured strokes (`stroke=`),
+// pen widths (`w=`, and the per-point `@N` taper), smooth points (`~`), the
+// `Fronds` array, and the brush stroke — `Brush` defines a footprint, `Lock` drags
+// it as a lock of hair ([brush.loft](brush.loft)).  `Petals` parses and is listed
+// in `Sketch.deferred` — recognised, and a caller can see it was not drawn.
+use brush;
 use graphics;
+use noise;
 use raster;
 use scan;
 
 /// The supersample factor the corpus is drawn at.  Not adjustable: every golden
 /// in the corpus carries it, and a scene rendered at any other factor is a
-/// different picture.
+/// different picture.  @FR-Raster-Supersample
 pub const SUPERSAMPLE = 3;
 
 /// The ink a mark uses when it names no colour.
@@ -58,8 +62,6 @@ pub const DEFAULT_INK_B = 36;
 
 /// Control points per curve segment when a smooth point (`~`) expands.
 const SMOOTH_SAMPLES = 10;
-
-const PI = 3.141592653589793;
 
 /// How a mark is filled, if it is filled at all.
 pub enum PaintKind { Stroked, Solid, Linear, Radial }
@@ -79,15 +81,15 @@ pub struct Paint {
   spec: vector<float>,
 }
 
-/// What an op does.
-pub enum OpKind { Sky, Fill, Stroke }
+/// What an op does.  `Lock` is the brush stroke — see [brush.loft](brush.loft).
+pub enum OpKind { Sky, Fill, Stroke, Lock }
 
 /// One entry in the ordered draw program.
 ///
 /// ⚠ `pts` are FRACTIONS of the paper (0..1, origin top-left, y down), never
 /// pixels.  The scale to pixels happens once, at the raster call, because the
 /// paper size is a property of the scene and the supersample factor is a
-/// property of the renderer — neither belongs in a parsed mark.
+/// property of the renderer — neither belongs in a parsed mark.  @FR-Scene-Fraction
 pub struct Op {
   kind: OpKind = Sky,
   pts: vector<raster::Pt>,
@@ -99,6 +101,10 @@ pub struct Op {
   color: integer = 0,
   /// `Sky`'s bottom colour.
   color2: integer = 0,
+  /// `Lock`: the stroke's style, and the index of its brush in `Sketch.brushes`
+  /// (`-1` for every other kind).
+  style: brush::LockStyle,
+  brush: integer = -1,
 }
 
 /// A named group of marks and the box they cover, in paper fractions.
@@ -139,10 +145,17 @@ pub struct Sketch {
   elems: vector<Elem>,
   landmarks: vector<Landmark>,
   checks: vector<text>,
-  /// `line N: <text>` for every line no command accepted.
+  /// `line N: <text>` for every line no command accepted.  @FR-Scene-Unparsed
   unparsed: vector<text>,
   /// `line N: <what>` for every mark this build recognises but does not draw.
+  /// @FR-Scene-Deferred
   deferred: vector<text>,
+  /// The footprints the scene's `Brush` lines defined, plus the default `hair`
+  /// once a `Lock` asked for it.
+  brushes: vector<brush::Brush>,
+  /// The directory a `Brush … file=` path is relative to — the scene's own,
+  /// which `render_file` knows and a caller holding source text may not.
+  base_dir: text = "",
 }
 
 // ── Colour ──────────────────────────────────────────────────────────
@@ -216,12 +229,29 @@ fn scan3_fail() -> Scan3 { Scan3 { ok: false, at: 0, color: 0 } }
 
 /// `\bstroke\s*=\s*R,G,B` — a pen colour.  `rgb=` still means FILL; this lets a
 /// stroke carry colour without becoming one.
-fn read_stroke_colour(s: text) -> integer {
-  rs_o = scan::find_option(s, "stroke");
-  if !rs_o.ok { return default_ink() }
-  rs_c = read_rgb_at(s, rs_o.at);
-  if !rs_c.ok { return default_ink() }
-  rs_c.color
+fn read_stroke_colour(s: text) -> integer { read_colour_opt(s, "stroke", default_ink()) }
+
+/// `\b<key>\s*=\s*R,G,B`, or `fallback` when the line does not say.
+fn read_colour_opt(s: text, key: text, fallback: integer) -> integer {
+  rc_o = scan::find_option(s, key);
+  if !rc_o.ok { return fallback }
+  rc_c = read_rgb_at(s, rc_o.at);
+  if !rc_c.ok { return fallback }
+  rc_c.color
+}
+
+/// `draw.py`'s default shadow for a `Lock`: each channel halved.
+fn half_colour(c: integer) -> integer {
+  graphics::rgba(graphics::color_r(c) / 2, graphics::color_g(c) / 2, graphics::color_b(c) / 2, 255)
+}
+
+/// `draw.py`'s default highlight: each channel lifted 35 % of the way to white.
+fn lifted_colour(c: integer) -> integer {
+  lc_r = graphics::color_r(c);
+  lc_g = graphics::color_g(c);
+  lc_b = graphics::color_b(c);
+  graphics::rgba(lc_r + (255 - lc_r) * 35 / 100, lc_g + (255 - lc_g) * 35 / 100,
+                 lc_b + (255 - lc_b) * 35 / 100, 255)
 }
 
 /// `draw.py`'s `_paint`, in its order: `radial=` beats `grad=` beats `rgb=`
@@ -359,7 +389,7 @@ pub fn circle_pts(cx: float, cy: float, r: float, n: integer, flat: float,
   cp_ary = r * (((pw as float) / (ph as float)) ?? 1.0) * (1.0 - flat);
   cp_out: vector<raster::Pt> = [];
   for i in 0..=n {
-    cp_a = ((2.0 * PI * (i as float)) / (n as float)) ?? 0.0;
+    cp_a = ((2.0 * noise::PI * (i as float)) / (n as float)) ?? 0.0;
     cp_out += [raster::pt(cx + r * cos(cp_a), cy + cp_ary * sin(cp_a))];
   }
   cp_out
@@ -394,7 +424,7 @@ pub fn smooth_applies(pts: const vector<raster::Pt>, flags: const vector<boolean
   len(pts) >= 3 && any_smooth(flags)
 }
 
-/// Expand control points to a dense polyline.
+/// Expand control points to a dense polyline.  @FR-Mark-Smooth
 ///
 /// A point flagged `~` curves (its tangent is half the neighbour chord); a
 /// corner uses the segment chord, which makes that segment exactly straight.  So
@@ -681,6 +711,100 @@ fn parse_fronds(sc: Sketch, s: text) -> Mark {
   no_mark()
 }
 
+/// The `\w+` at `i`, or `""`.
+fn read_word_at(s: text, i: integer) -> text {
+  wd_j = i;
+  while scan::is_word_byte(scan::at(s, wd_j)) { wd_j += 1; }
+  s[i..wd_j]
+}
+
+fn brush_index(sc: const Sketch, nm: text) -> integer {
+  for i in 0..len(sc.brushes) {
+    if sc.brushes[i]?.bname == nm { return i }
+  }
+  -1
+}
+
+/// `Brush <name> hair [w= period= seed= gap=]` — the built-in split-bristle
+/// footprint — or `Brush <name> file=<png> [period=]`, an authored one.  A file
+/// that cannot be read makes the line unparsed: a brush that silently came out
+/// empty would erase every lock that used it.
+fn parse_brush(sc: Sketch, s: text) -> boolean {
+  pb_i = scan::skip_space(s, 5);
+  pb_name = read_word_at(s, pb_i);
+  if pb_name == "" { return false }
+  pb_kind = read_word_at(s, scan::skip_space(s, pb_i + size(pb_name))).to_lowercase();
+  if pb_kind == "hair" {
+    pb_w = opt_num(s, "w", 12.0) as integer;
+    pb_h = opt_num(s, "period", 48.0) as integer;
+    sc.brushes += [brush::Brush { bname: pb_name, bw: pb_w, bh: pb_h, period: pb_h as float,
+                                  img: brush::hair_brush(pb_w, pb_h, opt_num(s, "seed", 1.0) as integer,
+                                                         opt_num(s, "gap", 0.35)) }];
+    return true
+  }
+  if pb_kind == "file" {
+    pb_o = scan::find_option(s, "file");
+    if !pb_o.ok { return false }
+    pb_k = pb_o.at;
+    while pb_k < size(s) && !scan::is_space_byte(scan::at(s, pb_k)) { pb_k += 1; }
+    pb_path = s[pb_o.at..pb_k];
+    if sc.base_dir != "" && !pb_path.starts_with("/") { pb_path = "{sc.base_dir}/{pb_path}"; }
+    pb_br = brush::load_brush(pb_path, pb_name, opt_num(s, "period", 0.0));
+    if pb_br.bw == 0 { return false }
+    sc.brushes += [pb_br];
+    return true
+  }
+  false
+}
+
+/// `Lock (x,y)[~] … [brush= w0= w= swell= body= tips= tipvar= spread= seed= rgb=
+/// dark= lit= light= alpha= flip= period=]` — one lock of hair, the brush dragged
+/// root→tip.  The defaults are `draw.py`'s; `dark` and `lit` derive from `rgb`
+/// unless given, and a `brush=` that names nothing makes the line unparsed.
+fn parse_lock(sc: Sketch, s: text) -> Mark {
+  pk_raw = read_points(s);
+  if len(pk_raw.pts) < 2 { return Mark { matched: true, bad: true, pts: [] } }
+  pk_bi = -1;
+  pk_bo = scan::find_option(s, "brush");
+  if pk_bo.ok {
+    pk_bi = brush_index(sc, read_word_at(s, pk_bo.at));
+    if pk_bi < 0 { return Mark { matched: true, bad: true, pts: [] } }
+  } else {
+    pk_bi = brush_index(sc, "hair");
+    if pk_bi < 0 {
+      sc.brushes += [brush::Brush { bname: "hair", bw: 12, bh: 48, period: 48.0,
+                                    img: brush::hair_brush(12, 48, 1, 0.35) }];
+      pk_bi = len(sc.brushes) - 1;
+    }
+  }
+  pk_line = smooth_pts(pk_raw.pts, pk_raw.smooth, false);
+  pk_base = read_colour_opt(s, "rgb", graphics::rgba(120, 80, 40, 255));
+  pk_light = read_spec(s, "light", 3);
+  pk_lx = -0.5;
+  pk_ly = -0.8;
+  pk_lz = 0.6;
+  if len(pk_light) == 3 {
+    pk_lx = pk_light[0]?;
+    pk_ly = pk_light[1]?;
+    pk_lz = pk_light[2]?;
+  }
+  pk_style = brush::LockStyle {
+    w0: opt_num(s, "w0", 2.0), w: opt_num(s, "w", 10.0),
+    swell: opt_num(s, "swell", 0.3), body: opt_num(s, "body", 0.8),
+    tips: opt_num(s, "tips", 3.0) as integer, tipvar: opt_num(s, "tipvar", 0.35),
+    spread: opt_num(s, "spread", 8.0), seed: opt_num(s, "seed", 1.0) as integer,
+    period: opt_num(s, "period", sc.brushes[pk_bi]?.period),
+    dark: read_colour_opt(s, "dark", half_colour(pk_base)), base: pk_base,
+    lit: read_colour_opt(s, "lit", lifted_colour(pk_base)),
+    lx: pk_lx, ly: pk_ly, lz: pk_lz, alpha: opt_num(s, "alpha", 1.0),
+    flip: (opt_num(s, "flip", 0.0) as integer) != 0,
+  };
+  sc.ops += [Op { kind: Lock, pts: pk_line,
+                  paint: Paint { pk: Stroked, c1: 0, c2: 0, spec: [] },
+                  widths: [], w: 3, color: 0, color2: 0, style: pk_style, brush: pk_bi }];
+  Mark { matched: true, bad: false, pts: pk_line }
+}
+
 /// `Poly (x,y)… [w=N] [<fill>]` — the workhorse: filled when it names a fill,
 /// a pen stroke when it does not.
 fn parse_poly(sc: Sketch, s: text) -> Mark {
@@ -820,9 +944,14 @@ fn parse_landmark(sc: Sketch, s: text) -> boolean {
 /// tidy — `Circle` is tried before `Poly`, `Line` last of all.  Keep it: a
 /// grammar this loose is defined by the order its alternatives are tried in,
 /// and re-sorting it silently re-reads lines that sit in two alternatives.
-pub fn parse_scene(src: text) -> Sketch {
+/// @FR-Scene-Order
+pub fn parse_scene(src: text) -> Sketch { parse_scene_at(src, "") }
+
+/// `parse_scene` for a scene that lives in a directory: `base` is what a
+/// `Brush … file=` path is relative to.
+pub fn parse_scene_at(src: text, base: text) -> Sketch {
   sc = Sketch { sw: 800, sh: 800, transparent: false, ops: [], elems: [], landmarks: [],
-               checks: [], unparsed: [], deferred: [] };
+               checks: [], unparsed: [], deferred: [], brushes: [], base_dir: base };
   ps_cur = -1;
   ps_no = 0;
   for raw in src.split('\n') {
@@ -856,6 +985,16 @@ pub fn parse_scene(src: text) -> Sketch {
     if ps_low.starts_with("fronds") {
       ps_f = parse_fronds(sc, ps_s);
       if ps_f.matched { acc_pts(sc, ps_cur, ps_f.pts); }
+      continue
+    }
+    if ps_low.starts_with("brush ") {
+      if !parse_brush(sc, ps_s) { sc.unparsed += ["line {ps_no}: {ps_s}"]; }
+      continue
+    }
+    if ps_low.starts_with("lock") {
+      ps_k = parse_lock(sc, ps_s);
+      if ps_k.bad { sc.unparsed += ["line {ps_no}: {ps_s}"]; }
+      else { acc_pts(sc, ps_cur, ps_k.pts); }
       continue
     }
     if ps_low.starts_with("poly") {
@@ -1194,7 +1333,7 @@ const GRADIENT_GRID = 100;
 /// degenerate axis therefore saturates `t` instead of blanking the shape.
 const GRADIENT_EPS = 0.000000001;
 
-/// `draw.py`'s `_make_gradient`: the ramp computed small, then ENLARGED.
+/// `draw.py`'s `_make_gradient`: the ramp computed small, then ENLARGED.  @FR-Raster-Gradient
 ///
 /// ⚠ The enlargement is the contract, not an optimisation.  `Image.resize(size)`
 /// with no `resample=` is BICUBIC, whose negative lobes overshoot — a 100x100
@@ -1305,7 +1444,7 @@ fn draw_stroke(cv: graphics::Canvas, op: const Op, bw: integer, bh: integer) {
   }
 }
 
-/// A stroke whose pen width varies along it, drawn as a filled band.
+/// A stroke whose pen width varies along it, drawn as a filled band.  @FR-Mark-Ribbon
 ///
 /// Offsetting each point along its own normal by half its own width and filling
 /// between the two sides is what lets a hair strand be thick at the root and
@@ -1349,12 +1488,28 @@ fn ribbon(cv: graphics::Canvas, pxs: const vector<raster::Pt>, widths: const vec
   raster::fill_poly(cv, rb_poly, color);
 }
 
+/// `Lock`: the brush stroke, built as a layer and composited over the canvas once.
+fn draw_lock(cv: graphics::Canvas, sc: const Sketch, op: const Op, bw: integer, bh: integer) {
+  if op.brush < 0 || op.brush >= len(sc.brushes) { return }
+  dl_px = to_pixels(op.pts, bw, bh);
+  dl_xs: vector<float> = [];
+  dl_ys: vector<float> = [];
+  for p in dl_px {
+    dl_xs += [p.ptx];
+    dl_ys += [p.pty];
+  }
+  dl_lay = brush::lock_layer(dl_xs, dl_ys, bw, bh, sc.brushes[op.brush]?,
+                             brush::scaled(op.style, SUPERSAMPLE as float));
+  if dl_lay.lw > 0 { brush::composite_layer(cv, dl_lay); }
+}
+
 /// Draw a parsed scene: at `SUPERSAMPLE`x, then resampled down with Lanczos.
 ///
 /// A transparent background renders on transparent pixels so the resample
 /// anti-aliases edges against ALPHA rather than against white — which is what
 /// makes the result a sprite that can be composited over anything, with no
-/// colour-key hack.
+/// colour-key hack.  @FR-Raster-Transparent · @FR-Mark-Deposit (fills and strokes
+/// overwrite; only `Lock` composites, through `brush`).
 pub fn render(sc: const Sketch) -> graphics::Canvas {
   rn_bw = sc.sw * SUPERSAMPLE;
   rn_bh = sc.sh * SUPERSAMPLE;
@@ -1365,15 +1520,20 @@ pub fn render(sc: const Sketch) -> graphics::Canvas {
       Sky => draw_sky(rn_cv, op.color, op.color2, rn_bw, rn_bh),
       Fill => draw_fill(rn_cv, op, rn_bw, rn_bh),
       Stroke => draw_stroke(rn_cv, op, rn_bw, rn_bh),
+      Lock => draw_lock(rn_cv, sc, op, rn_bw, rn_bh),
     }
   }
   rn_cv.resize_lanczos(sc.sw, sc.sh)
 }
 
 /// Render a `.draw` file to a PNG, answering the parsed scene so the caller can
-/// report what it could not accept.
+/// report what it could not accept.  A `Brush … file=` in it resolves against the
+/// scene's own directory.
 pub fn render_file(src: text, out: text) -> Sketch {
-  rf_sc = parse_scene(file(src).content()?);
+  rf_at = src.rfind("/") ?? -1;
+  rf_base = "";
+  if rf_at > 0 { rf_base = src[0..rf_at]; }
+  rf_sc = parse_scene_at(file(src).content()?, rf_base);
   rf_cv = render(rf_sc);
   _ = rf_cv.save_png(out);
   rf_sc
@@ -1382,36 +1542,15 @@ pub fn render_file(src: text, out: text) -> Sketch {
 // ── Fronds: a seeded, deliberately non-uniform array of tapered strokes ──────
 
 /// A reproducible pseudo-random float in [-1, 1) from three small non-negative
-/// integers.
-///
-/// ⚠ NOT a PRNG, and deliberately not the `random` package. `draw.py` says so in
-/// its own docstring — *"never random()/hash() (those break reproducible
-/// renders)"* — and the corpus is defined by THIS hash: swap in PCG-64 and every
-/// jittered frond moves, so the substitution fails the gate it was meant to help
-/// pass.
-///
-/// Three details are load-bearing. The masking is 32-bit throughout, and the
-/// widest product it forms (`0xFFFFFFFF * 1274126177`) is 5.47e18 — inside i64 by
-/// a hair, so this needs no widening but has none to spare. And the final divide
-/// is a REAL division: `x / 0xFFFFFFFF` in integer arithmetic is 0 for every input
-/// and would give a perfectly smooth, entirely wrong field.
+/// integers — `noise::seed_hash`, kept under this name because the corpus is
+/// defined by it.  (Public names are one namespace across a package's modules,
+/// which is why the implementation carries a different one.)  @FR-Seed-Hash
 pub fn hash01(hseed: integer, hidx: integer, hsalt: integer) -> float {
-  hx = ((hseed * 73856093) ^ (hidx * 19349663) ^ (hsalt * 83492791)) & 0xFFFFFFFF;
-  hx = (hx ^ (hx >> 13)) & 0xFFFFFFFF;
-  hx = (hx * 1274126177) & 0xFFFFFFFF;
-  ((hx as float) / 4294967295.0 ?? 0.0) * 2.0 - 1.0
+  noise::seed_hash(hseed, hidx, hsalt)
 }
 
-/// A smooth low-frequency wave over [0,1], two harmonics with seed-derived phases.
-///
-/// Smooth in `u` is the point: neighbouring fronds see nearby values, so they
-/// CLUMP and leave gaps. White noise would scatter them evenly, which reads as
-/// man-made — the opposite of what this is for.
-pub fn lowfreq(lseed: integer, lu: float) -> float {
-  lp1 = hash01(lseed, 0, 11) * PI;
-  lp2 = hash01(lseed, 0, 22) * PI;
-  0.6 * sin(2.0 * PI * lu + lp1) + 0.4 * sin(4.0 * PI * lu + lp2)
-}
+/// A smooth low-frequency wave over [0,1] — `noise::seed_wave`.
+pub fn lowfreq(lseed: integer, lu: float) -> float { noise::seed_wave(lseed, lu) }
 
 /// One frond: a centreline in paper fractions and a width per point.
 pub struct Frond {
@@ -1443,6 +1582,7 @@ pub struct FrondSpec {
 }
 
 /// A linear array of tapered strokes rooted along the spine `(x1,y1)-(x2,y2)`.
+/// @FR-Seed-NonUniform
 ///
 /// Every frond is the same template placed at `u` along the spine and tilted off
 /// the normal, then made NON-UNIFORM three ways at once: placement clumps on the
@@ -1481,7 +1621,7 @@ pub fn fronds(x1: float, y1: float, x2: float, y2: float, sp: const FrondSpec,
     fd_lpx = fd_ltr * (1.0 - sp.fray * fd_edge)
              * (1.0 + sp.jitter * 0.4 * hash01(sp.seed, i, 1)) * (pw as float);
     fd_an = (sp.ang1 + (sp.ang2 - sp.ang1) * fd_u) + sp.jitter * 15.0 * hash01(sp.seed, i, 2);
-    fd_phi = fd_an * PI / 180.0;
+    fd_phi = fd_an * noise::PI / 180.0;
     fd_wi = (sp.wid1 + (sp.wid2 - sp.wid1) * fd_u)
             * (1.0 + sp.jitter * 0.3 * hash01(sp.seed, i, 3));
     fd_rx = fd_p1x + fd_u * fd_dx;

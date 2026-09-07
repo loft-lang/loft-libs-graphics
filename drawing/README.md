@@ -80,6 +80,9 @@ resolution-independent and `size` is the only place a pixel count appears.
 | `Line (x,y)[@w] - (x,y)[@w] [w=N]` | one segment |
 | `Circle (cx,cy) r=R [n=N] [flat=F] [<fill>]` | a round mark, `n` segments (28), squashed by `flat` |
 | `Poly (x,y)[~][@w] … [w=N] [stroke=R,G,B] [<fill>]` | the workhorse: filled if it names a fill, a pen stroke if it does not |
+| `Fronds (x,y)-(x,y) n=N len=L [len2= w= w2= ang= ang2= mirror= jitter= field= fray= bow= seed= depth= sub= stroke=]` | a seeded, non-uniform array of tapered strokes rooted along a spine |
+| `Brush <name> hair [w=12] [period=48] [seed=1] [gap=0.35]` · `Brush <name> file=<png> [period=]` | a footprint for `Lock`: the built-in split-bristle image, or an authored PNG (rows along the stroke, columns across) |
+| `Lock (x,y)[~] … [brush=] [w0=2] [w=10] [swell=0.3] [body=0.8] [tips=3] [tipvar=0.35] [spread=8] [seed=1] [rgb=] [dark=] [lit=] [light=x,y,z] [alpha=1] [flip=1]` | one lock of hair or tuft of fur: the brush dragged root→tip, pinched at `w0`, swelling to `w`, ending in `tips` spikes of uneven length; shaded `dark` underneath, `rgb` on the crest, `lit` toward the light; painted OVER what is beneath, so lay locks back to front |
 | `landmark <name> = <value>` · `check …` | read and carried; the report channel itself is not in this release |
 | `# …` | a comment, and a searchable note |
 
@@ -98,24 +101,44 @@ A point may carry `~` (it curves — the tangent is half the neighbour chord, so
 between two corners stays exactly straight) and `@N` (the pen width AT that point, which
 makes a stroke taper).
 
+## The brush
+
+A `Lock` is the one mark that is not a filled shape: an IMAGE is dragged along the path.
+The footprint's columns map across the stroke, stretched to the local width, its rows along
+it, tiled every `period` px; the built-in `hair` footprint is channels of bristles with a
+share of thin strands that fade in and out, so a drag lays broken parallel streaks and a
+frayed silhouette. The stroke is built in its own layer — each pixel keeps the sample from
+the centreline it is closest to across, so the body and its spikes join without a seam — and
+composited over the canvas once, so a lock covers the locks laid before it. Across the width
+it is shaded as a half-cylinder against `light=`: `dark` on the underside, `rgb` on the
+crest, `lit` on the flank facing the light. `dark=` is a colour, not a factor, because the
+shadow of white hair is blue in some styles. The construction is
+[src/brush.loft](src/brush.loft); its bytes are `draw.py`'s, pinned by `tests/lock.loft`.
+The rules it enforces are named in crawler's `formal/draw.md` and cited from the code
+as `@FR-…`.
+
 ## What this release does not draw
 
-The `Petals` and `Fronds` array marks. They **parse** — so they cannot be misread as
-something else, which for `Fronds` would mean `Line`'s pattern finding the two coordinates
-on the line and drawing a segment nobody wrote — and each is listed in `Sketch.deferred`
-with the line it came from. A caller therefore knows the picture is short of a mark instead
-of finding out by eye.
+The `Petals` array mark. It **parses** — so it cannot be misread as something else — and is
+listed in `Sketch.deferred` with the line it came from. A caller therefore knows the picture
+is short of a mark instead of finding out by eye.
 
 A line that no command accepts at all is different, and lands in `Sketch.unparsed`: a
 typo'd mark has to read as a syntax problem, not as a geometry one.
 
 ## Surface
 
-- `parse_scene(src) -> Sketch` · `render(sk) -> graphics::Canvas` ·
+- `parse_scene(src) -> Sketch` · `parse_scene_at(src, base_dir) -> Sketch` (what a
+  `Brush … file=` path is relative to) · `render(sk) -> graphics::Canvas` ·
   `render_file(src_path, out_png) -> Sketch`
 - `Sketch.` `sw` `sh` `transparent` `ops` `elems` `landmarks` `checks` `unparsed` `deferred`
-- `Op.` `kind` (`Sky` / `Fill` / `Stroke`) `pts` `paint` `widths` `w` `color` `color2` —
-  ⚠ `pts` are paper FRACTIONS, never pixels
+  `brushes` `base_dir`
+- `Op.` `kind` (`Sky` / `Fill` / `Stroke` / `Lock`) `pts` `paint` `widths` `w` `color`
+  `color2` `style` `brush` — ⚠ `pts` are paper FRACTIONS, never pixels
+- `brush::` `Brush` · `LockStyle` · `Layer` · `hair_brush` · `load_brush` · `lock_layer` ·
+  `composite_layer` · `scaled` — the brush stroke, a sibling module like `raster` below
+  (`use brush;` after `use drawing;`); `noise::` `seed_hash` · `seed_wave` · `PI` — the
+  seeded hash the corpus is defined by, which `drawing::hash01` / `lowfreq` forward to
 - `Paint.` `pk` (`Stroked` / `Solid` / `Linear` / `Radial`) `c1` `c2` `spec`
 - `Elem.` `ename` `seen` `bx0` `by0` `bx1` `by1` — `seen` is false for an element that was
   named and never drawn, which is an absence rather than a box at the origin
@@ -151,7 +174,8 @@ typo'd mark has to read as a syntax problem, not as a geometry one.
 | `--html` (browser) | compiles; the render path is pure loft, but see below |
 
 This package is pure loft — no `#native`, no inline `#rust` — so its own code has nothing
-target-specific in it. Both limits come from `graphics`, which it draws through.
+target-specific in it. Both limits come from `graphics`, which it draws through, and from
+`imaging`, whose native PNG decoder a `Brush … file=` footprint needs.
 
 `--native-wasm` does not build: `graphics`' native crate links glutin/GL, which is not
 wasm-clean, so the cross-build fails before anything of this package is reached (`imaging`

@@ -1,0 +1,244 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// @FR-Oracle-Golden — the expected bytes in this file are the oracle's own.
+// The brush stroke, against the picture the oracle produced and the shape the
+// design claims.
+//
+// Two goldens are `draw.py`'s own bytes for a `Lock` — one on a transparent
+// sprite, one curved on an opaque ground with its own shadow colour — so the
+// port is held to the standard every other mark is: the corpus gate in
+// miniature, needing no Python.  The shape tests are crawler's
+// `tools/lock_probe.py` measurements made here on the same scenes: a lock is
+// narrower where it grows than in its body, brighter on top than underneath,
+// splits into its `tips`, and paints over the lock behind it.
+use drawing;
+use graphics;
+
+const HEX_DIGITS = "0123456789abcdef";
+
+fn byte_hex(v: integer) -> text {
+  hi = (v >> 4) & 15;
+  lo = v & 15;
+  HEX_DIGITS[hi..hi + 1] + HEX_DIGITS[lo..lo + 1]
+}
+
+/// The canvas as Pillow lays an RGBA image out in memory: R, G, B, A per pixel.
+fn rgba_hex(cv: const graphics::Canvas) -> text {
+  h = "";
+  for i in 0..(cv.width * cv.height) {
+    c = cv.data[i]?;
+    h += byte_hex(graphics::color_r(c)) + byte_hex(graphics::color_g(c))
+       + byte_hex(graphics::color_b(c)) + byte_hex(graphics::color_a(c));
+  }
+  h
+}
+
+fn sprite_source() -> text {
+  `
+  size 24x16
+  Background transparent
+  Lock (0.1,0.5) (0.9,0.5) w0=1 w=6 tips=2 rgb=120,80,40
+  `
+}
+
+fn test_a_lock_on_a_sprite_is_the_oracles() {
+  sc = parse_scene(sprite_source());
+  assert(len(sc.unparsed) == 0, "every line parsed");
+  assert(len(sc.brushes) == 1, "the default hair brush was made once");
+  cv = render(sc);
+  assert(cv.width == 24 && cv.height == 16, "24x16 out");
+  assert(rgba_hex(cv) ==
+"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+"0000000000000000000000000000000100000001ff000001000000010000000100000001000000000000000000000000" +
+"00000000000000000000000155555503555555037f7f55067f7f55067f7f55067f7f55067f7f55067f7f5506bf7f7f04" +
+"ffffff01ffffff0101010000000000000000000000000000000000000000000000000000000000000000000000000000" +
+"00000000000000000000000000000000ffffff016f5f4f10695a4b11695a4b11695a4b11695a4b117755440f6b584e1a" +
+"6e5e482e6b5a442d6e58482e6a58472b625541276650412367554b1b745f4a18735c51166d6d4807ff00000100000000" +
+"000000007f7f7f067f6f5f107c6347527b62475d795f458b785f46907960458f7960458f785f4590795f468d785f4499" +
+"775c43ad775e43ad775d43b1765e44b0775c43b6775c42b471553aad6e5135a26e51339d694a3129000000007f000002" +
+"0000000071533590785838e1755536ff795837ff795836ff795836ff795836ff795836ff795836ff795836ff785736ff" +
+"775635ff775635ff765635ff755534ff755534ff745434ff735332ff715131ff795633ff7053367abbaa880f99663305" +
+"00000000472e179a4a3118f1493017ff4a3117ff4b3218ff4b3218ff4b3218ff4b3218ff4b3218ff4b3218ff4b3218ff" +
+"4b3218ff4b3218ff4b3218ff4c3218ff4c3218ff4c3218ff4d3319ff50351aff4c3218ff5a4126ff664f35db5f3f1f10" +
+"00000000170b00161c11052d2f21107b31220f86332310a7332210a9332210a9332210a9332210a9332210a9342210ab" +
+"322211b0332211af332211af342211b0342311b9332211b1362412a83927139b3824128b3522107c34210d5c2a2a0006" +
+"0000000000000000000000001e1e0f1124180c15261b0b2e251a0a30251a0a30251a0a30251a0a30251b0a2f28190a33" +
+"271a0d3a281a0d39281a0d39271a0d3a26190c3c271a0d3a25170e3622180e3426190c3b241b091c0000000000000001" +
+"0000000000000001000000010000000000000000555500033f3f00045555000355550003555500033f3f000455550003" +
+"555500035555000355550003555500033f3f0004555500033f3f00043f3f00043f3f0004000000010000000100000000" +
+"000000000000000000000000000000010000000100000000000000000000000000000000000000000000000000000000" +
+"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" +
+"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "the sprite's bytes are draw.py's");
+}
+
+fn ground_source() -> text {
+  `
+  size 20x12
+  Background top=0.5 bottom=0.5
+  Lock (0.1,0.3) (0.6,0.5)~ (0.9,0.9) w0=1 w=5 tips=2 rgb=200,200,210 dark=100,110,160
+  `
+}
+
+fn test_a_curved_lock_on_a_ground_is_the_oracles() {
+  sc = parse_scene(ground_source());
+  assert(len(sc.unparsed) == 0, "every line parsed");
+  cv = render(sc);
+  assert(rgba_hex(cv) ==
+"808080ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff" +
+"808080ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff7f7f7fff7f7f7eff808080ff" +
+"808080ff7f7f7fff818181ff818181ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff" +
+"808080ff808080ff808080ff808080ff7f7f7fff8a8a8aff898989ff8a8a8cff878788ff858585ff838385ff838384ff" +
+"828283ff808080ff7f7f7fff808080ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff" +
+"7e7e7eff90919affa3a4acffaeaeb5ffb3b3b9ffb2b2b9ffaeaeb4ffa7a7adffa6a6acff98989cff939397ff878788ff" +
+"818181ff818181ff808080ff808080ff808080ff808080ff808080ff808080ff818180ff74767dff6e7180ff777989ff" +
+"828491ff8d8f9bff9b9ba5ffa5a5adffaaaab2ffaeaeb5ffafafb7ffa6a6adff949499ff88878aff808081ff818181ff" +
+"808080ff808080ff808080ff808080ff808080ff808080ff7c7d7eff6f717bff6a6d7bff686b7cff696c7dff6f7182ff" +
+"777988ff82838fff90919affa0a0a8ffafafb7ffaaaab1ff909094ff828284ff818181ff808080ff808080ff808080ff" +
+"808080ff808080ff818180ff808080ff7d7d7fff76777eff72747dff6e6f7bff696d7cff696d7dff6e7081ff797b89ff" +
+"8c8d97ffa6a6aeffb2b2baff919196ff7f7f81ff818181ff808080ff808080ff808080ff808080ff808080ff808080ff" +
+"818180ff818180ff808080ff7d7e7fff7b7c7fff75767dff70727dff6e707eff747684ff81828eff9999a1ffaaaab3ff" +
+"8f8f94ff7f7f80ff818181ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff818180ff" +
+"818180ff818180ff7f7f80ff787a7eff73757eff767884ff7f818cff96969effa7a7afff8d8e91ff7e7e7fff808080ff" +
+"808080ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff818180ff" +
+"7d7e7fff75777eff787984ff80818cff92929bffaaaab2ff8e8e92ff7f7f7fff808080ff808080ff808080ff808080ff" +
+"808080ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff818180ff7f7f80ff76777dff797a83ff" +
+"7e7f8aff92939dff929296ff7e7e7dff808080ff808080ff808080ff808080ff808080ff808080ff808080ff808080ff" +
+"808080ff808080ff808080ff808080ff808080ff818180ff7f7f80ff78797eff787a81ff82838cff87878bff7f7f7fff",
+    "the ground's bytes are draw.py's");
+}
+
+// ── The shape the design claims, measured ───────────────────────────
+
+/// Differs from the mid-grey ground by more than 20 in some channel.
+fn painted(cv: const graphics::Canvas, x: integer, y: integer) -> boolean {
+  pc = cv.get_pixel(x, y);
+  pr = graphics::color_r(pc) - 128;
+  pg = graphics::color_g(pc) - 128;
+  pb = graphics::color_b(pc) - 128;
+  if pr < 0 { pr = -pr; }
+  if pg < 0 { pg = -pg; }
+  if pb < 0 { pb = -pb; }
+  pr > 20 || pg > 20 || pb > 20
+}
+
+fn column_ink(cv: const graphics::Canvas, x: integer) -> integer {
+  ci_n = 0;
+  for y in 0..cv.height { if painted(cv, x, y) { ci_n += 1; } }
+  ci_n
+}
+
+/// How many separate painted runs a column crosses.
+fn runs_down(cv: const graphics::Canvas, x: integer) -> integer {
+  rd_n = 0;
+  rd_in = false;
+  for y in 0..cv.height {
+    rd_p = painted(cv, x, y);
+    if rd_p && !rd_in { rd_n += 1; }
+    rd_in = rd_p;
+  }
+  rd_n
+}
+
+fn lum(c: integer) -> float {
+  0.299 * (graphics::color_r(c) as float) + 0.587 * (graphics::color_g(c) as float)
+  + 0.114 * (graphics::color_b(c) as float)
+}
+
+/// Mean luminance of the PAINTED pixels in `[x0, x1) × [y0, y1)`.
+fn band_lum(cv: const graphics::Canvas, x0: integer, x1: integer, y0: integer, y1: integer) -> float {
+  bl_s = 0.0;
+  bl_n = 0;
+  for y in y0..y1 {
+    for x in x0..x1 {
+      if painted(cv, x, y) { bl_s += lum(cv.get_pixel(x, y)); bl_n += 1; }
+    }
+  }
+  (bl_s / (bl_n as float)) ?? 0.0
+}
+
+struct Rgb {
+  r: float = 0.0,
+  g: float = 0.0,
+  b: float = 0.0,
+}
+
+/// Mean colour of every pixel in `[x0, x1] × [y0, y1]`.
+fn band_mean(cv: const graphics::Canvas, x0: integer, x1: integer, y0: integer, y1: integer) -> Rgb {
+  bm_n = 0;
+  bm_r = 0.0;
+  bm_g = 0.0;
+  bm_b = 0.0;
+  for y in y0..=y1 {
+    for x in x0..=x1 {
+      bm_c = cv.get_pixel(x, y);
+      bm_r += graphics::color_r(bm_c) as float;
+      bm_g += graphics::color_g(bm_c) as float;
+      bm_b += graphics::color_b(bm_c) as float;
+      bm_n += 1;
+    }
+  }
+  Rgb { r: (bm_r / (bm_n as float)) ?? 0.0, g: (bm_g / (bm_n as float)) ?? 0.0,
+        b: (bm_b / (bm_n as float)) ?? 0.0 }
+}
+
+fn lock_source() -> text {
+  `
+  size 120x60
+  Background top=0.5 bottom=0.5
+  Lock (0.05,0.5) (0.95,0.5) w0=2 w=20 tips=3 tipvar=0 spread=0 rgb=120,80,40
+  `
+}
+
+fn test_the_lock_has_the_shape_it_claims() {
+  cv = render(parse_scene(lock_source()));
+  // The lock runs x = 6..114; its body ends at t = 0.8 (x ≈ 92), the spikes after.
+  root = column_ink(cv, 8);
+  body = column_ink(cv, 60);
+  assert(root * 2 < body, "narrower where it grows: root {root} px, body {body} px");
+  top = band_lum(cv, 20, 80, 0, 30);
+  bot = band_lum(cv, 20, 80, 31, 60);
+  assert(top > bot + 20.0, "upper side brighter than the underside: {top} vs {bot}");
+  assert(runs_down(cv, 94) == 1, "one body just past its end");
+  assert(runs_down(cv, 105) == 3, "three spikes further out, got {runs_down(cv, 105)}");
+  assert(!painted(cv, 118, 30), "nothing beyond the longest spike");
+}
+
+fn layers_source() -> text {
+  `
+  size 120x60
+  Background top=0.5 bottom=0.5
+  Lock (0.05,0.40) (0.95,0.40) w0=20 w=20 swell=0 body=1 tips=0 rgb=200,40,40
+  Lock (0.05,0.60) (0.95,0.60) w0=20 w=20 swell=0 body=1 tips=0 rgb=40,40,200
+  `
+}
+
+fn test_a_lock_paints_over_the_lock_behind_it() {
+  cv = render(parse_scene(layers_source()));
+  both = band_mean(cv, 40, 80, 27, 33);
+  red_only = band_mean(cv, 40, 80, 18, 24);
+  assert(both.b > both.r + 30.0, "the later (blue) lock covers the earlier where they overlap");
+  assert(red_only.r > red_only.b + 30.0, "the earlier (red) lock is untouched where they do not");
+}
+
+fn test_a_lock_names_a_brush_that_exists_or_is_reported() {
+  sc = parse_scene("size 8x8\nLock (0.1,0.5) (0.9,0.5) brush=nope\n"
+                   + "Brush fur hair w=6 period=8\nLock (0.1,0.5) (0.9,0.5) brush=fur\n");
+  assert(len(sc.unparsed) == 1, "the lock naming no brush is reported, got {len(sc.unparsed)}");
+  assert(len(sc.ops) == 1, "the lock naming a brush is an op");
+  assert(len(sc.brushes) == 1, "one brush defined");
+  assert(sc.brushes[0]?.bname == "fur" && sc.brushes[0]?.bw == 6 && sc.brushes[0]?.bh == 8,
+         "the brush is the one the line described");
+}
