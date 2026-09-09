@@ -2281,7 +2281,11 @@ fn resolve_facing(self: Stage, idx: integer) {
         if q < 0 { q = seq_named(self, "{n.nd_key}_{n.nd_action}"); }
     }
     if q < 0 { q = seq_named(self, "{n.nd_key}_{f}"); }
-    if q < 0 { q = seq_named(self, n.nd_key); }
+    // `?? ""` because `nd_key` reads nullable off the element and `seq_named` takes a
+    // non-null `text`.  Behaviour is unchanged: the empty name is already its
+    // no-match answer (`if name == "" { return -1; }`), and a null one compared equal
+    // to nothing, so both fell through to the `return` below.  Only the diagnostic moves.
+    if q < 0 { q = seq_named(self, n.nd_key ?? ""); }
     if q < 0 { return; }               // nothing matched: keep what it had
     // ⚠ THE PHASE CARRIES OVER — `nd_elapsed` is deliberately not touched.  A mob
     // turning a corner mid-stride must keep walking from where its legs were; a
