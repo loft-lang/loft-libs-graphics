@@ -111,12 +111,21 @@ pub struct StageNode {
     nd_depth: float,         // distance INTO the screen; larger draws first
     nd_disabled: boolean,    // D1: refuses to fire, and reads `Disabled`
     nd_focusable: boolean,   // D2: can hold the keyboard, and joins the tab order
-    nd_a: float,             // derived world affine — read after `compose`
-    nd_b: float,
-    nd_c: float,
-    nd_d: float,
-    nd_tx: float,
-    nd_ty: float,
+    // Derived world affine — read after `compose`.
+    //
+    // ⚠ THE DECLARED DEFAULT IS THE IDENTITY, NOT ZERO, and that is load-bearing.
+    // `compose` reads a node's PARENT out of the flat vector, which types as
+    // `StageNode?`, and the honest discharge of that read is the transform an
+    // ABSENT parent contributes — which is the identity, exactly what the
+    // `nd_parent < 0` branch two lines up already applies to a root.  With the
+    // zero record it would be the transform that collapses every child to a
+    // point: silent, geometric, and visible only as a picture that is not there.
+    nd_a: float = 1.0,
+    nd_b: float = 0.0,
+    nd_c: float = 0.0,
+    nd_d: float = 1.0,
+    nd_tx: float = 0.0,
+    nd_ty: float = 0.0,
 }
 
 // Everything one ordering band carries: how much of the camera it feels, what
@@ -389,7 +398,10 @@ pub fn compose(self: Stage) {
             self.st_nodes[i].nd_tx = ltx;
             self.st_nodes[i].nd_ty = lty;
         } else {
-            p = self.st_nodes[n.nd_parent];
+            // `?` is the identity transform (see `nd_a`'s declared default), which
+            // is what an absent parent contributes — so this branch and the root
+            // branch above agree by construction rather than by coincidence.
+            p = self.st_nodes[n.nd_parent]?;
             // W = P . L  — the parent's linear part acts on the child's, and on
             // the child's translation before the parent's is added.
             self.st_nodes[i].nd_a = p.nd_a * la + p.nd_c * lb;
@@ -410,7 +422,8 @@ pub fn compose(self: Stage) {
         cx1 = 0.0;
         cy1 = 0.0;
         if n.nd_parent >= 0 {
-            pp = self.st_nodes[n.nd_parent];
+            // `?` reads as "clips nothing", which is what no parent means here.
+            pp = self.st_nodes[n.nd_parent]?;
             cl = pp.nd_clipped;
             cx0 = pp.nd_cx0;
             cy0 = pp.nd_cy0;
@@ -543,7 +556,10 @@ pub fn order(self: const Stage) -> vector<integer> { self.st_order }
 // honest way to make it otherwise; a rotated clip needs a stencil, which this arc
 // does not have.  Stated rather than discovered.
 pub fn bounds_of(self: const Stage, idx: integer) -> Bounds {
-    n = self.st_nodes[idx];
+    // An index that is not a node reads as the blank node — zero size at the
+    // origin — and `world_point` already answers (0, 0) for it, so the bounds
+    // come out empty rather than wrong.
+    n = self.st_nodes[idx]?;
     p0 = world_point(self, idx, 0.0, 0.0);
     p1 = world_point(self, idx, n.nd_w, 0.0);
     p2 = world_point(self, idx, 0.0, n.nd_h);
@@ -2263,7 +2279,9 @@ fn opposite_facing(f: text) -> text {
 // already had — the rule crawler's `<key>.png` loader keeps, and the reason a
 // half-authored mob is a visibly wrong sprite rather than a blank or a stop.
 fn resolve_facing(self: Stage, idx: integer) {
-    n = self.st_nodes[idx];
+    // An index that is not a node reads as the blank node, whose `nd_key` is
+    // empty — so the next line returns, which is the fall-back this documents.
+    n = self.st_nodes[idx]?;
     if n.nd_key == "" { return; }
     f = facing_name(n.nd_facing);
     mirror = false;
@@ -2281,11 +2299,7 @@ fn resolve_facing(self: Stage, idx: integer) {
         if q < 0 { q = seq_named(self, "{n.nd_key}_{n.nd_action}"); }
     }
     if q < 0 { q = seq_named(self, "{n.nd_key}_{f}"); }
-    // `?? ""` because `nd_key` reads nullable off the element and `seq_named` takes a
-    // non-null `text`.  Behaviour is unchanged: the empty name is already its
-    // no-match answer (`if name == "" { return -1; }`), and a null one compared equal
-    // to nothing, so both fell through to the `return` below.  Only the diagnostic moves.
-    if q < 0 { q = seq_named(self, n.nd_key ?? ""); }
+    if q < 0 { q = seq_named(self, n.nd_key); }
     if q < 0 { return; }               // nothing matched: keep what it had
     // ⚠ THE PHASE CARRIES OVER — `nd_elapsed` is deliberately not touched.  A mob
     // turning a corner mid-stride must keep walking from where its legs were; a

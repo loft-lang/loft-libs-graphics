@@ -646,7 +646,10 @@ fn polygon_crossings(pc_pts: const vector<Coord>, pc_y: integer,
   pc_n = len(pc_pts);
   for i in 0..pc_n {
     pc_a = pc_pts[i]?;
-    pc_b = pc_pts[(i + 1) % pc_n]?;
+    // `% pc_n` types nullable because a zero divisor answers null; `?? 0` names the
+    // wrap target, which is where the last edge closes anyway.  The loop does not run
+    // at all when `pc_n` is 0, so the default is unreachable rather than chosen.
+    pc_b = pc_pts[(i + 1) % pc_n ?? 0]?;
     pc_ylo = if pc_a.py < pc_b.py { pc_a.py } else { pc_b.py };
     pc_yhi = if pc_a.py < pc_b.py { pc_b.py } else { pc_a.py };
     // A horizontal edge crosses no scanline: its endpoints are already carried by
