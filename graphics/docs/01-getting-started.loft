@@ -1,44 +1,143 @@
 // Copyright (c) 2026 Jurjen Stellingwerff
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // @NAME: Getting Started
-// @TITLE: How to use the graphics package for 2D drawing.
+// @TITLE: A pixel surface you draw on — and the byte every colour has that you cannot see.
 //
-// ## Creating a canvas
+// `graphics` is the surface everything else in this family draws onto: a `Canvas` of packed
+// RGBA pixels, the primitives that mark it (rectangles, lines, circles, ellipses, béziers,
+// triangles, sprites), PNG output, and — beyond the software canvas — the OpenGL bindings, a
+// `Painter2D` for fixed-function 2-D over GL, sprite sheets, and audio.
 //
-// A canvas is a 2D pixel buffer. Create one with a width, height, and fill color:
+// It is deliberately not the layer above it. `stage` holds the scene TREE you mutate and
+// hands this package a draw list; `text2d` draws text with no font file; `drawing` renders a
+// `.draw` scene authored as lines of text; `tween` moves properties in time. Reach for
+// `graphics` when you want to put pixels somewhere, and for one of those when you want
+// something to decide WHICH pixels.
+//
+// Everything below is the software canvas, which needs no window and no display — the same
+// half the package's own CI can run.
 use graphics;
 
 fn main() {
-  cv = graphics::canvas(100, 100, graphics::rgb(0, 0, 0));
-  assert(cv.width == 100, "canvas width");
+  // A canvas is a width, a height and a fill colour.
+  cv = graphics::canvas(8, 4, graphics::rgb(0, 0, 0));
+  red = graphics::rgb(255, 0, 0);
+  cv.fill_rect(1, 1, 3, 2, red);
+
+  println("canvas : {cv.width} x {cv.height}");
+  println("inside : {cv.get_pixel(2, 2) == red}");
+  println("outside: {cv.get_pixel(6, 0) == graphics::rgb(0, 0, 0)}");
+
+  assert(cv.width == 8 and cv.height == 4, "the canvas is the size you asked for");
+  assert(cv.get_pixel(2, 2) == red, "the rectangle painted where it was told to");
+  assert(cv.get_pixel(6, 0) == graphics::rgb(0, 0, 0), "…and nowhere else");
+
+  // Every section below is a function, and `main` calls each one. A section `main` does not
+  // call still COMPILES — so a renamed API is caught, and the assertions that check the
+  // example is RIGHT never run. This guide had exactly that defect: two of its three
+  // sections were defined and never called, so it read as verified and one third of it was.
+  the_alpha_byte_you_cannot_see();
+  a_zero_is_a_colour_not_an_answer();
+  the_marks_you_can_make();
 }
 
-// The canvas stores pixels as packed RGBA integers. Use `rgb()` for opaque
-// colors and `rgba()` when you need transparency.
+// That prints:
 //
-// ## Drawing shapes
+//     canvas : 8 x 4
+//     inside : true
+//     outside: true
 //
-// Draw lines, rectangles, circles, and more:
+// ## The one that bites: a colour has a byte you did not write
+//
+// A colour is ONE `integer`, packed `0xAARRGGBB`. So `rgb(255, 0, 0)` is `0xFFFF0000` — and
+// the hex literal that names the same three channels, `0xFF0000`, leaves the top byte zero.
+// That is a fully TRANSPARENT red.
+//
+// Nothing catches it. Both are `integer`, both report `color_r` 255, and `set_pixel` stores
+// either one happily. But every compositing path reads the alpha, so the literal blends to
+// nothing — and `save_png` picks RGB or RGBA off the pixels, so one hand-written literal in
+// an otherwise opaque picture adds an alpha channel to the file and punches a transparent
+// hole exactly there. In a viewer with a white background that looks like nothing at all.
+//
+// Write colours with `rgb` and `rgba`. If you must write a literal, write all eight digits.
 
-fn drawing_shapes() {
-  sh_cv = graphics::canvas(50, 50, 0);
-  sh_red = graphics::rgb(255, 0, 0);
+fn the_alpha_byte_you_cannot_see() {
+  red = graphics::rgb(255, 0, 0);
+  assert(red == 0xFFFF0000, "rgb fills the alpha byte — the layout is 0xAARRGGBB");
+  assert(graphics::color_a(red) == 255, "so a constructed colour is opaque");
 
-  // Draw a filled rectangle
-  sh_cv.fill_rect(5, 5, 20, 10, sh_red);
+  assert(graphics::color_r(0xFF0000) == 255, "the literal really is full red…");
+  assert(graphics::color_a(0xFF0000) == 0, "…and fully transparent");
+  assert(0xFF0000 != red, "so it is not the colour rgb(255, 0, 0) makes");
 
-  // Draw a circle outline
-  sh_cv.draw_circle(25, 25, 10, graphics::rgb(0, 0, 255));
+  // `rgba` takes the alpha you meant, and MASKS each channel to 8 bits rather than
+  // refusing an out-of-range one — 300 becomes 44, silently.
+  half = graphics::rgba(255, 0, 0, 128);
+  assert(graphics::color_a(half) == 128, "rgba carries the alpha you asked for");
+  assert(graphics::color_r(graphics::rgba(300, 0, 0, 255)) == 44, "…and wraps 300 to 44");
 
-  // Draw a line
-  sh_cv.draw_line(0, 0, 49, 49, graphics::rgb(255, 255, 255));
+  println("alpha  : rgb {graphics::color_a(red)}, literal {graphics::color_a(0xFF0000)}");
 }
 
-// ## Anti-aliased lines
+// ## A zero is a colour, so it cannot also be an answer
 //
-// For smoother lines, use `draw_aa_line()` which uses Xiaolin Wu's algorithm:
+// The same fact one step further: `0` is `0x00000000`, a fully transparent black — a
+// perfectly good pixel value. So `get_pixel` answering 0 means either *that pixel is
+// transparent black* or *you asked outside the canvas*, and nothing distinguishes them.
+// Bounds-check the coordinates yourself; do not read 0 as "off the edge".
+//
+// It is also why `canvas(w, h, 0)` saves as a fully TRANSPARENT image rather than the black
+// its zero suggests. `canvas(w, h, rgb(0, 0, 0))` is the opaque one.
 
-fn aa_example() {
-  aa_cv = graphics::canvas(100, 100, 0);
-  aa_cv.draw_aa_line(10, 10, 90, 50, graphics::rgb(255, 255, 0));
+fn a_zero_is_a_colour_not_an_answer() {
+  cv = graphics::canvas(4, 4, 0);
+  assert(cv.get_pixel(0, 0) == 0, "the fill really is 0 — transparent black");
+  assert(cv.get_pixel(99, 99) == 0, "…and so is a read miles off the canvas");
+  assert(graphics::color_a(0) == 0, "which is what makes the two indistinguishable");
+
+  opaque = graphics::canvas(4, 4, graphics::rgb(0, 0, 0));
+  assert(graphics::color_a(opaque.get_pixel(0, 0)) == 255, "rgb(0,0,0) is the black you meant");
+
+  println("zero   : a colour, never a bounds answer");
 }
+
+// ## The marks you can make
+//
+// One canvas, one colour, one call each. `fill_*` paints the interior, `draw_*` paints the
+// outline, and both take pixel coordinates with the origin at the top left.
+//
+//   - rectangles — `fill_rect` / `draw_rect`, and `hline` / `vline` for one-pixel runs
+//   - lines — `draw_line`, and `draw_aa_line` for Xiaolin Wu anti-aliasing
+//   - curves — `draw_circle` / `fill_circle`, `draw_ellipse` / `fill_ellipse`, `draw_bezier`
+//   - triangles — `fill_triangle`
+//   - sprites — a `SpriteSheet` plus `draw_sprite`
+//
+// `set_pixel` writes one; `blend_pixel` composites one over what is there, which is the call
+// that reads the alpha byte the first section is about. `save_png(path)` writes the result
+// and answers whether it succeeded.
+
+fn the_marks_you_can_make() {
+  cv = graphics::canvas(16, 16, graphics::rgb(0, 0, 0));
+  white = graphics::rgb(255, 255, 255);
+
+  cv.draw_line(0, 0, 15, 15, white);
+  assert(cv.get_pixel(0, 0) == white, "a line starts where you put it");
+
+  cv.fill_circle(8, 8, 3, graphics::rgb(0, 0, 255));
+  assert(cv.get_pixel(8, 8) == graphics::rgb(0, 0, 255), "a filled circle covers its centre");
+
+  cv.set_pixel(15, 0, graphics::rgb(0, 255, 0));
+  assert(cv.get_pixel(15, 0) == graphics::rgb(0, 255, 0), "and set_pixel is one pixel");
+
+  println("marks  : line, circle and pixel all landed");
+}
+
+// ## Where to go next
+//
+// - `README.md` — the whole surface: the OpenGL bindings, `Painter2D`, sprite sheets, audio
+//   (one contract across desktop and browser), and the `math` / `mesh` / `scene` / `glb`
+//   modules this package also carries.
+// - `tests/worked-examples.loft` — `@GFX-001` … `@GFX-005`, the contracts a signature cannot
+//   state, each a running test rather than a snippet.
+// - `stage` for a scene you mutate, `text2d` for text, `drawing` for an authored `.draw`
+//   scene, `imaging` for reading and writing image files.
