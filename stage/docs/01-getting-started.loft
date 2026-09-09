@@ -1,0 +1,165 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// @NAME: Getting Started
+// @TITLE: A scene you mutate — nodes, one compose pass, and where things landed.
+//
+// A game is a **tree you mutate**, not a frame loop you draw. `stage` holds that
+// tree: nodes with a parent, a transform and a sprite rect, one pass that
+// derives every world transform from them, and then the questions a frame
+// actually asks — where did this land, what is under the pointer, what do I
+// hand the renderer.
+//
+// It is not the renderer: `graphics` owns the canvas, and `stage` hands it a
+// `draw_list()` or calls `render_stage(canvas)`. It is not a physics engine or a
+// layout engine — nothing here moves a node on its own except the tween and
+// animation clocks you start yourself.
+//
+// Everything below is pure computation over the tree, so this guide needs no
+// window and no display, exactly like the package's own suite.
+use stage;
+
+EPS = 0.0001;
+
+fn near(a: float, b: float) -> boolean { a - b < EPS and b - a < EPS }
+
+fn main() {
+  // A parent at (100, 50) and a child ten to its right, in the PARENT's units.
+  st = stage::stage_new();
+  root = st.node_add(-1, stage::Place { pl_x: 100.0, pl_y: 50.0 });
+  child = st.node_add(root, stage::Place { pl_x: 10.0 });
+  st.compose();                      // one forward pass, every world transform
+
+  at = st.world_origin(child);
+  println("child  : ({at.p_x}, {at.p_y})");
+  assert(near(at.p_x, 110.0) and near(at.p_y, 50.0), "the child rides its parent");
+  assert(st.node_count() == 2, "two nodes in the tree");
+
+  // Every section below is a function, and `main` calls each one. A section
+  // `main` does not call still COMPILES — so a renamed API is caught, and the
+  // assertions that check the example is RIGHT never run.
+  compose_is_a_step_you_take();
+  the_origin_is_the_anchor();
+  a_place_declares_its_defaults();
+  what_the_frame_asks();
+}
+
+// That prints:
+//
+//     child  : (110, 50)
+//
+// `node_add(parent, place)` answers the new node's index, and `-1` when the
+// parent does not exist yet — so a tree is built top-down and a bad index is a
+// value you can test rather than a crash.
+//
+// ## `compose()` is a step you take, and nothing reminds you
+//
+// Mutating the tree does not move anything. `compose()` is the single forward
+// pass that turns every node's local `Place` into a world transform, and every
+// world query BEFORE it answers from a transform that is still zero.
+//
+// That is the shape of the first bug most readers hit, and it is silent: `(0, 0)`
+// is a perfectly good position, so a node that never composed looks like a node
+// parked at the origin. Mutate freely, compose once per frame, then ask.
+
+fn compose_is_a_step_you_take() {
+  st = stage::stage_new();
+  n = st.node_add(-1, stage::Place { pl_x: 100.0, pl_y: 50.0 });
+
+  before = st.world_origin(n);
+  assert(near(before.p_x, 0.0) and near(before.p_y, 0.0),
+         "before compose the transform is still zero — not an error, just zero");
+
+  st.compose();
+  after = st.world_origin(n);
+  assert(near(after.p_x, 100.0) and near(after.p_y, 50.0), "…and after it, the truth");
+
+  println("compose: (0,0) before, (100,50) after — the same call, both times");
+}
+
+// ## The origin is the anchor
+//
+// `pl_ox` / `pl_oy` name a point in the node's OWN units, and `compose` pins it
+// exactly on `(pl_x, pl_y)` whatever the rotation and scale are. That is what
+// lets a sprite stand up from its feet rather than from its top-left corner:
+// put the origin at the feet, set the position where the feet go, and rotation
+// and scale happen about that point.
+
+fn the_origin_is_the_anchor() {
+  st = stage::stage_new();
+  n = st.node_add(-1, stage::Place {
+    pl_x: 100.0, pl_y: 40.0, pl_rot: 1.1, pl_sx: 3.0, pl_sy: 0.5, pl_ox: 5.0, pl_oy: 9.0,
+  });
+  st.compose();
+
+  o = st.world_origin(n);
+  assert(near(o.p_x, 100.0) and near(o.p_y, 40.0),
+         "local (ox, oy) lands on (x, y) exactly, under any rotation and scale");
+
+  // A quarter turn takes +x toward +y: local (1, 0) one step along world +y.
+  q = stage::stage_new();
+  m = q.node_add(-1, stage::Place { pl_x: 10.0, pl_y: 20.0, pl_rot: 1.5707963267948966 });
+  q.compose();
+  p = q.world_point(m, 1.0, 0.0);
+  assert(near(p.p_x, 10.0) and near(p.p_y, 21.0), "+x turns toward +y");
+
+  println("origin : the anchor holds under rotation and scale");
+}
+
+// ## A `Place` declares its defaults, so an omitted field is not a zero
+//
+// `Place` has twenty-two fields and you will name three of them. The rest take
+// the value the DECLARATION chose, and several of those are deliberately not
+// zero: scale is `1.0`, `pl_visible` is `true`, the sprite rect's `u1`/`v1` are
+// `1.0`, and `pl_mask` is `-1` for "solid" — because `0` is a real mask index.
+//
+// This is the loft idiom the compiler advertises with `omitted-field-zero`: a
+// field whose zero is a meaningful value of its own domain gets a declared
+// default, so leaving it out means "the ordinary case" rather than "erase it".
+
+fn a_place_declares_its_defaults() {
+  d = stage::Place { pl_x: 7.0 };
+  assert(near(d.pl_sx, 1.0) and near(d.pl_sy, 1.0), "scale defaults to 1, not 0");
+  assert(d.pl_visible, "a node you did not hide is visible");
+  assert(d.pl_mask == -1, "-1 is solid; 0 would be the FIRST mask");
+  assert(near(d.pl_u1, 1.0), "the sprite rect covers the whole page by default");
+
+  println("place  : name three fields, the declaration chose the rest");
+}
+
+// ## What a frame asks
+//
+// Three questions, once the tree is composed:
+//
+//   - **what do I draw** — `draw_list()` gives the rects in draw order, and
+//     `render_stage(canvas)` is the one-call path that honours per-node alpha;
+//   - **what is under the pointer** — `pick(x, y)` answers the topmost node
+//     there, or `-1`; `hits(idx, x, y)` asks about one node;
+//   - **where is this in the node's own units** — `to_local(idx, x, y)`, which
+//     is what turns a click into a position inside a widget.
+//
+// A node is only pickable and drawable once it has an extent: `pl_w` / `pl_h`
+// default to `0.0`, and a zero-by-zero node draws nothing and catches nothing.
+
+fn what_the_frame_asks() {
+  st = stage::stage_new();
+  n = st.node_add(-1, stage::Place { pl_w: 20.0, pl_h: 10.0 });
+  st.compose();
+
+  assert(st.pick(5.0, 5.0) == n, "the pointer is over the node");
+  assert(st.pick(50.0, 50.0) == -1, "…and -1 where nothing is");
+  assert(st.hits(n, 5.0, 5.0), "hits() asks about one node");
+  assert(!st.hits(n, 50.0, 5.0), "…and says no outside it");
+  assert(len(st.draw_list()) == 1, "one sized node, one rect to draw");
+
+  println("frame  : draw_list, pick, to_local — all after compose");
+}
+
+// ## Where to go next
+//
+// - `README.md` — the whole surface: views and cameras, layers and fog, lights
+//   and the light map, batching and instance packing, sequences and tweens.
+// - `tests/stage.loft` — transform composition checked against hand-computed
+//   points rather than matrix entries, which is the oracle a renderer needs.
+// - `tests/picking.loft`, `tests/views.loft`, `tests/animation.loft` — one file
+//   per question, and the best-explained calls in the package.
+// - `graphics` — the canvas a `draw_list()` is rendered onto.
