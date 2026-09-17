@@ -207,6 +207,12 @@ absolute numbers are directional and the ratios are the point):
 | `render` 64×64 marks scene | — | 17,788,320 | — | 87 |
 | `resize_lanczos` 768²→256² (`graphics`) | — | 280,735,840 | — | 63 |
 
+The four rows without a Rust figure above had no reference when this table was taken.
+Since 2026-09-17 `bench/bench.rs` ports them too — `parse_scene`, `render` and the Pillow
+resample — so `compare.py` judges all fourteen.  With that day's loft (`--skip-interp`,
+best of 3, every hash agreeing): `parse` 3.7×, `render_lock` 4.1×, `resize` 4.8×,
+`render_marks` 5.8× — the last three over the bar, and the run reports them as failures.
+
 **The verdict is FAIL on every judged routine, and the finding is loft's, not this
 package's.** The algorithms are the same to the byte, and the library boundary is not the
 cause (the brush inlined into one standalone program gives the same numbers). It is the
