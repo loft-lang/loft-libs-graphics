@@ -161,24 +161,26 @@ fn test_a_pixel_is_replaced_not_edited() {
 // overflows the range and stores 0, which means the BRIGHTER a pixel was, the
 // more likely brightening it turns it black.  Nothing raises, nothing warns, and
 // the result is a well-formed image, so the first sign is a picture with holes in
-// its highlights.  Clamp at the construction site; the library will not.
+// its highlights.  Clamp at the construction site; the library will not.  loft makes the
+// store say what an unfitting value becomes — `?? 0` below is that spelling, and it is the
+// same 0 the channel took before the language asked.
 fn test_channels_do_not_clamp() {
   img = file("fixture-gray.png").png();
   mid = img.data[1] ?? Pixel{r: 0, g: 0, b: 0};
   hi = img.data[2] ?? Pixel{r: 0, g: 0, b: 0};
   assert(mid.r == 85 && hi.r == 170, "the two greys this example doubles");
 
-  naive_mid = Pixel{r: mid.r * 2, g: mid.g * 2, b: mid.b * 2};
+  naive_mid = Pixel{r: mid.r * 2 ?? 0, g: mid.g * 2 ?? 0, b: mid.b * 2 ?? 0};
   assert(naive_mid.r == 170, "85 doubled fits, and stores");
-  naive_hi = Pixel{r: hi.r * 2, g: hi.g * 2, b: hi.b * 2};
+  naive_hi = Pixel{r: hi.r * 2 ?? 0, g: hi.g * 2 ?? 0, b: hi.b * 2 ?? 0};
   assert(naive_hi.r == 0, "340 does not fit, and stores 0 — NOT 255");
   assert(naive_hi.value() == 0, "so brightening the brighter pixel produced black");
 
-  clamped = Pixel{r: min(hi.r * 2, 255), g: min(hi.g * 2, 255), b: min(hi.b * 2, 255)};
+  clamped = Pixel{r: min(hi.r * 2, 255) ?? 0, g: min(hi.g * 2, 255) ?? 0, b: min(hi.b * 2, 255) ?? 0};
   assert(clamped.value() == 0xFFFFFF, "clamped at the call site, it saturates to white");
 
   // The other end of the range behaves the same way.
-  under = Pixel{r: 0 - 1, g: 128, b: 128};
+  under = Pixel{r: 0 - 1 ?? 0, g: 128, b: 128};
   assert(under.r == 0, "a negative channel also stores 0");
   assert(under.g == 128, "and only the offending channel is affected");
 }
