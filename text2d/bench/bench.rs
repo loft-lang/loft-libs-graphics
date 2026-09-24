@@ -550,11 +550,13 @@ fn main() {
     let t0 = Instant::now();
     println!("routine\titers\tus\tns_op\tpx\tns_px\thash");
     let mut sink = 0i64;
-    // `wrap` is held out until the loft lanes agree with it — see the note in bench.loft.
-    if std::env::args().any(|a| a == "--wrap") {
-        print_row(&bench_wrap(n));
-    }
-    for r in [bench_write_text(n), bench_atlas_cell(n), bench_layout(n), bench_draw_quads(n)] {
+    for r in [
+        bench_write_text(n),
+        bench_atlas_cell(n),
+        bench_layout(n),
+        bench_draw_quads(n),
+        bench_wrap(n),
+    ] {
         print_row(&r);
         sink = sink.wrapping_add(r.sink);
     }
