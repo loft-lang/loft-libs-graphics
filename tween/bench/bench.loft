@@ -1,0 +1,173 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// bench — the performance pass: the package's two hot routines, timed on a fixed
+// workload, with a hash of what they produced.
+//
+//     loft --interpret bench/bench.loft [--n N]         the interpreter
+//     loft --native-release bench/bench.loft [--n N]    compiled
+//     rustc -O --edition=2021 bench/bench.rs -o bench/.build/stats_rs && bench/.build/stats_rs
+//
+// One tab-separated line per routine: name, iterations, total µs, ns per op, items per op,
+// ns per item, and an FNV-1a-32 hash of ONE canonical op's output.  The hash is what makes
+// a benchmark a VALIDATION: the interpreter, the native build and the pure-Rust twin in
+// bench/bench.rs must print the same hash for a row, or one of them is not computing the
+// routine it claims to.
+//
+// Each repetition's input differs in VALUE, never in the amount of work — a sample offset
+// or a start value moved by `r & 1` — so no backend can hoist the op out of the loop, and
+// each timed loop folds its result into a `sink` the last line carries.
+use tween;
+
+/// One measured routine.
+struct Row {
+  name: text = "",
+  iters: integer = 0,
+  us: integer = 0,
+  px: integer = 0,
+  hash: integer = 0,
+  sink: integer = 0,
+}
+
+const FNV_OFFSET = 2166136261;
+const FNV_PRIME = 16777619;
+
+/// FNV-1a-32 over the low 32 bits of each integer, high byte first.
+fn fnv(h0: integer, v: const vector<integer>) -> integer {
+  fv_h = h0;
+  for x in v {
+    fv_w = x & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 24) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 16) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 8) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ (fv_w & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+  }
+  fv_h
+}
+
+/// A float as a hashable integer: millionths, truncated.
+fn micro(v: float) -> integer { (v * 1000000.0) as integer }
+
+fn print_row(r: const Row) {
+  pr_ns = ((r.us * 1000) / r.iters) ?? 0;
+  pr_px = if r.px > 0 { (((r.us * 1000) as float) / ((r.iters * r.px) as float)) ?? 0.0 }
+          else { 0.0 };
+  println("{r.name}\t{r.iters}\t{r.us}\t{pr_ns}\t{r.px}\t{pr_px:.3}\t{r.hash:x}");
+}
+
+// ── ease: the eleven curves in their three directions ───────────────
+
+const EASE_SAMPLES = 10000;
+
+fn all_curves() -> vector<Curve> {
+  [Curve.Linear, Curve.Quad, Curve.Cubic, Curve.Quart, Curve.Quint, Curve.Sine,
+   Curve.Expo, Curve.Circ, Curve.Back, Curve.Elastic, Curve.Bounce]
+}
+
+fn all_shapes() -> vector<Shape> { [Shape.In, Shape.Out, Shape.InOut] }
+
+/// One op: every (curve, shape) pair sampled EASE_SAMPLES times strictly inside (0, 1),
+/// so every sample reaches the curve rather than the clamp.  `off` (0.25 or 0.75) moves
+/// the samples without changing how many there are.  Answers one sum per pair.
+fn ease_sweep(curves: const vector<Curve>, shapes: const vector<Shape>, off: float) -> vector<float> {
+  es_out: vector<float> = [];
+  for c in curves {
+    for s in shapes {
+      es_sum = 0.0;
+      for k in 0..EASE_SAMPLES {
+        es_sum += ease(c, s, ((k as float) + off) / (EASE_SAMPLES as float));
+      }
+      es_out += [es_sum];
+    }
+  }
+  es_out
+}
+
+fn bench_ease(n: integer) -> Row {
+  be_curves = all_curves();
+  be_shapes = all_shapes();
+  be_t0 = ticks();
+  be_acc = 0.0;
+  for r in 0..n {
+    be_off = if (r & 1) == 0 { 0.25 } else { 0.75 };
+    be_sums = ease_sweep(be_curves, be_shapes, be_off);
+    be_acc += be_sums[0]?;
+  }
+  be_us = ticks() - be_t0;
+  be_one = ease_sweep(be_curves, be_shapes, 0.25);
+  be_ints: vector<integer> = [];
+  for v in be_one { be_ints += [micro(v)]; }
+  Row { name: "ease", iters: n, us: be_us, px: 33 * EASE_SAMPLES, hash: fnv(FNV_OFFSET, be_ints),
+        sink: micro(be_acc) }
+}
+
+// ── value: a tween polled every frame ───────────────────────────────
+
+const TWEEN_COUNT = 2000;
+const FRAMES = 600;
+const FRAME_UNITS = 50000;   // one 60 Hz frame of fixstep's 3 000 000 units per second
+
+/// The workload's tweens: every curve and direction, durations from 20 to 619 frames
+/// (off the frame grid by `i` units), a lead on every seventh.  `bump` moves every start
+/// value, never a duration, so the amount of work is the same for 0 and 1.
+fn make_tweens(bump: float) -> vector<Tween> {
+  mt_curves = all_curves();
+  mt_shapes = all_shapes();
+  mt_out: vector<Tween> = [];
+  for i in 0..TWEEN_COUNT {
+    mt_dur = (20 + (i * 37) % 600) * FRAME_UNITS + i;
+    mt_tw = tween_new((i as float) * 0.5 + bump, 100.0 - (i as float) * 0.25, mt_dur,
+                      mt_curves[i % 11]?, mt_shapes[(i / 11) % 3]?);
+    if i % 7 == 0 { delay(mt_tw, (i % 5) * FRAME_UNITS); }
+    mt_out += [mt_tw];
+  }
+  mt_out
+}
+
+/// One frame: advance every tween by a frame and answer the sum of what they read.
+fn poll_frame(tws: vector<Tween>) -> float {
+  pf_sum = 0.0;
+  for i in 0..len(tws) {
+    advance(tws[i], FRAME_UNITS);
+    pf_sum += value(tws[i]);
+  }
+  pf_sum
+}
+
+fn bench_value(n: integer) -> Row {
+  bv_t0 = ticks();
+  bv_acc = 0.0;
+  for r in 0..n {
+    bv_tws = make_tweens((r & 1) as float);
+    for _f in 0..FRAMES { bv_acc += poll_frame(bv_tws); }
+  }
+  bv_us = ticks() - bv_t0;
+  bv_one = make_tweens(0.0);
+  bv_ints: vector<integer> = [];
+  for _f in 0..FRAMES { bv_ints += [micro(poll_frame(bv_one))]; }
+  Row { name: "value", iters: n, us: bv_us, px: TWEEN_COUNT * FRAMES,
+        hash: fnv(FNV_OFFSET, bv_ints), sink: micro(bv_acc) }
+}
+
+fn main() {
+  mn_n = 20;
+  mn_args = arguments();
+  mn_i = 0;
+  while mn_i < len(mn_args) {
+    if mn_args[mn_i]? == "--n" && mn_i + 1 < len(mn_args) {
+      mn_n = (mn_args[mn_i + 1]? as integer?)?;
+      mn_i += 1;
+    }
+    mn_i += 1;
+  }
+  if mn_n < 1 { mn_n = 1; }
+  mn_t0 = ticks();
+  println("routine\titers\tus\tns_op\tpx\tns_px\thash");
+  mn_rows: vector<Row> = [bench_value(mn_n), bench_ease(mn_n)];
+  mn_sink = 0;
+  for r in mn_rows {
+    print_row(r);
+    mn_sink += r.sink;
+  }
+  println("time: {(ticks() - mn_t0) / 1000 ?? 0}ms sink={mn_sink}");
+}

@@ -1,0 +1,264 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// bench — the performance pass: the keyed and vector-building routines of gridmesh, timed
+// on a fixed workload, with a hash of what they produced.
+//
+//     loft --interpret bench/bench.loft [--n N]         the interpreter
+//     loft --native-release bench/bench.loft [--n N]    compiled
+//     rustc -O --edition=2021 bench/bench.rs -o bench/.build/stats_rs && bench/.build/stats_rs
+//
+// One tab-separated line per routine: name, iterations, total µs, ns per op, items per op
+// (cells, paints, gathered cells or segments), ns per item, and an FNV-1a-32 hash of ONE
+// canonical op's output.  The hash is what makes a benchmark a VALIDATION: the interpreter,
+// the native build and the pure-Rust reference in bench/bench.rs must print the same hash
+// for a row, or one of them is not computing the routine it claims to.  A keyed result is
+// hashed ORDER-FREE — each entry hashed on its own and the entry hashes summed — because a
+// hash collection's walk order is not part of its contract.
+//
+// Each repetition's input differs in VALUE and never in the amount of work: a coordinate
+// shifted by a whole chunk, a rotated choice of dirty chunks, a salt on the coordinates.
+// Each timed loop folds something of its result into `sink`, so no backend can drop the
+// work as unused.
+use gridmesh;
+
+/// One measured routine.
+struct Row {
+  name: text = "",
+  iters: integer = 0,
+  us: integer = 0,
+  px: integer = 0,
+  hash: integer = 0,
+  sink: integer = 0,
+}
+
+const FNV_OFFSET = 2166136261;
+const FNV_PRIME = 16777619;
+
+/// FNV-1a-32 over the low 32 bits of one integer, high byte first.
+fn fnv1(h0: integer, x: integer) -> integer {
+  f1_w = x & 0xFFFFFFFF;
+  f1_h = ((h0 ^ ((f1_w >> 24) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+  f1_h = ((f1_h ^ ((f1_w >> 16) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+  f1_h = ((f1_h ^ ((f1_w >> 8) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+  ((f1_h ^ (f1_w & 255)) * FNV_PRIME) & 0xFFFFFFFF
+}
+
+/// FNV-1a-32 over a sequence of integers.
+fn fnv(h0: integer, v: const vector<integer>) -> integer {
+  fv_h = h0;
+  for x in v { fv_h = fnv1(fv_h, x); }
+  fv_h
+}
+
+/// A coordinate as a hashable integer: thousandths, truncated.
+fn milli(v: float) -> integer { (v * 1000.0) as integer }
+
+fn print_row(r: const Row) {
+  pr_ns = ((r.us * 1000) / r.iters) ?? 0;
+  pr_px = if r.px > 0 { (((r.us * 1000) as float) / ((r.iters * r.px) as float)) ?? 0.0 }
+          else { 0.0 };
+  println("{r.name}\t{r.iters}\t{r.us}\t{pr_ns}\t{r.px}\t{pr_px:.3}\t{r.hash:x}");
+}
+
+/// The spatial index, hashed order-free: the entry count and the sum of each entry's hash.
+fn fnv_index(cidx: const hash<gridmesh::CellRef[ck]>) -> integer {
+  fi_sum = 0;
+  for c in cidx { fi_sum = (fi_sum + fnv1(fnv1(FNV_OFFSET, c.ck), c.ix)) & 0xFFFFFFFF; }
+  fnv1(fnv1(FNV_OFFSET, len(cidx)), fi_sum)
+}
+
+// ── The spatial index ───────────────────────────────────────────────
+
+const BI_W = 400;
+const BI_CELLS = 100000;
+
+fn bench_build_index(n: integer) -> Row {
+  bi_xa: vector<integer> = [];
+  bi_xb: vector<integer> = [];
+  bi_ys: vector<integer> = [];
+  for i in 0..BI_CELLS {
+    bi_xa += [i % BI_W];
+    bi_xb += [i % BI_W + 1];
+    bi_ys += [i / BI_W];
+  }
+  bi_t0 = ticks();
+  bi_sink = 0;
+  for r in 0..n {
+    bi_h = if r & 1 == 0 { build_index(bi_xa, bi_ys) } else { build_index(bi_xb, bi_ys) };
+    bi_sink += len(bi_h);
+  }
+  bi_us = ticks() - bi_t0;
+  bi_one = build_index(bi_xa, bi_ys);
+  Row { name: "build_index", iters: n, us: bi_us, px: BI_CELLS, hash: fnv_index(bi_one),
+        sink: bi_sink }
+}
+
+// ── The field: incremental painting ─────────────────────────────────
+
+const FA_W = 250;
+const FA_PAINTS = 50000;
+
+/// The whole field, hashed: the coordinate arrays in order, and the three keyed members
+/// order-free.
+fn fnv_field(f: const ChunkField) -> integer {
+  ff_h = fnv(fnv(FNV_OFFSET, f.xs), f.ys);
+  ff_h = fnv1(ff_h, fnv_index(f.cidx));
+  ff_bsum = 0;
+  for b in f.buckets {
+    ff_bh = fnv1(fnv1(fnv1(FNV_OFFSET, b.ck), b.cx), b.cy);
+    ff_bsum = (ff_bsum + fnv(ff_bh, b.cell_ixs)) & 0xFFFFFFFF;
+  }
+  ff_h = fnv1(fnv1(ff_h, len(f.buckets)), ff_bsum);
+  ff_dsum = 0;
+  for d in f.dirty {
+    ff_dsum = (ff_dsum + fnv1(fnv1(fnv1(FNV_OFFSET, d.ck), d.cx), d.cy)) & 0xFFFFFFFF;
+  }
+  fnv1(fnv1(ff_h, len(f.dirty)), ff_dsum)
+}
+
+/// A fresh field painted with FA_PAINTS cells of a FA_W-wide block in a scrambled order,
+/// the block shifted by `ox` (a whole number of chunks, so every shift is the same work).
+fn paint_field(ox: integer) -> ChunkField {
+  pf_ex: vector<integer> = [];
+  pf_ey: vector<integer> = [];
+  pf_f = field_new(0, pf_ex, pf_ey, 5, 2);
+  for i in 0..FA_PAINTS {
+    pf_j = (i * 7919) % FA_PAINTS;
+    field_add_cell(pf_f, pf_j % FA_W + ox, pf_j / FA_W);
+  }
+  pf_f
+}
+
+fn bench_field_add_cell(n: integer) -> Row {
+  fa_t0 = ticks();
+  fa_sink = 0;
+  for r in 0..n {
+    fa_f = paint_field((r & 1) * 32);
+    fa_sink += len(fa_f.dirty);
+  }
+  fa_us = ticks() - fa_t0;
+  fa_one = paint_field(0);
+  Row { name: "field_add_cell", iters: n, us: fa_us, px: FA_PAINTS, hash: fnv_field(fa_one),
+        sink: fa_sink }
+}
+
+// ── The field: the incremental-rebuild work-list ────────────────────
+
+const CD_SIDE = 100;       // a dense CD_SIDE × CD_SIDE block of cells
+const CD_SHIFT = 2;        // 4 × 4 cells per chunk
+const CD_INNER = 23;       // the chunks off the block's border ring, per axis
+const CD_DIRTY = 200;
+const CD_HALO = 3;
+
+/// Mark CD_DIRTY interior chunks dirty, the choice rotated by `rot`.  Interior chunks all
+/// see the same neighbourhood, so every rotation is the same work.
+fn mark_interior(f: ChunkField, rot: integer) {
+  clear_dirty(f);
+  for i in 0..CD_DIRTY {
+    mi_m = (i + rot * 7) % (CD_INNER * CD_INNER);
+    mi_cx = 1 + mi_m % CD_INNER;
+    mi_cy = 1 + mi_m / CD_INNER;
+    field_mark_dirty(f, mi_cx * 4 + 1, mi_cy * 4 + 2);
+  }
+}
+
+/// The work-list, hashed order-free: each chunk's key, owned cells and halo cells.
+fn fnv_inputs(ins: const vector<ChunkInput>) -> integer {
+  fs_sum = 0;
+  for ci in ins {
+    fs_h = fnv1(fnv1(fnv1(FNV_OFFSET, ci.key.ck), ci.key.cx), ci.key.cy);
+    fs_h = fnv(fnv1(fs_h, len(ci.cell_ixs)), ci.cell_ixs);
+    fs_h = fnv(fnv1(fs_h, len(ci.halo_ixs)), ci.halo_ixs);
+    fs_sum = (fs_sum + fs_h) & 0xFFFFFFFF;
+  }
+  fnv1(fnv1(FNV_OFFSET, len(ins)), fs_sum)
+}
+
+fn bench_collect_dirty(n: integer) -> Row {
+  cd_xs: vector<integer> = [];
+  cd_ys: vector<integer> = [];
+  for y in 0..CD_SIDE {
+    for x in 0..CD_SIDE { cd_xs += [x]; cd_ys += [y]; }
+  }
+  // halo_k 0 on the field: a mark dirties exactly its own chunk.
+  cd_f = field_new(0, cd_xs, cd_ys, CD_SHIFT, 0);
+  cd_t0 = ticks();
+  cd_sink = 0;
+  for r in 0..n {
+    mark_interior(cd_f, r);
+    cd_out = collect_dirty_inputs(cd_f, CD_HALO);
+    cd_sink += len(cd_out);
+  }
+  cd_us = ticks() - cd_t0;
+  mark_interior(cd_f, 0);
+  cd_one = collect_dirty_inputs(cd_f, CD_HALO);
+  cd_px = 0;
+  for ci in cd_one { cd_px += len(ci.cell_ixs); }
+  Row { name: "collect_dirty_inputs", iters: n, us: cd_us, px: cd_px, hash: fnv_inputs(cd_one),
+        sink: cd_sink }
+}
+
+// ── The segment mesh ────────────────────────────────────────────────
+
+const ES_SEGS = 500000;
+
+/// A mesh of ES_SEGS segments, the coordinates salted by `salt`.
+fn emit_mesh(salt: float) -> SegMesh {
+  em_m = seg_mesh_new();
+  for i in 0..ES_SEGS {
+    em_x = (i as float) * 0.37 + salt;
+    em_y = (i as float) * 0.11;
+    emit_segment(em_m, i & 7, em_x, em_y, 1.5, em_x + 0.5, em_y - 0.25, 2.5, i * 7, i >> 2);
+  }
+  em_m
+}
+
+/// Every stored value, in segment order; a coordinate hashed as its thousandths.
+fn fnv_mesh(m: const SegMesh) -> integer {
+  fm_h = FNV_OFFSET;
+  for i in 0..len(m.kinds) {
+    fm_h = fnv1(fm_h, m.kinds[i]? as integer);
+    fm_h = fnv1(fm_h, milli(m.x0s[i]? as float));
+    fm_h = fnv1(fm_h, milli(m.y0s[i]? as float));
+    fm_h = fnv1(fm_h, milli(m.z0s[i]? as float));
+    fm_h = fnv1(fm_h, milli(m.x1s[i]? as float));
+    fm_h = fnv1(fm_h, milli(m.y1s[i]? as float));
+    fm_h = fnv1(fm_h, milli(m.z1s[i]? as float));
+    fm_h = fnv1(fm_h, m.colors[i]? as integer);
+    fm_h = fnv1(fm_h, m.cell_ix[i]?);
+  }
+  fm_h
+}
+
+fn bench_emit_segment(n: integer) -> Row {
+  es_t0 = ticks();
+  es_sink = 0;
+  for r in 0..n {
+    es_m = emit_mesh((r & 1) as float * 0.5);
+    es_sink += seg_len(es_m);
+  }
+  es_us = ticks() - es_t0;
+  es_one = emit_mesh(0.0);
+  Row { name: "emit_segment", iters: n, us: es_us, px: ES_SEGS, hash: fnv_mesh(es_one),
+        sink: es_sink }
+}
+
+fn main() {
+  mn_n = 20;
+  mn_args = arguments();
+  mn_i = 0;
+  while mn_i < len(mn_args) {
+    if mn_args[mn_i]? == "--n" && mn_i + 1 < len(mn_args) {
+      mn_n = (mn_args[mn_i + 1]? as integer?)?;
+      mn_i += 1;
+    }
+    mn_i += 1;
+  }
+  if mn_n < 1 { mn_n = 1; }
+  println("routine\titers\tus\tns_op\tpx\tns_px\thash");
+  print_row(bench_collect_dirty(mn_n));
+  print_row(bench_build_index(mn_n));
+  print_row(bench_field_add_cell(mn_n));
+  print_row(bench_emit_segment(mn_n));
+}
