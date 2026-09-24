@@ -1,0 +1,352 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// bench — the performance pass: the package's pure-loft raster primitives, timed on a
+// fixed workload, with a hash of what they produced.
+//
+//     loft --interpret bench/bench.loft [--n N]         the interpreter
+//     loft --native-release bench/bench.loft [--n N]    compiled
+//     rustc -O --edition=2021 bench/bench.rs -o bench/.build/stats_rs   the Rust twin
+//
+// One tab-separated line per routine: name, iterations, total µs, ns per op, items one op
+// processes, ns per item, and an FNV-1a-32 hash of one canonical op's output (the canvas
+// pixels).  The hash is what makes a benchmark a VALIDATION: the interpreter, the native
+// build and the pure-Rust twin in bench/bench.rs must print the same hash for a row, or one
+// of them is not computing the routine it claims to — and only then does comparing their
+// speeds mean anything.
+//
+// Every op paints with a colour derived from the repetition number `r`, so each repetition
+// writes different VALUES over exactly the same pixels — never a different amount of work —
+// and no backend can hoist an op out of the repetition loop.  Each op's result is folded
+// into `sink`, printed on the last line.  Only the raster routines are measured; the GL,
+// window and PNG functions sit behind the native crate and are not the language's work.
+use graphics;
+
+/// One measured routine.
+struct Row {
+  name: text = "",
+  iters: integer = 0,
+  us: integer = 0,
+  px: integer = 0,
+  hash: integer = 0,
+  sink: integer = 0,
+}
+
+const FNV_OFFSET = 2166136261;
+const FNV_PRIME = 16777619;
+const PI = 3.14159265358979323846;
+
+const RECTS = 4000;
+const TRIS = 20000;
+const LINES = 5000;
+const CURVES = 2000;
+const SHAPES = 20;
+
+/// FNV-1a-32 over the low 32 bits of each integer, high byte first — a pixel's a, r, g, b.
+fn fnv(h0: integer, v: const vector<integer>) -> integer {
+  fv_h = h0;
+  for x in v {
+    fv_w = x & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 24) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 16) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 8) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ (fv_w & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+  }
+  fv_h
+}
+
+fn print_row(r: const Row) {
+  pr_ns = ((r.us * 1000) / r.iters) ?? 0;
+  pr_px = if r.px > 0 { (((r.us * 1000) as float) / ((r.iters * r.px) as float)) ?? 0.0 }
+          else { 0.0 };
+  println("{r.name}\t{r.iters}\t{r.us}\t{pr_ns}\t{r.px}\t{pr_px:.3}\t{r.hash:x}");
+}
+
+/// The colour primitive `k` of repetition `r` is painted in: opaque, and different per
+/// repetition.
+fn ink(r: integer, k: integer) -> integer {
+  graphics::rgba((k * 7 + r) & 255, (k >> 3) & 255, (r * 5 + 11) & 255, 255)
+}
+
+// ── fill_rect: 4,000 rects of 64x48 into 1024x1024 ──────────────────
+
+fn rect_op(ro_cv: graphics::Canvas, r: integer) {
+  for k in 0..RECTS {
+    ro_cv.fill_rect((k * 97) % 961, (k * 61) % 977, 64, 48, ink(r, k));
+  }
+}
+
+fn bench_fill_rect(n: integer) -> Row {
+  fr_cv = graphics::canvas(1024, 1024, 0);
+  fr_t0 = ticks();
+  fr_sink = 0;
+  for r in 0..n {
+    rect_op(fr_cv, r);
+    fr_sink += fr_cv.get_pixel(500, 500) & 255;
+  }
+  fr_us = ticks() - fr_t0;
+  fr_one = graphics::canvas(1024, 1024, 0);
+  rect_op(fr_one, 0);
+  Row { name: "fill_rect", iters: n, us: fr_us, px: RECTS * 64 * 48,
+        hash: fnv(FNV_OFFSET, fr_one.data), sink: fr_sink }
+}
+
+// ── canvas: a 1920x1080 frame through the doubling fill ─────────────
+
+fn bench_canvas(n: integer) -> Row {
+  cn_t0 = ticks();
+  cn_sink = 0;
+  for r in 0..n {
+    cn_cv = graphics::canvas(1920, 1080, ink(r, 0));
+    cn_sink += len(cn_cv.data) + (cn_cv.get_pixel(r & 1023, 700) & 255);
+  }
+  cn_us = ticks() - cn_t0;
+  cn_one = graphics::canvas(1920, 1080, ink(0, 0));
+  Row { name: "canvas", iters: n, us: cn_us, px: 1920 * 1080,
+        hash: fnv(FNV_OFFSET, cn_one.data), sink: cn_sink }
+}
+
+// ── clear: the per-frame wipe of a 1280x720 canvas ──────────────────
+
+fn bench_clear(n: integer) -> Row {
+  cl_cv = graphics::canvas(1280, 720, 0);
+  cl_t0 = ticks();
+  cl_sink = 0;
+  for r in 0..n {
+    cl_cv.clear(ink(r, 0));
+    cl_sink += cl_cv.get_pixel(r & 1023, 400) & 255;
+  }
+  cl_us = ticks() - cl_t0;
+  cl_one = graphics::canvas(1280, 720, 0);
+  cl_one.clear(ink(0, 0));
+  Row { name: "clear", iters: n, us: cl_us, px: 1280 * 720,
+        hash: fnv(FNV_OFFSET, cl_one.data), sink: cl_sink }
+}
+
+// ── blend_pixel: every pixel of a 512x512 canvas, source-over ───────
+
+/// A translucent gradient to blend onto, so every blend reads a different destination.
+fn blend_canvas() -> graphics::Canvas {
+  bc_cv = graphics::canvas(512, 512, 0);
+  for y in 0..512 {
+    for x in 0..512 {
+      bc_cv.set_pixel(x, y, graphics::rgba(y & 255, x & 255, 128, (x * y + 64) & 255));
+    }
+  }
+  bc_cv
+}
+
+/// Source alpha `(x + y + r) & 255` takes every value equally often, so the opaque and
+/// transparent early exits happen the same number of times in every repetition.
+fn blend_op(bo_cv: graphics::Canvas, r: integer) {
+  for y in 0..512 {
+    for x in 0..512 {
+      bo_cv.blend_pixel(x, y, graphics::rgba(x & 255, y & 255, (x ^ y) & 255, (x + y + r) & 255));
+    }
+  }
+}
+
+fn bench_blend(n: integer) -> Row {
+  bb_cv = blend_canvas();
+  bb_t0 = ticks();
+  bb_sink = 0;
+  for r in 0..n {
+    blend_op(bb_cv, r);
+    bb_sink += bb_cv.get_pixel(r & 511, 300) & 255;
+  }
+  bb_us = ticks() - bb_t0;
+  bb_one = blend_canvas();
+  blend_op(bb_one, 0);
+  Row { name: "blend_pixel", iters: n, us: bb_us, px: 512 * 512,
+        hash: fnv(FNV_OFFSET, bb_one.data), sink: bb_sink }
+}
+
+// ── fill_triangle: 20,000 small triangles into 512x512 ──────────────
+
+fn tri_op(to_cv: graphics::Canvas, r: integer) {
+  for k in 0..TRIS {
+    to_cx = (k * 97) & 511;
+    to_cy = (k * 61) & 511;
+    to_cv.fill_triangle(to_cx + ((k * 13) & 63) - 32, to_cy - ((k * 7) & 31) - 8,
+                        to_cx - ((k * 29) & 63) + 16, to_cy + ((k * 11) & 31) + 4,
+                        to_cx + ((k * 5) & 47) - 20, to_cy + ((k * 17) & 63) - 10, ink(r, k));
+  }
+}
+
+fn bench_triangle(n: integer) -> Row {
+  bt_cv = graphics::canvas(512, 512, 0);
+  bt_t0 = ticks();
+  bt_sink = 0;
+  for r in 0..n {
+    tri_op(bt_cv, r);
+    bt_sink += bt_cv.get_pixel(256, 256) & 255;
+  }
+  bt_us = ticks() - bt_t0;
+  bt_one = graphics::canvas(512, 512, 0);
+  tri_op(bt_one, 0);
+  Row { name: "fill_triangle", iters: n, us: bt_us, px: TRIS,
+        hash: fnv(FNV_OFFSET, bt_one.data), sink: bt_sink }
+}
+
+// ── draw_line: 5,000 lines of ~600 px, all eight octants ────────────
+
+/// Line `k`'s end points, as [x0, y0, x1, y1]: odd lines run backwards, and every second
+/// pair is transposed into a steep line.
+fn line_ends(k: integer) -> vector<integer> {
+  le_x0 = 16 + ((k * 37) & 255);
+  le_y0 = 16 + ((k * 53) & 255);
+  le_x1 = le_x0 + 400 + ((k * 11) & 255);
+  le_y1 = le_y0 + ((k * 19) & 511);
+  if (k & 2) == 2 {
+    le_t = le_x0; le_x0 = le_y0; le_y0 = le_t;
+    le_t = le_x1; le_x1 = le_y1; le_y1 = le_t;
+  }
+  if (k & 1) == 1 { [le_x1, le_y1, le_x0, le_y0] } else { [le_x0, le_y0, le_x1, le_y1] }
+}
+
+fn line_op(lo_cv: graphics::Canvas, lo_ends: const vector<integer>, r: integer) {
+  for k in 0..LINES {
+    lo_cv.draw_line(lo_ends[k * 4]?, lo_ends[k * 4 + 1]?, lo_ends[k * 4 + 2]?,
+                    lo_ends[k * 4 + 3]?, ink(r, k));
+  }
+}
+
+fn bench_line(n: integer) -> Row {
+  bl_ends: vector<integer> = [];
+  bl_px = 0;
+  for k in 0..LINES {
+    bl_e = line_ends(k);
+    bl_ends += bl_e;
+    bl_dx = bl_e[2]? - bl_e[0]?;
+    bl_dy = bl_e[3]? - bl_e[1]?;
+    if bl_dx < 0 { bl_dx = -bl_dx; }
+    if bl_dy < 0 { bl_dy = -bl_dy; }
+    bl_px += if bl_dx > bl_dy { bl_dx + 1 } else { bl_dy + 1 };
+  }
+  bl_cv = graphics::canvas(1024, 1024, 0);
+  bl_t0 = ticks();
+  bl_sink = 0;
+  for r in 0..n {
+    line_op(bl_cv, bl_ends, r);
+    bl_sink += bl_cv.get_pixel(300, 300) & 255;
+  }
+  bl_us = ticks() - bl_t0;
+  bl_one = graphics::canvas(1024, 1024, 0);
+  line_op(bl_one, bl_ends, 0);
+  Row { name: "draw_line", iters: n, us: bl_us, px: bl_px,
+        hash: fnv(FNV_OFFSET, bl_one.data), sink: bl_sink }
+}
+
+// ── draw_bezier: 2,000 cubic curves, subdivided to one pixel ────────
+
+fn bezier_op(zo_cv: graphics::Canvas, r: integer) {
+  for k in 0..CURVES {
+    zo_x0 = 40 + ((k * 37) & 511);
+    zo_y0 = 200 + ((k * 53) & 511);
+    zo_x3 = zo_x0 + 200 + ((k * 11) & 127);
+    zo_y3 = zo_y0 + ((k * 19) & 255);
+    zo_cv.draw_bezier(zo_x0, zo_y0,
+                      zo_x0 + ((k * 7) & 127), zo_y0 + 100 + ((k * 23) & 127),
+                      zo_x3 - ((k * 13) & 127), zo_y3 - 100 - ((k * 29) & 63),
+                      zo_x3, zo_y3, ink(r, k));
+  }
+}
+
+fn bench_bezier(n: integer) -> Row {
+  bz_cv = graphics::canvas(1024, 1024, 0);
+  bz_t0 = ticks();
+  bz_sink = 0;
+  for r in 0..n {
+    bezier_op(bz_cv, r);
+    bz_sink += bz_cv.get_pixel(400, 500) & 255;
+  }
+  bz_us = ticks() - bz_t0;
+  bz_one = graphics::canvas(1024, 1024, 0);
+  bezier_op(bz_one, 0);
+  Row { name: "draw_bezier", iters: n, us: bz_us, px: CURVES,
+        hash: fnv(FNV_OFFSET, bz_one.data), sink: bz_sink }
+}
+
+// ── fill_polygon: a 28-gon and a pentagram, twenty placements ───────
+
+struct Shape {
+  pts: vector<graphics::Coord>,
+}
+
+fn regular(rg_cx: float, rg_cy: float, rg_r: float, rg_n: integer) -> Shape {
+  rg_out = Shape { pts: [] };
+  for i in 0..rg_n {
+    rg_a = ((2.0 * PI * (i as float)) / (rg_n as float)) ?? 0.0;
+    rg_out.pts += [graphics::Coord { px: (rg_cx + rg_r * cos(rg_a)) as integer,
+                                     py: (rg_cy + rg_r * sin(rg_a)) as integer }];
+  }
+  rg_out
+}
+
+/// Five points joined every second one — self-intersecting, so even-odd leaves the centre
+/// hollow.
+fn pentagram(pg_cx: float, pg_cy: float) -> Shape {
+  pg_out = Shape { pts: [] };
+  for k in 0..5 {
+    pg_a = (-90.0 + (((k * 2) % 5) as float) * 72.0) * PI / 180.0;
+    pg_out.pts += [graphics::Coord { px: (pg_cx + 110.0 * cos(pg_a)) as integer,
+                                     py: (pg_cy + 110.0 * sin(pg_a)) as integer }];
+  }
+  pg_out
+}
+
+fn shapes() -> vector<Shape> {
+  sh_out: vector<Shape> = [];
+  for j in 0..SHAPES {
+    sh_out += [regular(118.0 + (j as float), 123.0 + (((j * 7) % 11) as float), 100.0, 28)];
+    sh_out += [pentagram(123.0 + ((j % 10) as float), 120.0 + ((j / 2) as float))];
+  }
+  sh_out
+}
+
+fn poly_op(po_cv: graphics::Canvas, po_shapes: const vector<Shape>, r: integer) {
+  for s in po_shapes {
+    po_cv.fill_polygon(s.pts, ink(r, s#index));
+  }
+}
+
+fn bench_polygon(n: integer) -> Row {
+  bp_shapes = shapes();
+  bp_cv = graphics::canvas(256, 256, 0);
+  bp_t0 = ticks();
+  bp_sink = 0;
+  for r in 0..n {
+    poly_op(bp_cv, bp_shapes, r);
+    bp_sink += bp_cv.get_pixel(128, 60) & 255;
+  }
+  bp_us = ticks() - bp_t0;
+  bp_one = graphics::canvas(256, 256, 0);
+  poly_op(bp_one, bp_shapes, 0);
+  Row { name: "fill_polygon", iters: n, us: bp_us, px: len(bp_shapes),
+        hash: fnv(FNV_OFFSET, bp_one.data), sink: bp_sink }
+}
+
+fn main() {
+  mn_n = 20;
+  mn_args = arguments();
+  mn_i = 0;
+  while mn_i < len(mn_args) {
+    if mn_args[mn_i]? == "--n" && mn_i + 1 < len(mn_args) {
+      mn_n = (mn_args[mn_i + 1]? as integer?)?;
+      mn_i += 1;
+    }
+    mn_i += 1;
+  }
+  if mn_n < 1 { mn_n = 1; }
+  mn_t0 = ticks();
+  println("routine\titers\tus\tns_op\tpx\tns_px\thash");
+  mn_rows: vector<Row> = [bench_polygon(mn_n), bench_fill_rect(mn_n), bench_canvas(mn_n),
+                          bench_clear(mn_n), bench_blend(mn_n), bench_triangle(mn_n),
+                          bench_line(mn_n), bench_bezier(mn_n)];
+  mn_sink = 0;
+  for row in mn_rows {
+    print_row(row);
+    mn_sink += row.sink;
+  }
+  println("time: {(ticks() - mn_t0) / 1000}ms sink={mn_sink}");
+}

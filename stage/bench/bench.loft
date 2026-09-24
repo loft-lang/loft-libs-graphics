@@ -1,0 +1,308 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// bench — the performance pass: the stage's per-frame doors, timed on a fixed scene, with a
+// hash of what they produced.
+//
+//     loft --interpret bench/bench.loft [--n N]         the interpreter
+//     loft --native-release bench/bench.loft [--n N]    compiled
+//     rustc -O --edition=2021 bench/bench.rs -o bench/.build/stats_rs   the Rust twin
+//
+// One tab-separated line per routine: name, iterations, total µs, ns per op, items one op
+// processes (pixels or nodes), ns per item, and an FNV-1a-32 hash of one canonical op's
+// output.  The hash is what makes a benchmark a VALIDATION: the interpreter, the native
+// build and the pure-Rust twin in bench/bench.rs must print the same hash for a row, or one
+// of them is not computing the routine it claims to — and only then does comparing their
+// speeds mean anything.
+//
+// The scenes are fixed by construction.  Every repetition moves one VALUE the op reads —
+// the camera by a pixel, one node's colour or x, one light by a pixel, the canvas the last
+// repetition left — and never the amount of work, so no backend can hoist an op out of its
+// repetition loop.  Each op's result is folded into `sink`, printed on the last line.
+use graphics;
+use stage;
+
+/// One measured routine.
+struct Row {
+  name: text = "",
+  iters: integer = 0,
+  us: integer = 0,
+  px: integer = 0,
+  hash: integer = 0,
+  sink: integer = 0,
+}
+
+const FNV_OFFSET = 2166136261;
+const FNV_PRIME = 16777619;
+
+const SCENE_NODES = 5000;
+const RENDER_NODES = 200;
+const RENDER_W = 960;
+const RENDER_H = 540;
+const LIGHT_W = 640;
+const LIGHT_H = 360;
+const BLUR_W = 320;
+const BLUR_H = 240;
+const BLUR_R = 3;
+
+/// FNV-1a-32 over the low 32 bits of each integer, high byte first — a pixel's a, r, g, b.
+fn fnv(h0: integer, v: const vector<integer>) -> integer {
+  fv_h = h0;
+  for x in v {
+    fv_w = x & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 24) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 16) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 8) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ (fv_w & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+  }
+  fv_h
+}
+
+/// A float as a hashable integer: millionths, truncated.
+fn micro(v: float) -> integer { (v * 1000000.0) as integer }
+
+fn print_row(r: const Row) {
+  pr_ns = ((r.us * 1000) / r.iters) ?? 0;
+  pr_px = if r.px > 0 { (((r.us * 1000) as float) / ((r.iters * r.px) as float)) ?? 0.0 }
+          else { 0.0 };
+  println("{r.name}\t{r.iters}\t{r.us}\t{pr_ns}\t{r.px}\t{pr_px:.3}\t{r.hash:x}");
+}
+
+// ── The scenes ──────────────────────────────────────────────────────
+
+/// The big scene: chains of five (a root and four descendants), rotated, scaled, clipped,
+/// on three layers at scattered depths, some animated, some hidden, some with no area.
+fn big_scene() -> Stage {
+  bs_st = stage_new();
+  bs_st.depth_cue(0.0, 400.0, 0.6, 0.3, 0x405060);
+  _ = bs_st.add_sequence(0, 8, 12.0, LOOP);
+  _ = bs_st.add_sequence(8, 5, 10.0, PINGPONG);
+  for i in 0..SCENE_NODES {
+    bs_g = i % 5;
+    bs_parent = if bs_g == 0 { -1 } else { i - 1 };
+    bs_x = if bs_g == 0 { ((i * 37) % 1900) as float } else { 6.0 + bs_g as float };
+    bs_y = if bs_g == 0 { ((i * 53) % 1000) as float } else { 4.0 };
+    bs_w = if i % 23 == 0 { 0.0 } else { 16.0 + ((i % 5) * 4) as float };
+    _ = bs_st.node_add(bs_parent, Place {
+      pl_x: bs_x, pl_y: bs_y, pl_rot: ((i % 7) as float) * 0.05,
+      pl_sx: 1.0 + ((i % 3) as float) * 0.25, pl_sy: 1.0 - ((i % 4) as float) * 0.1,
+      pl_ox: ((i % 4) as float) * 2.0, pl_oy: ((i % 3) as float) * 3.0,
+      pl_w: bs_w, pl_h: 20.0 + ((i % 3) * 6) as float,
+      pl_colour: (i * 2654435761) & 0xFFFFFF, pl_visible: i % 17 != 0,
+      pl_alpha: 1.0 - ((i % 4) as float) * 0.2, pl_clips: bs_g == 1,
+      pl_seq: if i % 6 == 0 { (i / 6) % 2 } else { -1 },
+      pl_cols: 4, pl_rows: 4, pl_sway: ((i % 3) as float) * 0.5,
+      pl_layer: i % 3, pl_depth: ((i * 31) % 400) as float });
+  }
+  bs_st.advance(123457);
+  bs_st.compose();
+  bs_st
+}
+
+/// The render scene: pairs of 64x64 sprites (a root and one child) inside a 960x540
+/// canvas with a margin, so a one-pixel camera move changes no span length.  Hazed by
+/// depth, translucent, and a tenth of them on a second layer.
+fn render_scene() -> Stage {
+  rs_st = stage_new();
+  rs_st.depth_cue(0.0, 50.0, 1.0, 0.4, 0x304050);
+  for i in 0..RENDER_NODES {
+    rs_root = i % 2 == 0;
+    _ = rs_st.node_add(if rs_root { -1 } else { i - 1 }, Place {
+      pl_x: if rs_root { (8 + (i * 37) % 850) as float } else { 12.0 },
+      pl_y: if rs_root { (8 + (i * 53) % 440) as float } else { 10.0 },
+      pl_w: 64.0, pl_h: 64.0,
+      pl_colour: (i * 2654435761) & 0xFFFFFF,
+      pl_alpha: 1.0 - ((i % 4) as float) * 0.15,
+      pl_layer: if i % 10 == 9 { 1 } else { 0 },
+      pl_depth: ((i * 13) % 50) as float });
+  }
+  rs_st.compose();
+  rs_st
+}
+
+/// A canvas with a pattern in every channel, so a blur or a multiply has work to show.
+fn pattern_canvas(pc_w: integer, pc_h: integer) -> graphics::Canvas {
+  pc_cv = graphics::canvas(pc_w, pc_h, 0);
+  for y in 0..pc_h {
+    for x in 0..pc_w {
+      pc_cv.set_pixel(x, y, graphics::rgba((x * 3) & 255, (y * 5) & 255, (x ^ y) & 255, 255));
+    }
+  }
+  pc_cv
+}
+
+// ── THE per-frame software path ─────────────────────────────────────
+
+fn bench_render(n: integer) -> Row {
+  br_st = render_scene();
+  br_cv = graphics::canvas(RENDER_W, RENDER_H, graphics::rgba(20, 30, 40, 255));
+  br_t0 = ticks();
+  br_sink = 0;
+  for r in 0..n {
+    br_st.set_camera((r & 1) as float, 0.0);
+    br_st.render_stage(br_cv);
+    br_sink += br_cv.get_pixel(100, 100) & 255;
+  }
+  br_us = ticks() - br_t0;
+  br_st.set_camera(0.0, 0.0);
+  br_one = graphics::canvas(RENDER_W, RENDER_H, graphics::rgba(20, 30, 40, 255));
+  br_st.render_stage(br_one);
+  Row { name: "render_stage", iters: n, us: br_us, px: RENDER_NODES * 64 * 64,
+        hash: fnv(FNV_OFFSET, br_one.data), sink: br_sink }
+}
+
+// ── The forward pass ────────────────────────────────────────────────
+
+fn fnv_composed(fc_st: const Stage) -> integer {
+  fc_ints: vector<integer> = [];
+  for fc_n in fc_st.st_nodes {
+    fc_ints += [micro(fc_n.nd_a), micro(fc_n.nd_b), micro(fc_n.nd_c), micro(fc_n.nd_d),
+                micro(fc_n.nd_tx), micro(fc_n.nd_ty), micro(fc_n.nd_cue),
+                micro(fc_n.nd_phase), if fc_n.nd_clipped { 1 } else { 0 },
+                micro(fc_n.nd_cx0), micro(fc_n.nd_cy0), micro(fc_n.nd_cx1),
+                micro(fc_n.nd_cy1)];
+  }
+  for fc_o in fc_st.st_order { fc_ints += [fc_o]; }
+  fnv(FNV_OFFSET, fc_ints)
+}
+
+fn bench_compose(n: integer) -> Row {
+  bc_st = big_scene();
+  bc_t0 = ticks();
+  bc_sink = 0;
+  for r in 0..n {
+    bc_st.set_prop(0, Prop.X, (r & 1) as float);
+    bc_st.compose();
+    bc_sink += bc_st.st_order[7]?;
+  }
+  bc_us = ticks() - bc_t0;
+  bc_st.set_prop(0, Prop.X, 0.0);
+  bc_st.compose();
+  Row { name: "compose", iters: n, us: bc_us, px: SCENE_NODES, hash: fnv_composed(bc_st),
+        sink: bc_sink }
+}
+
+// ── The instance buffer ─────────────────────────────────────────────
+
+fn fnv_singles(fs_v: const vector<single>) -> integer {
+  fs_ints: vector<integer> = [];
+  for fs_x in fs_v { fs_ints += [micro(fs_x as float)]; }
+  fnv(FNV_OFFSET, fs_ints)
+}
+
+fn bench_pack(n: integer) -> Row {
+  bp_st = big_scene();
+  bp_t0 = ticks();
+  bp_sink = 0;
+  for r in 0..n {
+    bp_st.set_prop(1, Prop.Alpha, 0.5 + ((r & 1) as float) * 0.25);
+    bp_out = bp_st.pack_instances();
+    bp_sink += len(bp_out);
+  }
+  bp_us = ticks() - bp_t0;
+  bp_st.set_prop(1, Prop.Alpha, 0.5);
+  bp_one = bp_st.pack_instances();
+  Row { name: "pack_instances", iters: n, us: bp_us, px: len(bp_one) / 16 ?? 0,
+        hash: fnv_singles(bp_one), sink: bp_sink }
+}
+
+// ── The draw list ───────────────────────────────────────────────────
+
+fn fnv_rects(fr_v: const vector<DrawRect>) -> integer {
+  fr_ints: vector<integer> = [];
+  for fr_d in fr_v {
+    fr_ints += [fr_d.dr_rect.r_x, fr_d.dr_rect.r_y, fr_d.dr_rect.r_w, fr_d.dr_rect.r_h,
+                fr_d.dr_colour];
+  }
+  fnv(FNV_OFFSET, fr_ints)
+}
+
+fn bench_draw_list(n: integer) -> Row {
+  bd_st = big_scene();
+  bd_base = bd_st.st_nodes[1].nd_colour;
+  bd_t0 = ticks();
+  bd_sink = 0;
+  for r in 0..n {
+    bd_st.st_nodes[1].nd_colour = bd_base ^ (r & 1);
+    bd_out = bd_st.draw_list();
+    bd_sink += len(bd_out);
+  }
+  bd_us = ticks() - bd_t0;
+  bd_st.st_nodes[1].nd_colour = bd_base;
+  bd_one = bd_st.draw_list();
+  Row { name: "draw_list", iters: n, us: bd_us, px: len(bd_one), hash: fnv_rects(bd_one),
+        sink: bd_sink }
+}
+
+// ── The light-map composite ─────────────────────────────────────────
+
+fn light_scene() -> Stage {
+  ls_st = stage_new();
+  ls_st.set_light_map(true);
+  ls_st.set_ambient(0.2);
+  for k in 0..8 {
+    _ = ls_st.add_light(((k * 83) % 640) as float, ((k * 47) % 360) as float,
+                        150.0 + ((k % 3) * 50) as float,
+                        (k * 2654435761) & 0xFFFFFF, 0.8 + ((k % 4) as float) * 0.2);
+  }
+  ls_st
+}
+
+fn bench_light(n: integer) -> Row {
+  bl_st = light_scene();
+  bl_cv = pattern_canvas(LIGHT_W, LIGHT_H);
+  bl_t0 = ticks();
+  bl_sink = 0;
+  for r in 0..n {
+    bl_st.move_light(0, (r & 1) as float, 0.0);
+    bl_st.composite_light(0, bl_cv);
+    bl_sink += bl_cv.get_pixel(100, 100) & 255;
+  }
+  bl_us = ticks() - bl_t0;
+  bl_st.move_light(0, 0.0, 0.0);
+  bl_one = pattern_canvas(LIGHT_W, LIGHT_H);
+  bl_st.composite_light(0, bl_one);
+  Row { name: "composite_light", iters: n, us: bl_us, px: LIGHT_W * LIGHT_H,
+        hash: fnv(FNV_OFFSET, bl_one.data), sink: bl_sink }
+}
+
+// ── The layer blur ──────────────────────────────────────────────────
+
+fn bench_blur(n: integer) -> Row {
+  bb_cv = pattern_canvas(BLUR_W, BLUR_H);
+  bb_t0 = ticks();
+  bb_sink = 0;
+  for _r in 0..n {
+    blur_region(bb_cv, 0, 0, BLUR_W, BLUR_H, BLUR_R);
+    bb_sink += bb_cv.get_pixel(100, 100) & 255;
+  }
+  bb_us = ticks() - bb_t0;
+  bb_one = pattern_canvas(BLUR_W, BLUR_H);
+  blur_region(bb_one, 0, 0, BLUR_W, BLUR_H, BLUR_R);
+  Row { name: "blur_region", iters: n, us: bb_us, px: BLUR_W * BLUR_H,
+        hash: fnv(FNV_OFFSET, bb_one.data), sink: bb_sink }
+}
+
+fn main() {
+  mn_n = 20;
+  mn_args = arguments();
+  mn_i = 0;
+  while mn_i < len(mn_args) {
+    if mn_args[mn_i]? == "--n" && mn_i + 1 < len(mn_args) {
+      mn_n = (mn_args[mn_i + 1]? as integer?)?;
+      mn_i += 1;
+    }
+    mn_i += 1;
+  }
+  if mn_n < 1 { mn_n = 1; }
+  mn_t0 = ticks();
+  println("routine\titers\tus\tns_op\tpx\tns_px\thash");
+  mn_rows: vector<Row> = [bench_render(mn_n), bench_compose(mn_n), bench_pack(mn_n),
+                          bench_blur(mn_n), bench_draw_list(mn_n), bench_light(mn_n)];
+  mn_sink = 0;
+  for row in mn_rows {
+    print_row(row);
+    mn_sink += row.sink;
+  }
+  println("time: {(ticks() - mn_t0) / 1000}ms sink={mn_sink}");
+}

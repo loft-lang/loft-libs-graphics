@@ -1,0 +1,130 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// bench — the performance pass: the package's hot door, timed on a fixed workload, with a
+// hash of what it produced.
+//
+//     loft --interpret bench/bench.loft [--n N]         the interpreter
+//     loft --native-release bench/bench.loft [--n N]    compiled
+//     rustc -O --edition=2021 bench/bench.rs -o bench/.build/stats_rs   the Rust twin
+//
+// One tab-separated line per routine: name, iterations, total µs, ns per op, items one op
+// processes (proxy pairs), ns per item, and an FNV-1a-32 hash of one canonical op's output.
+// The hash is what makes a benchmark a VALIDATION: the interpreter, the native build and
+// the pure-Rust twin in bench/bench.rs must print the same hash for a row, or one of them is
+// not computing the routine it claims to — and only then does comparing their speeds mean
+// anything.
+//
+// The proxies are fixed by construction.  Every repetition moves one box of proxy 0 by
+// `r & 1`, a VALUE the op reads and never the amount of work, so no backend can hoist the
+// op out of its repetition loop.  Each op's result is folded into `sink`, printed on the
+// last line.
+use shapes;
+
+/// One measured routine.
+struct Row {
+  name: text = "",
+  iters: integer = 0,
+  us: integer = 0,
+  px: integer = 0,
+  hash: integer = 0,
+  sink: integer = 0,
+}
+
+const FNV_OFFSET = 2166136261;
+const FNV_PRIME = 16777619;
+
+const PROXIES = 500;
+const BOXES = 16;
+
+/// FNV-1a-32 over the low 32 bits of each integer, high byte first.
+fn fnv(h0: integer, v: const vector<integer>) -> integer {
+  fv_h = h0;
+  for x in v {
+    fv_w = x & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 24) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 16) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 8) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ (fv_w & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+  }
+  fv_h
+}
+
+fn print_row(r: const Row) {
+  pr_ns = ((r.us * 1000) / r.iters) ?? 0;
+  pr_px = if r.px > 0 { (((r.us * 1000) as float) / ((r.iters * r.px) as float)) ?? 0.0 }
+          else { 0.0 };
+  println("{r.name}\t{r.iters}\t{r.us}\t{pr_ns}\t{r.px}\t{pr_px:.3}\t{r.hash:x}");
+}
+
+// ── Box-set proxies: sixteen bands along x, ragged in y ─────────────
+
+fn make_proxies() -> vector<Proxy> {
+  mp_out: vector<Proxy> = [];
+  for k in 0..PROXIES {
+    mp_px = ((k * 97) % 1500) as float;
+    mp_py = ((k * 61) % 900) as float;
+    mp_boxes: vector<Rect> = [];
+    for j in 0..BOXES {
+      mp_boxes += [Rect { rx: mp_px + (j as float) * 3.0,
+                          ry: mp_py + (((j * 5 + k) % 7) as float),
+                          rw: 3.0, rh: 20.0 + (((j * 11 + k) % 9) as float) }];
+    }
+    mp_out += [Proxy { boxes: mp_boxes }];
+  }
+  mp_out
+}
+
+/// Every unordered pair once: how many overlap, and a fingerprint of which.
+fn overlap_op(oo_ps: const vector<Proxy>) -> vector<integer> {
+  oo_hits = 0;
+  oo_sig = 0;
+  for i in 0..PROXIES {
+    oo_a = oo_ps[i]?;
+    for j in (i + 1)..PROXIES {
+      if oo_a.proxies_overlap(oo_ps[j]?) {
+        oo_hits += 1;
+        oo_sig = (oo_sig + i * 1000 + j) & 0xFFFFFFFF;
+      }
+    }
+  }
+  [oo_hits, oo_sig]
+}
+
+fn bench_overlap(n: integer) -> Row {
+  bo_ps = make_proxies();
+  bo_x = bo_ps[0].boxes[0].rx;
+  bo_t0 = ticks();
+  bo_sink = 0;
+  for r in 0..n {
+    bo_ps[0].boxes[0].rx = bo_x + (r & 1) as float;
+    bo_sink += overlap_op(bo_ps)[0]?;
+  }
+  bo_us = ticks() - bo_t0;
+  bo_ps[0].boxes[0].rx = bo_x;
+  Row { name: "proxies_overlap", iters: n, us: bo_us, px: PROXIES * (PROXIES - 1) / 2,
+        hash: fnv(FNV_OFFSET, overlap_op(bo_ps)), sink: bo_sink }
+}
+
+fn main() {
+  mn_n = 20;
+  mn_args = arguments();
+  mn_i = 0;
+  while mn_i < len(mn_args) {
+    if mn_args[mn_i]? == "--n" && mn_i + 1 < len(mn_args) {
+      mn_n = (mn_args[mn_i + 1]? as integer?)?;
+      mn_i += 1;
+    }
+    mn_i += 1;
+  }
+  if mn_n < 1 { mn_n = 1; }
+  mn_t0 = ticks();
+  println("routine\titers\tus\tns_op\tpx\tns_px\thash");
+  mn_rows: vector<Row> = [bench_overlap(mn_n)];
+  mn_sink = 0;
+  for row in mn_rows {
+    print_row(row);
+    mn_sink += row.sink;
+  }
+  println("time: {(ticks() - mn_t0) / 1000}ms sink={mn_sink}");
+}
