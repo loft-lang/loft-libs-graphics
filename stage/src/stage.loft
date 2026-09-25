@@ -747,7 +747,7 @@ pub fn batches(self: const Stage) -> vector<Batch> {
                    and b.b_cx1 == n.nd_cx1 and b.b_cy1 == n.nd_cy1;
         }
         if same {
-            out[last].b_count = out[last].b_count + 1;
+            out[last].b_count += 1;
         } else {
             out += [Batch { b_layer: n.nd_layer, b_atlas: n.nd_atlas, b_first: idx, b_count: 1,
                             b_clipped: n.nd_clipped, b_cx0: n.nd_cx0,
