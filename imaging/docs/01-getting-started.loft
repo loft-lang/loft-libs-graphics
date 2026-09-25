@@ -158,26 +158,21 @@ fn round_trip() {
 //     img.data[i] = imaging::Pixel { r: 0, g: 0, b: 0 };   // yes
 //     img.data[i].r = 0;                                    // not a thing
 //
-// And `limit(0, 255)` is a RANGE, not a clamp. A channel built outside it stores
-// **0** rather than saturating at 255 — so the obvious way to brighten an image
-// turns its brightest pixels black, which looks like a decoding bug and is not.
-// Clamp the value yourself before you build the pixel.
+// And `limit(0, 255)` is a RANGE, not a clamp. A channel built from a value
+// that may not fit — `bright.r * 2` can reach 510 — is REFUSED at compile time
+// (`cannot implicitly narrow integer to integer(0, 255)`), so you say what an
+// unfitting value becomes. `?? 255` is the saturating brighten: a value that fits
+// is kept, one that does not becomes 255. (`min(…, 255)` is not accepted as that
+// proof; the fallback is the spelling the compiler reads.)
 
 fn the_surprise() {
   bright = imaging::Pixel { r: 200, g: 100, b: 50 };
 
-  // Doubling without a clamp: 400 is outside the range, so it stores 0.
-  doubled = imaging::Pixel { r: bright.r * 2, g: bright.g * 2, b: bright.b * 2 };
-  assert(doubled.r == 0, "400 is out of range and stores 0, not 255");
-  assert(doubled.g == 200 && doubled.b == 100, "the channels that stayed in range are fine");
-
-  // The cure is one `min` at the call site.
-  safe = imaging::Pixel {
-    r: min(bright.r * 2, 255),
-    g: min(bright.g * 2, 255),
-    b: min(bright.b * 2, 255)
-  };
-  assert(safe.r == 255, "clamped before the pixel is built");
+  // Doubling, saying what an out-of-range channel becomes: 400 does not fit and
+  // becomes 255; 200 and 100 fit and are kept.
+  doubled = imaging::Pixel { r: bright.r * 2 ?? 255, g: bright.g * 2 ?? 255, b: bright.b * 2 ?? 255 };
+  assert(doubled.r == 255, "400 is out of range and saturates to 255");
+  assert(doubled.g == 200 && doubled.b == 100, "the channels that stayed in range are kept");
 }
 
 // ## Where to go next
