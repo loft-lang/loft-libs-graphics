@@ -91,11 +91,16 @@ pub fn save_png(self: const Image, path: text) -> boolean {
 // check buys past it.
 // Example: @IMG-002 — every colour type arrives as RGBA, and a source without an
 // alpha channel is opaque rather than invisible.
-pub fn png(self: File) -> Image {
-  if self.format == Format.TextFile {
-    result = Image { };
-    if load_png(self.path, result) { result } else { null }
-  } else {
-    null
+pub fn png(self: File) -> Image? {
+  // Early returns, not a nested `if … { result } else { null }`: on a `-> Image?`
+  // function that nesting hands back the half-built `result` instead of null in
+  // loft releases before the fix, so an undecodable file read as an empty image.
+  if self.format != Format.TextFile {
+    return null;
   }
+  result = Image { };
+  if !load_png(self.path, result) {
+    return null;
+  }
+  result
 }

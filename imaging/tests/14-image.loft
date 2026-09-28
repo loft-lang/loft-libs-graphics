@@ -30,13 +30,14 @@
 // Iterate with a for loop to scan every pixel.
 // ## Error Handling
 //
-// `png()` returns null when the file does not exist or cannot be decoded.
-// Always check `!img` or `img == null` before accessing fields.
+// `png()` answers `Image?` — null when the file does not exist or cannot be
+// decoded — so discharge it (`?? Image { }`, or test `== null`) before reading
+// a field.
 use imaging;
 
 fn main() {
   // ## Loading an Image
-  img = file("map.png").png();
+  img = file("map.png").png() ?? Image { };
   assert(img.width == 256, "width={img.width}");
   assert(img.height == 256, "height={img.height}");
   assert(img.name == "map.png", "name={img.name}");
