@@ -15,7 +15,7 @@
 // and where a span ends are all conventions a caller can only get from a call
 // site.  The `gl_*` half needs a window and has no CI demonstrator; it is a
 // recorded coverage gap rather than a tag against a test that cannot run.
-use graphics;
+use graphics::*;
 
 // The PNG IHDR colour-type byte sits at offset 25: 8 signature bytes, a 4-byte
 // chunk length, "IHDR", width, height, then one bit-depth byte.  2 = RGB,

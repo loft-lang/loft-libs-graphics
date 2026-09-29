@@ -12,7 +12,7 @@
 // answers MEAN: `png()` answers `Image?`, `data` is one flat vector with
 // an addressing rule written nowhere in its type, the decoder throws away a
 // channel the file had, and `limit(0, 255)` is not a clamp.
-use imaging;
+use imaging::*;
 
 // @IMG-001 — `png()` answers a WHOLE image or null, never a partial one.  The
 // three ways to have nothing to decode — no such path, a directory, bytes that

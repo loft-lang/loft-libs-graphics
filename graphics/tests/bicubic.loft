@@ -16,7 +16,7 @@
 // ⚠ The first case is the one the corpus actually walks, and it is an
 // ENLARGEMENT: bicubic has negative lobes, so it overshoots the source's range.
 // A resampler that clamps that away passes a smoothness eyeball and fails here.
-use graphics;
+use graphics::*;
 
 fn from_rgba(fr: const vector<integer>, fw: integer, fh: integer) -> graphics::Canvas {
   c = graphics::canvas(fw, fh, 0);

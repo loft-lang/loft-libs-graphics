@@ -5,8 +5,8 @@
 // hand.  Premultiplied throughout: `over` is `src + dst*(1-a)` with `src` already
 // multiplied, because straight alpha darkens an anti-aliased edge under linear
 // filtering and this stack is made of overlapping soft-edged sprites.
-use stage;
-use graphics;
+use stage::*;
+use graphics::*;
 
 // Classify a canvas by EXACT colour, dryopea's RENDERER.md R0 technique: a
 // byte-diff says *different*, a classification says *what*.  `other` must read 0.

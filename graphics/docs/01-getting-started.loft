@@ -16,7 +16,7 @@
 //
 // Everything below is the software canvas, which needs no window and no display — the same
 // half the package's own CI can run.
-use graphics;
+use graphics::*;
 
 fn main() {
   // A canvas is a width, a height and a fill colour.

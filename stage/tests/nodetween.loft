@@ -11,8 +11,8 @@
 // over 800 000 us sampled every 100 000 us is exactly 8 px per frame, and every
 // progress `k/8` is exact in binary.  A hand path that reached for `lerp` or
 // `ease` would be comparing the tween against itself.
-use stage;
-use graphics;
+use stage::*;
+use graphics::*;
 
 const DUR  = 800000;     // us
 const STEP = 100000;     // us — eight frames

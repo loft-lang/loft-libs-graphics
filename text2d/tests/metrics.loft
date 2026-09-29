@@ -9,7 +9,7 @@
 // Both halves of its shape are findings rather than preferences, and both are
 // gated below: two runs are needed to know whether the resolved face is even
 // fixed-pitch, and the advance has to be sub-pixel or the error accumulates.
-use text2d;
+use text2d::*;
 
 // A 16 px DejaVu Sans Mono advances 9.6 px — the real case that motivated this.
 // Ten of them measure 96.0.

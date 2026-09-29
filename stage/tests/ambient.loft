@@ -6,8 +6,8 @@
 // The phase comes from POSITION and the animation from one clock, so five hundred
 // swaying tufts are a buffer uploaded once and a uniform that changes.  Everything
 // below asserts that property rather than describing it.
-use stage;
-use graphics;
+use stage::*;
+use graphics::*;
 
 fn grass(x: float, sway: float) -> stage::Place {
   stage::Place { pl_x: x, pl_y: 10.0, pl_w: 2.0, pl_h: 6.0, pl_sway: sway,

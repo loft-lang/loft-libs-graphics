@@ -32,8 +32,8 @@
 // surface below them mirrors the OpenGL calls it wraps, and `stage` is the
 // retained scene that drives either half.
 
-use mesh3d;
-use glb;
+use mesh3d::*;
+use glb::*;
 
 // RGBA color packed as a single integer: 0xAARRGGBB.
 // Alpha: 255 = fully opaque, 0 = fully transparent.

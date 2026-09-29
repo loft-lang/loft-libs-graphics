@@ -50,8 +50,8 @@
 // P6 several views over the one scene, L1-L3 light and atmosphere.  Each section
 // header below says what its own group is for.
 
-use graphics;
-use tween;
+use graphics::*;
+use tween::*;
 
 // A node's local placement, plus the world affine `compose` derives for it.
 //

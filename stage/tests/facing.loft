@@ -9,7 +9,7 @@
 // an atlas cell for doing it; side-on cannot rotate a standing sprite into
 // another facing, so it picks from an (action, facing) table and mirrors at
 // most, and a facing change mid-walk must not snap the legs back to frame 0.
-use stage;
+use stage::*;
 
 EPS = 0.000001;
 fn near(a: float, b: float) -> boolean { a - b < EPS and b - a < EPS }

@@ -10,7 +10,7 @@
 // measured.  The hand-computed table below therefore uses the BUILT-IN face —
 // the one target whose measurement is knowable here — and the property gate
 // runs the same invariant over several different metrics.
-use text2d;
+use text2d::*;
 
 fn joined(v: const vector<text>) -> text {
   out = "";

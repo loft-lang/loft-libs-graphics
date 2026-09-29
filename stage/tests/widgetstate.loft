@@ -11,7 +11,7 @@
 // take coordinates and read no device, which is the constraint @PLN144 `A4` was
 // built under.  (The KEY half is the `input` package's `input_tick_from_state`,
 // cleared by `D0b`.)
-use stage;
+use stage::*;
 
 const MOVE = 0;
 const DOWN = 1;

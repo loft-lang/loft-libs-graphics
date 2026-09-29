@@ -12,7 +12,7 @@
 // can see none of it.  What a caller gets wrong is which BOUNDARY the predicates
 // draw, what the depth numbers do NOT say, and how far a circle test differs from
 // the box test it looks like.
-use shapes;
+use shapes::*;
 
 // @SHP-001 — every overlap predicate here is STRICT: shapes that TOUCH do not
 // overlap.  `rects_overlap` compares `a.rx < b.rx + b.rw` (not `<=`),

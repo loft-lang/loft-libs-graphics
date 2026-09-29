@@ -3,7 +3,7 @@
 // Tests for the shapes library — pure-geometry collision detection.
 // Drawing tests (bordered_rect / diamond / etc.) live in the
 // graphics library now.
-use shapes;
+use shapes::*;
 
 // ── G4: Collision detection tests ───────────────────────────────────
 

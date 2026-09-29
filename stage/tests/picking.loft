@@ -6,7 +6,7 @@
 // Two things here are not what a rect test gives you, and both are the point: a
 // point over a sprite's HOLE resolves to what is behind it, and a release goes to
 // the node that took the PRESS wherever the pointer has drifted to.
-use stage;
+use stage::*;
 
 fn solid(x: float, y: float, w: float, h: float) -> stage::Place {
   stage::Place { pl_x: x, pl_y: y, pl_w: w, pl_h: h }

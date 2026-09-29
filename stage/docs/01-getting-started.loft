@@ -16,7 +16,7 @@
 //
 // Everything below is pure computation over the tree, so this guide needs no
 // window and no display, exactly like the package's own suite.
-use stage;
+use stage::*;
 
 EPS = 0.0001;
 

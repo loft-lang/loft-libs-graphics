@@ -8,8 +8,8 @@
 // slices BYTES, so a caret kept as a byte offset puts that trap inside the edit
 // loop.  Every index here is a character count, and the gates say so in text
 // where the two differ.
-use stage;
-use graphics;
+use stage::*;
+use graphics::*;
 
 const NOMOD = 0;
 const SHIFT = 1;      // graphics::MOD_SHIFT

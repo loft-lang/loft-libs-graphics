@@ -7,8 +7,8 @@
 // shared, the PRESENTATION is local and free.  Two players may look at one scene
 // from two cameras through two viewports, and neither may perturb the other —
 // not its pixels, not its picking, and not the single instance upload they share.
-use stage;
-use graphics;
+use stage::*;
+use graphics::*;
 
 EPS = 0.000001;
 fn near(a: float, b: float) -> boolean { a - b < EPS and b - a < EPS }

@@ -12,7 +12,7 @@
 // finds the font because it joins `source_dir()` explicitly.
 #cwd
 
-use graphics;
+use graphics::*;
 
 fn main() {
   f = graphics::gl_load_font("LiberationSansNarrow-Bold.ttf");

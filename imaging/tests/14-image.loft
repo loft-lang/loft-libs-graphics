@@ -33,7 +33,7 @@
 // `png()` answers `Image?` — null when the file does not exist or cannot be
 // decoded — so discharge it (`?? Image { }`, or test `== null`) before reading
 // a field.
-use imaging;
+use imaging::*;
 
 fn main() {
   // ## Loading an Image

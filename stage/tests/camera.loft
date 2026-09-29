@@ -6,8 +6,8 @@
 // Riding left and right across a world is a camera pan; a background that lags is
 // the same pan at a smaller factor.  Flat scrolling is every factor at 1.0, and
 // that is proved here as a degenerate case rather than maintained as a second path.
-use stage;
-use graphics;
+use stage::*;
+use graphics::*;
 
 fn shot(st: const stage::Stage) -> graphics::Canvas {
   cv = graphics::canvas(64, 32, 0xff000000);

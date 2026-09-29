@@ -1,6 +1,6 @@
 [package]
 name = "imaging"
-version = "0.4.0"
+version = "0.4.1"
 loft = ">=0.8"
 api_compatible_with  = "0.4.0"   # DECLARED BREAK: `png()` answers `Image?`.  It always
                                  # answered null on a missing or undecodable file; the

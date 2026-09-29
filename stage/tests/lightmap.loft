@@ -11,8 +11,8 @@
 // is not a gate anyone maintains, so these read the falloff from the SAME symbol
 // the renderer and the shader use.  What is hand-computed is the floor, the
 // ceiling and the shape — monotonic, bounded, and never under its floor.
-use stage;
-use graphics;
+use stage::*;
+use graphics::*;
 
 EPS = 0.000001;
 fn near(a: float, b: float) -> boolean { a - b < EPS and b - a < EPS }

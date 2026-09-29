@@ -16,7 +16,7 @@
 // and this tool does not: a redraw loop belongs to an editor, not to a gate.
 #cwd
 
-use drawing;
+use drawing::*;
 
 fn main() {
   args = arguments();

@@ -8,7 +8,7 @@
 // dyadic — `quad_in(½) = ¼` is exact in binary and any tolerance there would
 // hide a real error.  The rest go through `cos`, `sqrt` or `pow`, so they are
 // asserted to within 1e-15 and the test says so rather than pretending.
-use tween;
+use tween::*;
 
 fn close(a: float, b: float) -> boolean {
     abs(a - b) < 0.000000000000001

@@ -7,8 +7,8 @@
 // footprint, with mobs, workers and a player as sprites that must sort correctly
 // against them.  A sprite standing in front of a wall covers it; one standing
 // behind it does not; and neither may flicker between frames.
-use stage;
-use graphics;
+use stage::*;
+use graphics::*;
 
 fn at(depth: float, layer: integer, colour: integer) -> stage::Place {
   stage::Place { pl_w: 8.0, pl_h: 8.0, pl_depth: depth, pl_layer: layer,

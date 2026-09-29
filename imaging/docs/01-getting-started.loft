@@ -28,7 +28,7 @@
 // ships beside its tests, reached from `docs/`. In your own program the path is
 // just the path: `file("sprites.png").png()`. (Add `#cwd` above the `use` line
 // if you would rather have paths resolve against the working directory.)
-use imaging;
+use imaging::*;
 
 fn main() {
   loaded = file("../tests/map.png").png();

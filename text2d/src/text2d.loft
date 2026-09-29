@@ -14,8 +14,8 @@
 // This is a FALLBACK, and the word is load-bearing: its job is that text is never
 // invisible, not that it is beautiful.  A real typeface arrives through the asset
 // pack (@PLN146 F5/F6).
-use graphics;
-use face;
+use graphics::*;
+pub use face::*;
 
 // Where the glyph for `code` starts in `face_rows`, or -1 if there is none.
 // Lowercase folds to uppercase — see the note in `face.loft`.

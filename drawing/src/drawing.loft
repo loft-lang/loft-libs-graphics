@@ -42,9 +42,9 @@
 // per-point `@N` taper), and smooth points (`~`).  `grad=` / `radial=` fills and
 // the `Petals` / `Fronds` arrays parse and are listed in `Sketch.deferred` — they
 // are recognised, and a caller can see they were not drawn.
-use graphics;
-use raster;
-use scan;
+use graphics::*;
+pub use raster::*;
+pub use scan::*;
 
 /// The supersample factor the corpus is drawn at.  Not adjustable: every golden
 /// in the corpus carries it, and a scene rendered at any other factor is a

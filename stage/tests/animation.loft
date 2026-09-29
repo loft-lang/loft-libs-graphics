@@ -5,7 +5,7 @@
 // three cells that matter are the ones that are wrong in most implementations:
 // a loop that returns to 0 EXACTLY, two frame rates agreeing, and a ping-pong that
 // does not stutter at its ends.
-use stage;
+use stage::*;
 
 fn walker(st: stage::Stage, seq: integer) -> integer {
   st.node_add(-1, stage::Place { pl_w: 8.0, pl_h: 8.0, pl_seq: seq, pl_cols: 4 })

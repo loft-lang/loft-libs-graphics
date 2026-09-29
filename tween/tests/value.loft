@@ -8,7 +8,7 @@
 // obvious way (float seconds, or the other spelling of a linear
 // interpolation) and asserts that it DISAGREES.  Without those, a green run
 // here would only prove that this file agrees with itself.
-use tween;
+use tween::*;
 
 // 3 000 000 base units per second — `fixstep`'s unit, and the divisor that
 // makes 24, 25, 30, 50, 60 and 120 Hz all whole numbers.
