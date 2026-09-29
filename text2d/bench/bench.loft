@@ -18,8 +18,8 @@
 // repetition's input differs in VALUE, never in the amount of work — a colour, an origin,
 // a rotated key list, a letter shift — so no backend can hoist the op out of the loop, and
 // each timed loop folds its result into a `sink` the last line carries.
-use graphics;
-use text2d;
+use graphics::*;
+use text2d::*;
 
 /// One measured routine.
 struct Row {

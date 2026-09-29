@@ -8,8 +8,8 @@
 // on the line, `Circle` is tried before `Poly`, and a line that matches nothing
 // is reported rather than dropped.  These pin the parts of that a renderer can
 // get wrong without the picture obviously breaking.
-use drawing;
-use graphics;
+use drawing::*;
+use graphics::*;
 
 fn source() -> text {
   `

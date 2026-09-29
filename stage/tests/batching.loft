@@ -8,7 +8,7 @@
 // picture; a stride or offset off by one fails as garbage geometry rather than as
 // an error.  So every expected value below is hand-computed, and the interleave
 // case asserts the COST rather than hiding it.
-use stage;
+use stage::*;
 
 EPS = 0.0001;
 fn near(a: single, b: float) -> boolean {

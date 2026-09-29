@@ -5,7 +5,7 @@
 // without a GL window (gl_next_event / gl_event_* touch only the event queue,
 // not GL), so this validates the loft<->native binding, constant exports, and
 // return marshalling on both interpreter and --native — no display needed.
-use graphics;
+use graphics::*;
 
 fn main() {
   // With no input, the queue is empty: next_event returns EV_NONE and the

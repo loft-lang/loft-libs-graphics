@@ -17,7 +17,7 @@
 // Each repetition's input differs in VALUE, never in the amount of work — a sample offset
 // or a start value moved by `r & 1` — so no backend can hoist the op out of the loop, and
 // each timed loop folds its result into a `sink` the last line carries.
-use tween;
+use tween::*;
 
 /// One measured routine.
 struct Row {

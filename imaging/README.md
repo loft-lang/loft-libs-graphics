@@ -14,12 +14,15 @@ loft install imaging
 ## Surface
 
 - `Image` / `Pixel` types.
-- `file(path).png() -> Image` — decode.  Answers a COMPLETE image or `null`;
-  there is no half-filled `Image`.  Every PNG colour type loads (RGBA,
-  greyscale, grey+alpha, palette, 16-bit), folded to 8-bit RGB — **alpha is
-  discarded**.
-- `img.save_png(path) -> boolean` — encode as 8-bit RGB.  `Image.name` is not
-  used; the path argument decides where it lands.
+- `file(path).png() -> Image?` — decode.  Answers a COMPLETE image or `null`
+  (a missing file, a directory, or bytes that do not decode) — there is no
+  half-filled `Image`, and the `?` says to discharge it before use
+  (`?? Image { }`, or an `if img == null` check).  Every PNG colour type loads
+  (RGBA, greyscale, grey+alpha, palette, 16-bit) as 8-bit RGBA; **alpha is
+  carried**, and a source without an alpha channel arrives opaque (`a == 255`).
+- `img.save_png(path) -> boolean` — encode.  Writes RGB when every texel is
+  opaque and RGBA otherwise.  `Image.name` is not used; the path argument
+  decides where it lands.
 - `px.value() -> integer` — the pixel packed as `0xRRGGBB`.
 
 `Image.data` is one flat, row-major `vector<Pixel>`: the pixel at (x, y) is

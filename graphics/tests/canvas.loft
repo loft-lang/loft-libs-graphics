@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Jurjen Stellingwerff
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Tests for the graphics library canvas and pixel operations.
-use graphics;
+use graphics::*;
 
 fn test_rgba_pack_unpack() {
   c = graphics::rgba(255, 128, 0, 200);

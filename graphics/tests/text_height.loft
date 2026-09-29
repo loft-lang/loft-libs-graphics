@@ -3,7 +3,7 @@
 // `size * 1.2` approximation baked into loft_text_height.  Paired with
 // gl_font_ascent — a font's line height is sensibly larger than its ascent and
 // scales with the requested size.
-use graphics;
+use graphics::*;
 
 fn test_text_height_uses_real_metrics() {
   f = graphics::gl_load_font("examples/DejaVuSans-Bold.ttf");

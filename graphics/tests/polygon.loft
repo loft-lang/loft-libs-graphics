@@ -8,7 +8,7 @@
 // through.  And a triangle drawn through the polygon path must be pixel-identical
 // to `fill_triangle` — the primitive that already shipped — because two fills
 // that disagree about a triangle are two different rasterisers.
-use graphics;
+use graphics::*;
 
 fn filled(fc: const graphics::Canvas) -> integer {
   n = 0;

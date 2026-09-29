@@ -7,7 +7,7 @@
 // `fixstep`'s `Timer` throws its overshoot away on purpose — a one-shot's
 // residue means nothing afterwards.  A chain's residue means everything, and
 // the control below computes what throwing it away would have cost.
-use tween;
+use tween::*;
 
 const SECOND = 3000000;
 const LINK   = 210000;    // 0.07 s — chosen because no ordinary frame divides it

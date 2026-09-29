@@ -28,13 +28,16 @@
 // ships beside its tests, reached from `docs/`. In your own program the path is
 // just the path: `file("sprites.png").png()`. (Add `#cwd` above the `use` line
 // if you would rather have paths resolve against the working directory.)
-use imaging;
+use imaging::*;
 
 fn main() {
-  img = file("../tests/map.png").png();
-  // `png()` answers null when there is nothing to decode. Past that check the
-  // image is COMPLETE — there is no half-filled `Image` to guard against.
-  assert(img, "map.png should decode");
+  loaded = file("../tests/map.png").png();
+  // `png()` answers `Image?`: null when there is nothing to decode, so the result
+  // is discharged before a field is read — here after checking it, with
+  // `?? Image { }`. Past that check the image is COMPLETE — there is no
+  // half-filled `Image` to guard against.
+  assert(loaded, "map.png should decode");
+  img = loaded ?? Image { };
   println("{img.name} is {img.width}x{img.height}, {len(img.data)} pixels");
   assert(len(img.data) == img.width * img.height, "the vector is the whole image");
 
@@ -60,8 +63,9 @@ fn main() {
 // two-dimensional index — the arithmetic is the interface.
 
 fn addressing() {
-  img = file("../tests/map.png").png();
-  assert(img, "map.png should decode");
+  loaded = file("../tests/map.png").png();
+  assert(loaded, "map.png should decode");
+  img = loaded ?? Image { };
 
   // The centre pixel of a 256x256 image.
   centre = img.data[128 * img.width + 128];
@@ -94,8 +98,9 @@ fn addressing() {
 // uses, so a decoded image hands over to a canvas without a per-channel loop.
 
 fn channels() {
-  img = file("../tests/map.png").png();
-  assert(img, "map.png should decode");
+  loaded = file("../tests/map.png").png();
+  assert(loaded, "map.png should decode");
+  img = loaded ?? Image { };
 
   first = img.data[0];
   assert(first, "the first pixel is in range");
@@ -142,8 +147,9 @@ fn round_trip() {
   scratch = "../tests/_tmp_guide_swatch.png";
   assert(swatch.save_png(scratch), "save_png reports success");
 
-  reloaded = file(scratch).png();
-  assert(reloaded, "the file we just wrote decodes");
+  back = file(scratch).png();
+  assert(back, "the file we just wrote decodes");
+  reloaded = back ?? Image { };
   assert(reloaded.width == 2 && reloaded.height == 2, "dimensions survive the round trip");
   assert(reloaded.data[0].r == 255 && reloaded.data[0].g == 0 && reloaded.data[0].b == 0,
          "and so does the red pixel");
@@ -158,26 +164,21 @@ fn round_trip() {
 //     img.data[i] = imaging::Pixel { r: 0, g: 0, b: 0 };   // yes
 //     img.data[i].r = 0;                                    // not a thing
 //
-// And `limit(0, 255)` is a RANGE, not a clamp. A channel built outside it stores
-// **0** rather than saturating at 255 — so the obvious way to brighten an image
-// turns its brightest pixels black, which looks like a decoding bug and is not.
-// Clamp the value yourself before you build the pixel.
+// And `limit(0, 255)` is a RANGE, not a clamp. A channel built from a value
+// that may not fit — `bright.r * 2` can reach 510 — is REFUSED at compile time
+// (`cannot implicitly narrow integer to integer(0, 255)`), so you say what an
+// unfitting value becomes. `?? 255` is the saturating brighten: a value that fits
+// is kept, one that does not becomes 255. (`min(…, 255)` is not accepted as that
+// proof; the fallback is the spelling the compiler reads.)
 
 fn the_surprise() {
   bright = imaging::Pixel { r: 200, g: 100, b: 50 };
 
-  // Doubling without a clamp: 400 is outside the range, so it stores 0.
-  doubled = imaging::Pixel { r: bright.r * 2, g: bright.g * 2, b: bright.b * 2 };
-  assert(doubled.r == 0, "400 is out of range and stores 0, not 255");
-  assert(doubled.g == 200 && doubled.b == 100, "the channels that stayed in range are fine");
-
-  // The cure is one `min` at the call site.
-  safe = imaging::Pixel {
-    r: min(bright.r * 2, 255),
-    g: min(bright.g * 2, 255),
-    b: min(bright.b * 2, 255)
-  };
-  assert(safe.r == 255, "clamped before the pixel is built");
+  // Doubling, saying what an out-of-range channel becomes: 400 does not fit and
+  // becomes 255; 200 and 100 fit and are kept.
+  doubled = imaging::Pixel { r: bright.r * 2 ?? 255, g: bright.g * 2 ?? 255, b: bright.b * 2 ?? 255 };
+  assert(doubled.r == 255, "400 is out of range and saturates to 255");
+  assert(doubled.g == 200 && doubled.b == 100, "the channels that stayed in range are kept");
 }
 
 // ## Where to go next

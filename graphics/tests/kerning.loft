@@ -2,7 +2,7 @@
 // Before the fix, `gl_measure_text("AV")` == `measure("A")+measure("V")`
 // exactly (no kern table consulted in measure_text / rasterize_text); A–V is
 // a textbook negative-kern pair, so the kerned measure must be strictly less.
-use graphics;
+use graphics::*;
 
 fn test_kerning_pair_narrows_measure() {
   // #255: the path is program-relative (resolved against THIS test file's dir),

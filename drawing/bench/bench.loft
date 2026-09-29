@@ -20,11 +20,11 @@
 // style, the same canvas in every lane, so a hash that differs is a real disagreement.
 // Each timed loop folds something of its result into `sink`, which the row carries, so no
 // backend can drop the work as unused.
-use brush;
-use drawing;
-use graphics;
-use noise;
-use raster;
+use brush::*;
+use drawing::*;
+use graphics::*;
+use noise::*;
+use raster::*;
 
 /// One measured routine.
 struct Row {

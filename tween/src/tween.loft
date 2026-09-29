@@ -98,7 +98,7 @@
 //
 // **No vector, colour or transform tween.**  Those are N tweens sharing one
 // clock, and N of these is already that.
-use easing;
+pub use easing::*;
 
 // A linear interpolation that lands EXACTLY on both endpoints.
 //

@@ -14,9 +14,9 @@
 // entry file has been loaded and pulled it in.  Reversed, the CI gate
 // (`loft --interpret --tests tests`) fails with "Library 'raster' not found" while
 // `loft test` — which sets up the package context first — passes.
-use graphics;
-use drawing;
-use raster;
+use graphics::*;
+use drawing::*;
+use raster::*;
 
 const N = 16;
 

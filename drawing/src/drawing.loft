@@ -44,11 +44,11 @@
 // `Fronds` array, and the brush stroke — `Brush` defines a footprint, `Lock` drags
 // it as a lock of hair ([brush.loft](brush.loft)).  `Petals` parses and is listed
 // in `Sketch.deferred` — recognised, and a caller can see it was not drawn.
-use brush;
-use graphics;
-use noise;
-use raster;
-use scan;
+use brush::*;
+use graphics::*;
+use noise::*;
+pub use raster::*;
+pub use scan::*;
 
 /// The supersample factor the corpus is drawn at.  Not adjustable: every golden
 /// in the corpus carries it, and a scene rendered at any other factor is a

@@ -12,7 +12,7 @@
 // SHAPE of a correct one: which work-list to ask for, which cells to emit geometry
 // for, and which of its answers stay valid across an edit.
 
-use gridmesh;
+use gridmesh::*;
 
 // Is `target` one of the cell indices in `v`?
 fn wex_has(v: vector<integer>, target: integer) -> boolean {

@@ -9,8 +9,8 @@
 // pre-baked digits 0-9 and one texture per level numeral.  A sheet is written once
 // and a new string only re-lays-out quads over it.  `atlas_writes` counts sheet
 // changes, which is exactly what a GL consumer uploads on.
-use text2d;
-use graphics;
+use text2d::*;
+use graphics::*;
 
 fn ink(cv: const graphics::Canvas, colour: integer) -> integer {
   n = 0;

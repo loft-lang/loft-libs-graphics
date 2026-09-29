@@ -14,7 +14,7 @@
 // gitignored.  Each test re-creates its tmp file, so leftover
 // artefacts from a previous run are harmless.
 
-use imaging;
+use imaging::*;
 
 // Construct a deterministic w×h image where pixel (x,y) carries a
 // known colour pattern.  Shared by the round-trip tests.
@@ -22,7 +22,7 @@ fn make_test_image(name: text, w: integer, h: integer) -> Image {
   img = Image { name: name, width: w, height: h, data: [] };
   for mty in 0..h {
     for mtx in 0..w {
-      img.data += [Pixel{r: mtx % 256, g: mty % 256, b: (mtx + mty) % 256}];
+      img.data += [Pixel{r: mtx & 255, g: mty & 255, b: (mtx + mty) & 255}];
     }
   }
   img
@@ -55,7 +55,7 @@ fn test_save_load_roundtrip_small() {
   orig = make_test_image("rt4.png", 4, 4);
   ok = orig.save_png("_tmp_rt4.png");
   assert(ok, "save_png returned true");
-  loaded = file("_tmp_rt4.png").png();
+  loaded = file("_tmp_rt4.png").png() ?? Image { };
   assert(loaded.width == 4, "loaded width 4, got {loaded.width}");
   assert(loaded.height == 4, "loaded height 4, got {loaded.height}");
   assert(loaded.data.len() == 16, "loaded pixel count 16, got {loaded.data.len()}");
@@ -72,7 +72,7 @@ fn test_save_load_non_square() {
   orig = make_test_image("rt83.png", 8, 3);
   ok = orig.save_png("_tmp_rt83.png");
   assert(ok, "save 8x3 returned true");
-  loaded = file("_tmp_rt83.png").png();
+  loaded = file("_tmp_rt83.png").png() ?? Image { };
   assert(loaded.width == 8, "width 8, got {loaded.width}");
   assert(loaded.height == 3, "height 3, got {loaded.height}");
   assert(loaded.data.len() == 24, "24 pixels, got {loaded.data.len()}");
@@ -87,7 +87,7 @@ fn test_extreme_pixel_values() {
   img.data += [Pixel{r: 0,   g: 255, b: 0}];
   ok = img.save_png("_tmp_extremes.png");
   assert(ok, "save extremes returned true");
-  loaded = file("_tmp_extremes.png").png();
+  loaded = file("_tmp_extremes.png").png() ?? Image { };
   assert(loaded.data.len() == 4, "4 pixels, got {loaded.data.len()}");
   p0 = loaded.data[0] ?? Pixel{r: 1, g: 1, b: 1};
   p1 = loaded.data[1] ?? Pixel{r: 0, g: 0, b: 0};
@@ -107,7 +107,7 @@ fn test_solid_color_image() {
   }
   ok = img.save_png("_tmp_solid.png");
   assert(ok, "save solid returned true");
-  loaded = file("_tmp_solid.png").png();
+  loaded = file("_tmp_solid.png").png() ?? Image { };
   assert(loaded.data.len() == 25, "25 pixels, got {loaded.data.len()}");
   for sli in 0..25 {
     p = loaded.data[sli] ?? Pixel{r: 0, g: 0, b: 0};
@@ -122,12 +122,12 @@ fn test_pixel_index_addressing() {
   img = Image { name: "addr.png", width: 3, height: 2, data: [] };
   for pay in 0..2 {
     for pax in 0..3 {
-      img.data += [Pixel{r: pax * 10, g: pay * 10, b: 0}];
+      img.data += [Pixel{r: (pax * 10)?, g: (pay * 10)?, b: 0}];
     }
   }
   ok = img.save_png("_tmp_addr.png");
   assert(ok, "save addr returned true");
-  loaded = file("_tmp_addr.png").png();
+  loaded = file("_tmp_addr.png").png() ?? Image { };
   // (2, 1) is at y * width + x = 1 * 3 + 2 = 5
   p = loaded.data[5] ?? Pixel{r: 0, g: 0, b: 0};
   assert(p.r == 20 && p.g == 10,
@@ -157,13 +157,15 @@ fn test_save_bad_path_returns_false() {
 // claim; the colour type it round-trips THROUGH is what keeps every existing
 // consumer's output the size it was.
 fn test_save_picks_its_colour_type_from_the_pixels() {
-  src = file("fixture-rgba.png").png();
-  assert(src != null, "fixture decodes");
+  src_file = file("fixture-rgba.png").png();
+  assert(src_file != null, "fixture decodes");
+  src = src_file ?? Image { };
 
   // Any alpha below 255 -> RGBA, and the alpha survives the round trip.
   assert(src.save_png("/tmp/imaging_rt_alpha.png"), "save with alpha");
-  back = file("/tmp/imaging_rt_alpha.png").png();
-  assert(back != null, "reload");
+  back_file = file("/tmp/imaging_rt_alpha.png").png();
+  assert(back_file != null, "reload");
+  back = back_file ?? Image { };
   assert(len(back.data) == len(src.data), "same pixel count");
   b2 = back.data[2]?;
   assert(b2.a == 0, "the transparent texel is still transparent after a round trip");
@@ -173,11 +175,12 @@ fn test_save_picks_its_colour_type_from_the_pixels() {
   // Every texel opaque -> RGB, which is byte-for-byte what this wrote before
   // alpha existed.  Measured as a SIZE: an RGBA file of four pixels is larger.
   op: vector<Pixel> = [];
-  for i in 0..4 { op += [Pixel{r: 10 * i, g: 20, b: 30}]; }
+  for i in 0..4 { op += [Pixel{r: (10 * i)?, g: 20, b: 30}]; }
   solid = Image{name: "solid", width: 2, height: 2, data: op};
   assert(solid.save_png("/tmp/imaging_rt_opaque.png"), "save all-opaque");
-  reread = file("/tmp/imaging_rt_opaque.png").png();
-  assert(reread != null, "reload opaque");
+  reread_file = file("/tmp/imaging_rt_opaque.png").png();
+  assert(reread_file != null, "reload opaque");
+  reread = reread_file ?? Image { };
   r0 = reread.data[0]?;
   r3 = reread.data[3]?;
   assert(r0.a == 255 && r3.a == 255, "an RGB file reads back opaque");

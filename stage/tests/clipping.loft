@@ -6,8 +6,8 @@
 // Every count below is hand-computed from the rectangles, and the classification
 // checks the `other` bucket is 0 — a pixel of a third colour would mean the clip
 // half-applied, which a total count alone would hide.
-use stage;
-use graphics;
+use stage::*;
+use graphics::*;
 
 fn count_of(cv: const graphics::Canvas, want: integer) -> integer {
   n = 0;

@@ -7,8 +7,8 @@
 // exist and are compared exactly, pixel for pixel, rather than one being swapped
 // in and eyeballed.  A software `Canvas` is the comparison surface because it is
 // headless and deterministic — no window, no driver, no timing.
-use stage;
-use graphics;
+use stage::*;
+use graphics::*;
 
 fn canvas_equal(a: const graphics::Canvas, b: const graphics::Canvas) -> boolean {
   if a.width != b.width or a.height != b.height { return false; }

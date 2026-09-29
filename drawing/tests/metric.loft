@@ -8,7 +8,7 @@
 // report is a wire format two tools have to agree on, so the strings are pinned
 // rather than described.  The scene is the one @PLN146's `w5.sh` runs, at a size
 // small enough that no test here draws anything.
-use drawing;
+use drawing::*;
 
 fn source() -> text {
   `

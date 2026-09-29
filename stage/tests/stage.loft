@@ -8,7 +8,7 @@
 // entries checks a convention while comparing transformed points checks the
 // thing a renderer needs.  Every expected value below is worked out by hand and
 // written as a literal; agreement between two runs of the same code is not a pass.
-use stage;
+use stage::*;
 
 EPS = 0.0001;
 

@@ -33,9 +33,9 @@
 //
 // Written in the same portable style as its oracle: flat integer buffers,
 // explicit loops.
-use graphics;
-use imaging;
-use noise;
+use graphics::*;
+use imaging::*;
+use noise::*;
 
 /// A footprint: `bw` columns across the stroke, `bh` rows along it, packed
 /// 0xAARRGGBB, tiled every `period` canvas px along the stroke.  Column 0 lands on

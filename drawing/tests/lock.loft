@@ -12,8 +12,8 @@
 // `tools/lock_probe.py` measurements made here on the same scenes: a lock is
 // narrower where it grows than in its body, brighter on top than underneath,
 // splits into its `tips`, and paints over the lock behind it.
-use drawing;
-use graphics;
+use drawing::*;
+use graphics::*;
 
 const HEX_DIGITS = "0123456789abcdef";
 

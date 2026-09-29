@@ -3,8 +3,8 @@
 // High-level renderer — scene-driven PBR with shadows.
 // One call to render_frame() handles shadow pass, color pass, and buffer swap.
 // Design: doc/claude/RENDERER.md
-use graphics;
-use mesh3d;
+use graphics::*;
+use mesh3d::*;
 
 // ── Built-in shaders ─────────────────────────────────────────────────────
 

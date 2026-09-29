@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Tests for save_scene_glb — scene-level GLB 2.0 export.
 // Run with: cargo run --bin loft -- --lib lib/graphics/src --tests lib/graphics/tests/scene_glb.loft
-use mesh3d;
-use glb;
+use mesh3d::*;
+use glb::*;
 
 // Verify save_scene_glb produces a non-empty file for a single-mesh scene.
 fn test_scene_glb_creates_file() {

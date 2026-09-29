@@ -20,7 +20,7 @@
 // shifted by a whole chunk, a rotated choice of dirty chunks, a salt on the coordinates.
 // Each timed loop folds something of its result into `sink`, so no backend can drop the
 // work as unused.
-use gridmesh;
+use gridmesh::*;
 
 /// One measured routine.
 struct Row {

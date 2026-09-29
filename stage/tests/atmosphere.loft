@@ -6,8 +6,8 @@
 // A layer already carries a parallax factor (P2).  Give it a fog colour, a
 // density and a blur radius, and *distant, hazy, out-of-focus* becomes LAYER
 // DATA rather than an effects pipeline.
-use stage;
-use graphics;
+use stage::*;
+use graphics::*;
 
 EPS = 0.000001;
 fn near(a: float, b: float) -> boolean { a - b < EPS and b - a < EPS }

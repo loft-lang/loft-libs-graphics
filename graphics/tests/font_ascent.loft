@@ -2,7 +2,7 @@
 // callers can baseline-align mixed-size text.  Before the fix there was no
 // ascent accessor at all (only a hardcoded `size * 0.8` approximation inside
 // rasterize_text).  gl_font_ascent reads fontdue's horizontal_line_metrics.
-use graphics;
+use graphics::*;
 
 fn test_font_ascent_is_positive_and_scales() {
   // #255: the path is program-relative (resolved against THIS test file's dir),

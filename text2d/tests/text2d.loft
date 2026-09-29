@@ -7,8 +7,8 @@
 // `dryopea/src/hud.loft` draws its digits as RECTANGLES and `picker.loft` shipped
 // with no labels, both because the only text path needed all three.  Every
 // assertion below runs under plain `loft test`.
-use text2d;
-use graphics;
+use text2d::*;
+use graphics::*;
 
 fn ink(cv: const graphics::Canvas, colour: integer) -> integer {
   n = 0;

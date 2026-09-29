@@ -20,7 +20,7 @@
 // and no backend can hoist an op out of the repetition loop.  Each op's result is folded
 // into `sink`, printed on the last line.  Only the raster routines are measured; the GL,
 // window and PNG functions sit behind the native crate and are not the language's work.
-use graphics;
+use graphics::*;
 
 /// One measured routine.
 struct Row {

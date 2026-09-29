@@ -13,7 +13,7 @@
 // The eight cases exercise the axes that break a resampler: the oracle's exact 3x
 // downscale, non-integer ratios, a non-square image, a single-pixel axis, a
 // degenerate 3x1 output, and an UPSCALE (where the filter must not widen).
-use graphics;
+use graphics::*;
 
 fn from_rgba(fr: const vector<integer>, fw: integer, fh: integer) -> graphics::Canvas {
   c = graphics::canvas(fw, fh, 0);

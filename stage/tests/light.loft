@@ -7,8 +7,8 @@
 // A5's tint attribute, so it costs no pass, needs no framebuffer, and cannot
 // disturb draw order.  L2 is only worth its pass when light must fall ACROSS the
 // scene rather than across the sprites.
-use stage;
-use graphics;
+use stage::*;
+use graphics::*;
 
 EPS = 0.000001;
 fn near(a: float, b: float) -> boolean { a - b < EPS and b - a < EPS }

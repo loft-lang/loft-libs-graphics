@@ -31,7 +31,7 @@
 // on both backends.
 //
 // Ported from Pillow 10.2.0, `src/libImaging/Draw.c` + `src/_imaging.c`.
-use graphics;
+use graphics::*;
 
 /// A point in canvas pixels, before Pillow truncates it to a whole pixel.
 ///

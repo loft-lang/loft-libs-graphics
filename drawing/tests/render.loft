@@ -9,8 +9,8 @@
 // expected bytes below are `draw.py`'s own output for this source, so this test
 // is the corpus gate in miniature: it needs no Python to run, and it fails the
 // moment any stage of the pipeline stops agreeing.
-use drawing;
-use graphics;
+use drawing::*;
+use graphics::*;
 
 const HEX_DIGITS = "0123456789abcdef";
 
