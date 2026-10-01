@@ -85,7 +85,6 @@ pub fn line_height(scale: integer) -> integer { face::GLYPH_H * scale }
 pub fn write_text(cv: graphics::Canvas, s: text, x: integer, y: integer,
                  colour: integer, scale: integer) -> integer {
   sc = if scale < 1 { 1 } else { scale };
-  rows = face::face_rows();
   pen = x;
   for ch in s {
     blit_glyph(cv, ch as integer, pen, y, colour, sc);
