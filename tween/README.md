@@ -64,8 +64,8 @@ home. The two compose without importing each other, and a tween animates a value
 just as happily as one on a screen.
 
 ```loft
-use tween;
-use fixstep;
+use tween::*;
+use fixstep::*;
 
 fade = tween_new(0.0, 1.0, clock_units_from_seconds(0.25), Curve.Cubic, Shape.Out);
 
@@ -92,9 +92,8 @@ inout(t) = in(2t)/2  ·  1 − in(2 − 2t)/2
 
 Eleven definitions cover thirty-three combinations, and every one of them is exact at both
 ends because the clamp sits *underneath* the reflections. ⚠ In front of them is not the same
-thing — the first cut clamped the entry point instead, and an in-out at exactly its midpoint
-asks the raw curve for `in(1)`, which is the value that misses. It answered
-`0.5000000000000001`.
+thing: with the clamp at the entry point, an in-out at exactly its midpoint asks the raw
+curve for `in(1)`, which is the value that misses, and answers `0.5000000000000001`.
 
 ⚠ **`Back` and `Elastic` leave `[0, 1]` on purpose** — they overshoot and come back, so
 clamping the *result* of an ease undoes the effect you asked for. Their in-out variants are
@@ -145,7 +144,13 @@ loft test              # the interpreter
 loft test --native     # and the compiled backend — both are gated
 ```
 
-Twenty tests over three files, and the ones that matter are each paired with a **control that
-computes the alternative and asserts it disagrees** — float seconds really do part at the two
-rates, the other interpolation spelling really does miss, and a discarding chain really does
-take 50 frames where this one takes 42. A gate that only agrees with itself proves nothing.
+Twenty tests over three files (beside the worked examples), and the ones that matter are each
+paired with a **control that computes the alternative and asserts it disagrees** — float
+seconds really do part at the two rates, the other interpolation spelling really does miss, and
+a discarding chain really does take 50 frames where this one takes 42. A gate that only agrees
+with itself proves nothing.
+
+A guide, [docs/01-getting-started.loft](docs/01-getting-started.loft), and the worked
+examples, [tests/worked-examples.loft](tests/worked-examples.loft) — `@TWN-001` integer time
+and the leftover, `@TWN-002` the `lerp` spelling that hits the end, `@TWN-003` the exact
+endpoints and the meant overshoot.
