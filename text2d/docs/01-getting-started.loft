@@ -121,6 +121,6 @@ fn a_label_that_changes() {
 
 // ## Where to go next
 //
-// - `tests/worked-examples.loft` — `@T2D-001` … `@T2D-003`: what is measured is what is drawn,
+// - `tests/worked-examples.loft` — `@TXD-001` … `@TXD-003`: what is measured is what is drawn,
 //   text is cut by characters, and a changing label costs no write.
 // - `graphics` — the `Canvas` this draws on, and its `draw_text` for a real font under GL.

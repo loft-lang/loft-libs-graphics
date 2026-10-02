@@ -38,8 +38,8 @@ as a redefinition of it.
 
 A guide: [docs/01-getting-started.loft](docs/01-getting-started.loft). The contracts a
 signature cannot state are running tests in
-[tests/worked-examples.loft](tests/worked-examples.loft) — `@T2D-001` what is measured is
-what is drawn, `@T2D-002` text is cut by characters, `@T2D-003` a changing label costs no
+[tests/worked-examples.loft](tests/worked-examples.loft) — `@TXD-001` what is measured is
+what is drawn, `@TXD-002` text is cut by characters, `@TXD-003` a changing label costs no
 sheet write.
 
 ## Measuring a real font — the metrics seam

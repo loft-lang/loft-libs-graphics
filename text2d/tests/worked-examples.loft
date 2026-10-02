@@ -3,11 +3,11 @@
 //
 // Worked examples for `text2d` (@PLN141): each `test_*` is a running demonstration of a
 // contract the signatures cannot state, cited from the function it explains with
-// `// Example: @T2D-00N`.
+// `// Example: @TXD-00N`.
 use graphics::*;
 use text2d::*;
 
-// @T2D-001 — what is measured is what is drawn.  `text_width` is the INK extent: n glyphs of 5
+// @TXD-001 — what is measured is what is drawn.  `text_width` is the INK extent: n glyphs of 5
 // with a gap after all but the last, so "HI" is 11 at scale 1 and 22 at scale 2, and it is
 // exactly what `write_text` answers — an empty string included (0), and a scale below 1, which
 // draws at 1 and measures at 1.  `Metrics.width` is the ADVANCE extent, what a box is reserved
@@ -21,7 +21,7 @@ fn test_measured_is_drawn() {
   assert(metrics_builtin(1).width("HI") == text_width("HI", 1) + 1, "the advance extent has the trailing gap");
 }
 
-// @T2D-002 — text is cut by CHARACTERS.  `len` counts characters and `s[a..b]` slices bytes, so
+// @TXD-002 — text is cut by CHARACTERS.  `len` counts characters and `s[a..b]` slices bytes, so
 // a count applied as a byte range keeps fewer characters than it measured, and only in text
 // that is not ASCII: "héllo"[0..5] is "héll".  `take_chars` takes characters, and `fit_text`
 // cuts with it, leaving room for its ".." marker.
@@ -34,7 +34,7 @@ fn test_text_is_cut_by_characters() {
   assert(m.fit_text("ÉCOLE", 30) == "ÉCOLE", "a string that fits comes back untouched");
 }
 
-// @T2D-003 — a changing label costs no sheet write.  The atlas rasterises a glyph the first
+// @TXD-003 — a changing label costs no sheet write.  The atlas rasterises a glyph the first
 // time it meets it and never again, so `atlas_writes` — what a GL consumer uploads on — stops
 // at the number of distinct glyphs however much text goes through.  A full sheet REFUSES: the
 // quad carries cell -1 and draws nothing, rather than another glyph's pixels.
