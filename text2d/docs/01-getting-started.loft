@@ -1,0 +1,126 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// @NAME: Getting Started
+// @TITLE: Draw text onto a canvas with no font file, measure it, wrap it in a box, and keep a label cheap.
+//
+// `text2d` draws text with a built-in 5×7 face carried as data, so text appears even where
+// there is no GL context, no native rasteriser and no font file — under `loft test`, on a
+// server rendering a PNG. It also turns the measurements of a REAL font into the answers a
+// layout needs (does it fit, where does the line break, where does it start), and keeps a
+// glyph sheet so a label that changes every frame costs no new texture.
+//
+// The face is a fallback: its job is that text is never invisible, not that it is beautiful.
+use graphics::*;
+use text2d::*;
+
+fn main() {
+  cv = canvas(64, 16, 0);
+  drawn = write_text(cv, "SCORE 42", 1, 1, 0xFFFFFFFF, 1);
+  println("drawn {drawn} px wide, measured {text_width("SCORE 42", 1)}");
+  assert(drawn == 47 && drawn == text_width("SCORE 42", 1), "8 cells of 6, less the last gap");
+  lit = 0;
+  for y in 0..16 { for x in 0..64 { if cv.get_pixel(x, y) != 0 { lit += 1; } } }
+  assert(lit > 0, "and it is on the canvas");
+
+  // Every section below is a function, and `main` calls each one: a section nothing calls
+  // still compiles, but its assertions never run.
+  centre_in_a_box();
+  measure_a_real_font();
+  wrap_and_align();
+  a_label_that_changes();
+}
+
+// That prints:
+//
+//     drawn 47 px wide, measured 47
+//
+// `write_text` answers the width it drew, and `text_width` measures the same number without
+// drawing — so a caller can lay out first and draw after, and be right. Lowercase folds to
+// uppercase, and a character the face does not have draws as a blank of the same width, so a
+// string never changes length because one glyph was missing.
+//
+// ## Centre in a box
+//
+// `write_centred(canvas, s, bx, by, bw, bh, colour, scale)` is the commonest thing a HUD wants.
+// `scale` multiplies every pixel; `line_height(scale)` is one line's height.
+
+fn centre_in_a_box() {
+  cv = canvas(40, 20, 0);
+  _ = write_centred(cv, "I", 0, 0, 40, 20, 0xFFFFFFFF, 1);
+  left = 99;
+  top = 99;
+  for y in 0..20 {
+    for x in 0..40 {
+      if cv.get_pixel(x, y) != 0 {
+        if x < left { left = x; }
+        if y < top { top = y; }
+      }
+    }
+  }
+  // The cell starts at (40 - 5) / 2 = 17 and (20 - 7) / 2 = 6; the "I" inks from column 1.
+  assert(left == 18 && top == 6, "centred to the pixel");
+  println("centred : ink from ({left}, {top})");
+}
+
+// ## Measure a real font
+//
+// This package cannot measure a real typeface itself — that needs the GL backend. So the
+// consumer measures TWO runs once at startup, `n` copies of a wide character and `n` of a
+// narrow one, and hands them to `metrics_measured`. Two, because one cannot tell whether the
+// face is fixed-pitch: a font asked for as monospace can resolve to a proportional fallback.
+// The advance is kept in 1/64 px, because a whole-pixel advance is wrong per CHARACTER and the
+// error adds up along a line. `metrics_builtin(scale)` answers the same questions for the
+// built-in face.
+
+fn measure_a_real_font() {
+  // Sixty M's measured 576 px and sixty i's too: a fixed-pitch face advancing 9.6 px.
+  m = metrics_measured(576.0, 576.0, 60, 19);
+  assert(m.is_mono() && m.advance64() == 614, "9.6 px is 614/64");
+  assert(m.width("ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGH") == 576, "and 60 of them are 576 again");
+  // A whole-pixel advance of 9 would have said 540: 36 px short, and a fit check believing it.
+  assert(m.fits("TWENTY CHARACTERS OK", 192) && !m.fits("TWENTY CHARACTERS OK!", 192), "20 fit in 192, 21 do not");
+  // Too long: 60 px holds six advances of 10, four characters and the ".." marker.
+  assert(m.fit_text("A LONG LABEL", 60) == "A LO..", "cut by characters, with a marker");
+  println("metrics : {m.advance()} px advance, mono {m.is_mono()}");
+}
+
+// ## Wrap and align
+//
+// `wrap(s, px)` breaks greedily on measured advances and answers the lines; `align_x(line, bx,
+// bw, align)` says where each one starts, for `ALIGN_LEFT`, `ALIGN_CENTRE` or `ALIGN_RIGHT`.
+// A line always takes at least one character, so wrapping ends even in a box narrower than a
+// glyph; and a line wider than its box starts AT the box under every alignment, because
+// overflow to the left would lose the start of the text.
+
+fn wrap_and_align() {
+  m = metrics_builtin(1);
+  lines = m.wrap("HELLO WORLD", 30);
+  assert(len(lines) == 2 && lines[0] == "HELLO" && lines[1] == "WORLD", "one word a line in 30 px");
+  assert(m.align_x("HI", 0, 30, ALIGN_CENTRE) == 9 && m.align_x("HI", 0, 30, ALIGN_RIGHT) == 18, "12 px of advance in 30");
+  assert(m.align_x("HELLO WORLD", 5, 30, ALIGN_RIGHT) == 5, "too wide: it starts at the box");
+  println("wrap    : {lines}");
+}
+
+// ## A label that changes
+//
+// Baking a texture per string means a score that ticks uploads a texture every frame. An
+// `Atlas` is a glyph sheet written once per DISTINCT glyph: `layout` answers one `Quad` per
+// character over it, and `atlas_writes()` — what a GL consumer uploads on — stops rising once
+// every glyph has been met. `draw_quads` blits the quads onto a canvas.
+
+fn a_label_that_changes() {
+  at = atlas_new(1, 16);
+  cv = canvas(64, 16, 0);
+  for frame in 0..100 {
+    quads = at.layout("{frame}", 0, 0);
+    draw_quads(cv, at, quads, 0xFFFFFFFF);
+  }
+  assert(at.atlas_writes() == 10, "a hundred labels, ten glyphs, ten writes");
+  println("atlas   : {at.atlas_writes()} writes for 100 labels");
+}
+
+// ## Where to go next
+//
+// - `tests/worked-examples.loft` — `@T2D-001` … `@T2D-003`: what is measured is what is drawn,
+//   text is cut by characters, and a changing label costs no write.
+// - `graphics` — the `Canvas` this draws on, and its `draw_text` for a real font under GL.

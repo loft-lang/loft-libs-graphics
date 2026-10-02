@@ -33,8 +33,14 @@ A face baked in as data needs none of the three.
   `ALIGN_LEFT` / `ALIGN_CENTRE` / `ALIGN_RIGHT` · `take_chars(s, n)`
 
 ⚠ `write_text`, not `draw_text`: `graphics` has a `draw_text` **method** on `Canvas`, and a
-method spelling outranks a library's free function of the same name (loft#940). A distinct
-verb costs nothing and is reachable.
+name has one body per receiver type, so a free `draw_text(canvas, …)` here would be refused
+as a redefinition of it.
+
+A guide: [docs/01-getting-started.loft](docs/01-getting-started.loft). The contracts a
+signature cannot state are running tests in
+[tests/worked-examples.loft](tests/worked-examples.loft) — `@T2D-001` what is measured is
+what is drawn, `@T2D-002` text is cut by characters, `@T2D-003` a changing label costs no
+sheet write.
 
 ## Measuring a real font — the metrics seam
 
@@ -128,8 +134,9 @@ never invisible, not that it is beautiful. A real typeface arrives through the a
 - **Lowercase folds to uppercase.** It renders rather than vanishing.
 - **An unknown character reserves its width**, so a string never changes length because one
   glyph was missing.
-- `text_width` is exact — *n* glyphs of 5 with a 1-pixel gap after all but the last — so a
-  caller can centre with it and be right.
+- `text_width` is exact — *n* glyphs of 5 with a 1-pixel gap after all but the last, 0 for
+  an empty string — and is what `write_text` answers, so a caller can centre with it and be
+  right.  A `scale` below 1 draws, and measures, at 1.
 
 ## Provenance
 
