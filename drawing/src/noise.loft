@@ -1,0 +1,48 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// noise — the seeded, reproducible randomness a `.draw` scene is defined by.
+//
+// `Fronds` scatters its array with THIS hash and `Lock` splits its tips with it,
+// and a scene is a picture only because the hash is fixed: swap in a PRNG and
+// every jittered frond and every spike moves.  It has its own module because two
+// modules need it — `drawing` (the arrays) and `brush` (the footprint and the
+// lock) — and a module cannot import the module that imports it.  The public
+// names stay `drawing::hash01` / `drawing::lowfreq`; those forward here.
+
+pub const PI = 3.141592653589793;
+
+/// A reproducible pseudo-random float in [-1, 1) from three small non-negative
+/// integers.
+///
+/// ⚠ NOT a PRNG, and deliberately not the `random` package. `draw.py` says so in
+/// its own docstring — *"never random()/hash() (those break reproducible
+/// renders)"* — and the corpus is defined by THIS hash: swap in PCG-64 and every
+/// jittered frond moves, so the substitution fails the gate it was meant to help
+/// pass.
+///
+/// Three details are load-bearing. The masking is 32-bit throughout, and the
+/// widest product it forms (`0xFFFFFFFF * 1274126177`) is 5.47e18 — inside i64 by
+/// a hair, so this needs no widening but has none to spare. And the final divide
+/// is a REAL division: `x / 0xFFFFFFFF` in integer arithmetic is 0 for every input
+/// and would give a perfectly smooth, entirely wrong field.
+/// @FR-Seed-Hash
+pub fn seed_hash(hseed: integer, hidx: integer, hsalt: integer) -> float {
+  hx = ((hseed * 73856093) ^ (hidx * 19349663) ^ (hsalt * 83492791)) & 0xFFFFFFFF;
+  hx = (hx ^ (hx >> 13)) & 0xFFFFFFFF;
+  hx = (hx * 1274126177) & 0xFFFFFFFF;
+  ((hx as float) / 4294967295.0 ?? 0.0) * 2.0 - 1.0
+}
+
+/// A smooth low-frequency wave over [0,1], two harmonics with seed-derived phases.
+///
+/// Smooth in `u` is the point: neighbouring fronds see nearby values, so they
+/// CLUMP and leave gaps. White noise would scatter them evenly, which reads as
+/// man-made — the opposite of what this is for.  Periodic in `u`, which is what
+/// lets a brush footprint tile along a stroke without a seam.
+/// @FR-Seed-NonUniform — the field an array clumps on.
+pub fn seed_wave(lseed: integer, lu: float) -> float {
+  lp1 = seed_hash(lseed, 0, 11) * PI;
+  lp2 = seed_hash(lseed, 0, 22) * PI;
+  0.6 * sin(2.0 * PI * lu + lp1) + 0.4 * sin(4.0 * PI * lu + lp2)
+}

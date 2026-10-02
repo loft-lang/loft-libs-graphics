@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Jurjen Stellingwerff
 // SPDX-License-Identifier: LGPL-3.0-or-later
 //
-// raster — Pillow's polygon and thick-line rasteriser, reproduced exactly.
+// raster — Pillow's polygon and thick-line rasteriser, reproduced exactly (@FR-Raster-Pillow).
 //
 // ── ⚠ WHY THIS IS NOT `graphics::fill_polygon` ──────────────────────
 //

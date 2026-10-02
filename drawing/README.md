@@ -87,7 +87,9 @@ resolution-independent and `size` is the only place a pixel count appears.
 | `Line (x,y)[@w] - (x,y)[@w] [w=N]` | one segment |
 | `Circle (cx,cy) r=R [n=N] [flat=F] [<fill>]` | a round mark, `n` segments (28), squashed by `flat` |
 | `Poly (x,y)[~][@w] … [w=N] [stroke=R,G,B] [<fill>]` | the workhorse: filled if it names a fill, a pen stroke if it does not |
-| `Fronds (x,y)-(x,y) n=N len=L …` | a seeded array of tapered strokes along a segment |
+| `Fronds (x,y)-(x,y) n=N len=L [len2= w= w2= ang= ang2= mirror= jitter= field= fray= bow= seed= depth= sub= stroke=]` | a seeded, non-uniform array of tapered strokes rooted along a spine |
+| `Brush <name> hair [w=12] [period=48] [seed=1] [gap=0.35]` · `Brush <name> file=<png> [period=]` | a footprint for `Lock`: the built-in split-bristle image, or an authored PNG (rows along the stroke, columns across) |
+| `Lock (x,y)[~] … [brush=] [w0=2] [w=10] [swell=0.3] [body=0.8] [tips=3] [tipvar=0.35] [spread=8] [seed=1] [rgb=] [dark=] [lit=] [light=x,y,z] [alpha=1] [flip=1]` | one lock of hair or tuft of fur: the brush dragged root→tip, pinched at `w0`, swelling to `w`, ending in `tips` spikes of uneven length; shaded `dark` underneath, `rgb` on the crest, `lit` toward the light; painted OVER what is beneath, so lay locks back to front |
 | `landmark <name> = <value>` · `check …` | a named value, and a fact about element boxes that `eval_checks` measures |
 | `# …` | a comment, and a searchable note |
 
@@ -106,26 +108,47 @@ A point may carry `~` (it curves — the tangent is half the neighbour chord, so
 between two corners stays exactly straight) and `@N` (the pen width AT that point, which
 makes a stroke taper).
 
+## The brush
+
+A `Lock` is the one mark that is not a filled shape: an IMAGE is dragged along the path.
+The footprint's columns map across the stroke, stretched to the local width, its rows along
+it, tiled every `period` px; the built-in `hair` footprint is channels of bristles with a
+share of thin strands that fade in and out, so a drag lays broken parallel streaks and a
+frayed silhouette. The stroke is built in its own layer — each pixel keeps the sample from
+the centreline it is closest to across, so the body and its spikes join without a seam — and
+composited over the canvas once, so a lock covers the locks laid before it. Across the width
+it is shaded as a half-cylinder against `light=`: `dark` on the underside, `rgb` on the
+crest, `lit` on the flank facing the light. `dark=` is a colour, not a factor, because the
+shadow of white hair is blue in some styles. The construction is
+[src/brush.loft](src/brush.loft); its bytes are `draw.py`'s, pinned by `tests/lock.loft`.
+The rules it enforces are named in crawler's `formal/draw.md` and cited from the code
+as `@FR-…`.
+
 ## What this release does not draw
 
 The `Petals` array mark. It **parses** — so it cannot be misread as something else — and is
 listed in `Sketch.deferred` with the line it came from. A caller therefore knows the picture
-is short of a mark instead of finding out by eye. The `Lock` and `Brush` hair marks are not in
-this release at all, and land in `Sketch.unparsed`.
+is short of a mark instead of finding out by eye.
 
 A line that no command accepts at all is different, and lands in `Sketch.unparsed`: a
 typo'd mark has to read as a syntax problem, not as a geometry one.
 
 ## Surface
 
-- `parse_scene(src) -> Sketch` · `render(sk) -> graphics::Canvas` ·
+- `parse_scene(src) -> Sketch` · `parse_scene_at(src, base_dir) -> Sketch` (what a
+  `Brush … file=` path is relative to) · `render(sk) -> graphics::Canvas` ·
   `render_file(src_path, out_png) -> Sketch`
 - `eval_checks(sk) -> vector<Check>` · `eval_check(sk, line)` · `scene_ok(sk, results)` ·
   `metric_report(sk, results) -> text` — the metric channel, in the Python renderer's
   `stats.txt` spelling; `Check.` `claim` `ok` `lhs` `rhs` `tol` `err` `report`
 - `Sketch.` `sw` `sh` `transparent` `ops` `elems` `landmarks` `checks` `unparsed` `deferred`
-- `Op.` `kind` (`Sky` / `Fill` / `Stroke`) `pts` `paint` `widths` `w` `color` `color2` —
-  ⚠ `pts` are paper FRACTIONS, never pixels
+  `brushes` `base_dir`
+- `Op.` `kind` (`Sky` / `Fill` / `Stroke` / `Lock`) `pts` `paint` `widths` `w` `color`
+  `color2` `style` `brush` — ⚠ `pts` are paper FRACTIONS, never pixels
+- `brush::` `Brush` · `LockStyle` · `Layer` · `hair_brush` · `load_brush` · `lock_layer` ·
+  `composite_layer` · `scaled` — the brush stroke, a sibling module like `raster` below
+  (`use brush;` after `use drawing;`); `noise::` `seed_hash` · `seed_wave` · `PI` — the
+  seeded hash the corpus is defined by, which `drawing::hash01` / `lowfreq` forward to
 - `Paint.` `pk` (`Stroked` / `Solid` / `Linear` / `Radial`) `c1` `c2` `spec`
 - `Elem.` `ename` `seen` `bx0` `by0` `bx1` `by1` — `seen` is false for an element that was
   named and never drawn, which is an absence rather than a box at the origin
@@ -142,6 +165,79 @@ typo'd mark has to read as a syntax problem, not as a geometry one.
 `graphics` depends on mesh3d, so the collision is a hard error — the same trap
 `graphics::Coord` hit with `Point`.
 
+## Performance — the pass
+
+Every public routine has to **pull its weight**: a benchmark row, and — for the routines
+that define the picture — a **pure-Rust reference** it is judged against, so that "is loft
+fast enough here?" is a measurement and not an opinion. The pass is `bench/`:
+
+| | |
+|---|---|
+| `bench/bench.loft` | every routine on a fixed workload: `name  iters  µs  ns/op  px  ns/px  hash` — the hash is FNV-1a-32 of the output, and a `sink` folds each iteration's result so no backend can drop the work |
+| `bench/bench.rs` | the same workloads with the same arithmetic in the same order, one file built with `rustc -O` exactly as loft's own `bench/` builds its references — plain Rust, no cleverness, the speed an industry implementation reaches without effort |
+| `bench/compare.py` | joins the three lanes (Rust, `loft --native-release`, the interpreter with `LOFT_NO_NATIVE_LIBS=1`), best of 3 for the judged lanes, and FAILS a routine whose hashes disagree or whose native time is over `--bar` (4×). It knows nothing about the routines — any package printing the same rows can use it unchanged |
+
+```sh
+python3 bench/compare.py                    # ~5 min: the interpreter lane is the slow one
+python3 bench/compare.py --skip-interp      # the verdict alone, ~2 min
+```
+
+The hash agreement is the precondition: a row whose lanes disagree is not one algorithm,
+and its speeds are not comparable. **All fourteen rows agree** — including Pillow's
+rasteriser with its f32 crossings, the frond array and the lock — which is also the third
+validation of the algorithms after draw.py and the goldens.
+
+**Measured 2026-09-07** (best of 3, `rustc -O` vs `loft --native-release` with the libraries
+as their auto-built cdylibs, i.e. what a consumer gets; one shared Linux box, so the
+absolute numbers are directional and the ratios are the point):
+
+| routine | Rust ns/op | loft-native ns/op | native / Rust | interp / native |
+|---|---:|---:|---:|---:|
+| `hash` (100 000 `hash01`) | 162,320 | 1,771,660 | **10.9** | 75 |
+| `hair_brush` | 13,260 | 57,200 | **4.3** | 62 |
+| `smooth_pts` (61 pts) | 220 | 57,640 | **262** | 7 |
+| `fronds` (depth 2, 1296 pts) | 43,620 | 2,149,200 | **49** | 6 |
+| `lock_layer` (22 080 px) | 1,032,340 | 30,850,860 | **30** | 38 |
+| `lock_layer` curved (38 250 px) | 779,600 | 26,213,820 | **34** | 20 |
+| `composite_layer` | 63,100 | 1,656,000 | **26** | 61 |
+| `fill_poly` circle (31 497 px) | 34,620 | 594,740 | **17** | 35 |
+| `fill_poly` pentagram | 13,460 | 225,100 | **17** | 34 |
+| `wide_line` | 4,500 | 78,340 | **17** | 38 |
+| `parse_scene` | — | 338,700 | — | 18 |
+| `render` 120×60 lock scene | — | 64,696,320 | — | 50 |
+| `render` 64×64 marks scene | — | 17,788,320 | — | 87 |
+| `resize_lanczos` 768²→256² (`graphics`) | — | 280,735,840 | — | 63 |
+
+The four rows without a Rust figure above had no reference when this table was taken.
+Since 2026-09-17 `bench/bench.rs` ports them too — `parse_scene`, `render` and the Pillow
+resample — so `compare.py` judges all fourteen.  With that day's loft (`--skip-interp`,
+best of 3, every hash agreeing): `parse` 3.7×, `render_lock` 4.1×, `resize` 4.8×,
+`render_marks` 5.8× — the last three over the bar, and the run reports them as failures.
+
+**The verdict is FAIL on every judged routine, and the finding is loft's, not this
+package's.** The algorithms are the same to the byte, and the library boundary is not the
+cause (the brush inlined into one standalone program gives the same numbers). It is the
+generated code: `--native-emit` shows every vector element read or written through the
+store runtime (`vector::get_vector` / `vec_get_or_raise_runtime` + a null-record test — 1
+read and 7 writes per painted pixel), struct scalars re-read per pixel, every float
+comparison expanded to NaN-aware branches, integer arithmetic through sentinel helpers,
+and on every call the hot-reload check and the shadow-stack push (`--native-release` keeps
+both; `--lean` drops the check, not the push). That is the class loft's own
+`PERFORMANCE.md` measures at 18–25× on matrix / sort and names **N1** (collections through
+the store), with **N2/N4** (per-call instrumentation) on top. It is not the optimisation
+level: the emitted Rust rebuilt by hand at `-O` reproduces the number, `opt-level=3` +
+`codegen-units=1` + `target-cpu=native` does not move it, and LTO is impossible because the
+shipped `libloft.rlib` carries no bitcode. Measured: hoisting the scalars, inlining the
+per-pixel call and passing the arrays directly — all hash-preserving — take the `lock` row
+from 30.2 to 27.0 ms; Rust is 1.03.
+The `hash` row loses two-thirds of its time when the callee is inlined: ~7 ns of every
+call is entry instrumentation. Recorded as the open deviation `D-draw-2` in crawler's
+`formal/draw.md` and filed as [loft#1426](https://github.com/loft-lang/loft/issues/1426);
+the pass is the reproduction, and closes the deviation the day every judged routine is
+within the bar. `LOFT_PROFILE=1` on the interpreter lane attributes the brush time to
+`raster_segment`'s per-pixel projection — the algorithm's own hot loop, shared with the
+Rust port — and 84 % of the whole interpreted run to `graphics`' resample.
+
 ## Targets
 
 | target | state |
@@ -152,7 +248,7 @@ typo'd mark has to read as a syntax problem, not as a geometry one.
 | `--html` (browser) | compiles; the render path is pure loft, but see below |
 
 This package is pure loft — no `#native`, no inline `#rust` — so its own code has nothing
-target-specific in it.
+target-specific in it. A `Brush … file=` footprint decodes its PNG through `imaging`.
 
 `--html` emits a page. Everything this package computes — `parse_scene`, `render`, and the
 whole rasteriser — is pure loft and runs there, because `Canvas`, `rgba`, `resize_lanczos`

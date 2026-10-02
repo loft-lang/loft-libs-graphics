@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Jurjen Stellingwerff
 // SPDX-License-Identifier: LGPL-3.0-or-later
 //
+// @FR-Oracle-Golden — the expected bytes in this file are the oracle's own.
 // The whole pipeline, against the picture the oracle actually produced.
 //
 // One 16x16 scene with a fill, a circle, a smooth stroke, a tapered stroke and a
