@@ -110,6 +110,9 @@ void main() {{
 
 // ── Renderer struct ──────────────────────────────────────────────────────
 
+// A window with the 3D renderer's GL state: its size, the PBR and shadow shaders, the
+// shadow-map framebuffer and texture, and the vertex arrays `upload_scene` filled.
+// `create_renderer` makes one.
 pub struct Renderer {
   const width: integer,
   const height: integer,

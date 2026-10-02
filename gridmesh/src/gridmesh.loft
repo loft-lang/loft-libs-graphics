@@ -188,6 +188,9 @@ struct ChunkBucket {
   cell_ixs: vector<integer>,
 }
 
+// A grid of cells partitioned into chunks: the cell coordinates, a coordinate-to-cell
+// index, and the dirty chunks and per-chunk buckets kept up to date as cells are added.
+// `field_new` makes one and `field_add_cell` grows it.
 pub struct ChunkField {
   layout:      integer,                // coordinate layout: 0, odd-row offset — the one there is
   xs:          vector<integer>,        // cell coords (index 0 = oldest)
@@ -408,6 +411,8 @@ pub fn collect_dirty_inputs(f: const ChunkField, halo_k: integer) -> vector<Chun
 // caches a mesh per chunk and assembles a group's VBO from its chunks'
 // cached meshes, re-uploading only groups that contain a dirty chunk.
 
+// One render group: `(gx, gy)` its position in group coordinates (chunk coordinates
+// divided by `group_dim`), `gk` the two encoded as one key.  `group_of` answers it.
 pub struct GroupKey { gk: integer, gx: integer, gy: integer }
 
 // The chunk ck's a group contains that actually hold cells (the assemble
