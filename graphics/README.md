@@ -13,23 +13,25 @@ loft install graphics
 
 ## Surface
 
-### Sub-modules
+### The canvas and the window
 
-- `math` — `Vec2`/`Vec3`/`Vec4` + `Mat4` (`mat4_identity` / `mat4_translate` /
-  `mat4_scale` / `mat4_mul` / `mat4_transform` / `mat4_perspective` /
-  `mat4_look_at` / `mat4_rotate_y` / `mat4_rotate_x` / `mat4_ortho` /
-  `mat4_trs`); vector ops `add3`/`sub3`/`scale3`/`dot3`/`cross`/`length3`/`normalize3`.
-- `mesh` — `Vertex` / `Triangle` / `Mesh` types + builders (`sphere`, mesh-to-floats).
-- `scene` — `Scene` graph with `Node`, `Material`, `Camera`, `Light`.
-- `glb` — glTF 2.0 binary (`.glb`) save (`save_glb`, `save_scene_glb`).
-- `graphics` (entry) — `Canvas` 2D pixel surface with `set_pixel` / `clear` /
+- `Canvas` — a 2-D pixel surface with `set_pixel` / `get_pixel` / `clear` /
   `blend_pixel` / `fill_rect` / `hline` / `vline` / `draw_rect` / `draw_line` /
   `draw_circle` / `fill_circle` / `fill_ellipse` / `draw_ellipse` / `draw_bezier` /
-  `draw_aa_line` / `fill_triangle`; PNG save via `save_png`; OpenGL bindings
-  (`gl_create_window` / `gl_create_fullscreen_window` / shaders / VAOs / textures /
-  FBOs / `gl_draw` / `gl_clear` / `gl_swap_buffers`); sprite sheets (`SpriteSheet` +
-  `draw_sprite`); `Painter2D` for fixed-function 2D draws over GL; SFX helpers
-  (`sfx_beep` / `sfx_chirp` / `sfx_descend`).
+  `draw_aa_line` / `fill_triangle`, the resamplers `resize_lanczos` /
+  `resize_bicubic`, and PNG output via `save_png`.
+- OpenGL bindings (`gl_create_window` / `gl_create_fullscreen_window` / shaders /
+  VAOs / textures / FBOs / `gl_draw` / `gl_clear` / `gl_swap_buffers`); sprite
+  sheets (`SpriteSheet` + `draw_sprite`); `Painter2D` for fixed-function 2D draws
+  over GL.
+
+The 3-D maths, meshes and scenes are the [`mesh3d`](https://github.com/loft-lang/loft-libs-assets/tree/main/mesh3d)
+package and glTF output is [`glb`](https://github.com/loft-lang/loft-libs-assets/tree/main/glb).
+`graphics` depends on both for its own use and does not pass their names on, so
+a program that wants `mat4_identity` or `save_scene_glb` imports them itself:
+`use mesh3d::*;`, `use glb::*;`.
+
+A guide: [docs/01-getting-started.loft](docs/01-getting-started.loft).
 
 ### Audio
 
@@ -115,7 +117,5 @@ tags pointing at a test that cannot exercise them.
 
 ## Provenance
 
-Extracted from the loft monorepo's `lib/graphics/` 2026-05-31 as part of
-[@PLAN12](https://github.com/jjstwerff/loft/blob/main/doc/claude/lib_plans/12-library-extraction/README.md)
-Phase 5b (`loft-libs-graphics` Stage B — Stage A for graphics + imaging,
-then monorepo cleanup).
+Part of the loft-libs-graphics chunk — loft's
+[library extraction plan](https://github.com/loft-lang/loft/blob/main/doc/claude/lib_plans/12-library-extraction/README.md).
