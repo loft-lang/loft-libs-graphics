@@ -176,6 +176,9 @@ pub struct StageLight {
     lt_power: float,         // intensity multiplier; 1.0 is full at the centre
 }
 
+// A 2D scene and everything that drives it: its nodes and masks, the draw order
+// `compose` derives, the views, lights and depth cue it paints with, and its pointer,
+// focus and tween state.  `stage_new` makes an empty one; every other call changes it.
 pub struct Stage {
     st_nodes: vector<StageNode>,
     st_masks: vector<Mask>,
@@ -294,6 +297,7 @@ pub struct Bounds {
     b_y1: float,
 }
 
+// A point in world coordinates, as `world_point` and `world_origin` answer it.
 pub struct P2 {
     p_x: float,
     p_y: float,
@@ -618,6 +622,8 @@ pub struct DrawRect {
     dr_colour: integer,
 }
 
+// One line of text to draw, in the command shape `lavition_ui` takes: the text, its left
+// edge and its TOP, and a packed 0xRRGGBB colour.
 pub struct DrawText {
     dt_text: text,
     dt_x: integer,
@@ -2373,6 +2379,7 @@ pub fn mirrored(self: const Stage, idx: integer) -> boolean {
 // parity rig A2 and A3b rest on — and a sprite is the same size in every view
 // rather than quietly zoomed by a viewport of a different shape.
 
+// How many views the stage paints into: view 0, plus one per `add_view`.
 pub fn view_count(self: const Stage) -> integer { len(self.st_views) }
 
 // Add a view painting into the screen rect `(x, y, w, h)`.  A width of 0 or less
