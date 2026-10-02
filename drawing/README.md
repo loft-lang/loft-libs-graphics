@@ -36,9 +36,8 @@ language can build rather than a build step that needs Python beside it.
 draws, pixel for pixel.** Not approximately. Every sprite in that corpus already looks the
 way it looks; "close enough" means all of them quietly change the first time they are
 re-rendered, and nobody would be able to say which change was intended. So the gate is a
-byte diff against the original renderer over the whole corpus: of the crawler's 36 scenes,
-**34 render with 0 pixels different**, on both backends; the other two use the `Lock` brush,
-which this release does not have and lists in `Sketch.unparsed`.
+byte diff against the original renderer over the whole corpus: **all 36 of the crawler's
+scenes render with 0 pixels different**, on both backends, the two `Lock` scenes included.
 
 Three things fall out of that, and each of them cost a probe to learn.
 
@@ -89,7 +88,7 @@ resolution-independent and `size` is the only place a pixel count appears.
 | `Poly (x,y)[~][@w] … [w=N] [stroke=R,G,B] [<fill>]` | the workhorse: filled if it names a fill, a pen stroke if it does not |
 | `Fronds (x,y)-(x,y) n=N len=L [len2= w= w2= ang= ang2= mirror= jitter= field= fray= bow= seed= depth= sub= stroke=]` | a seeded, non-uniform array of tapered strokes rooted along a spine |
 | `Brush <name> hair [w=12] [period=48] [seed=1] [gap=0.35]` · `Brush <name> file=<png> [period=]` | a footprint for `Lock`: the built-in split-bristle image, or an authored PNG (rows along the stroke, columns across) |
-| `Lock (x,y)[~] … [brush=] [w0=2] [w=10] [swell=0.3] [body=0.8] [tips=3] [tipvar=0.35] [spread=8] [seed=1] [rgb=] [dark=] [lit=] [light=x,y,z] [alpha=1] [flip=1]` | one lock of hair or tuft of fur: the brush dragged root→tip, pinched at `w0`, swelling to `w`, ending in `tips` spikes of uneven length; shaded `dark` underneath, `rgb` on the crest, `lit` toward the light; painted OVER what is beneath, so lay locks back to front |
+| `Lock (x,y)[~] … [brush=] [w0=2] [w=10] [swell=0.3] [body=0.8] [tips=3] [tipvar=0.35] [spread=8] [seed=1] [rgb=] [dark=] [lit=] [light=x,y,z] [alpha=1] [flip=0]` | one lock of hair or tuft of fur: the brush dragged root→tip, pinched at `w0`, swelling to `w`, ending in `tips` spikes of uneven length; shaded `dark` underneath, `rgb` on the crest, `lit` toward the light; painted OVER what is beneath, so lay locks back to front |
 | `landmark <name> = <value>` · `check …` | a named value, and a fact about element boxes that `eval_checks` measures |
 | `# …` | a comment, and a searchable note |
 
@@ -242,8 +241,8 @@ Rust port — and 84 % of the whole interpreted run to `graphics`' resample.
 
 | target | state |
 |---|---|
-| interpreter | ✓ suite green; 34 of the 36 corpus scenes byte-identical |
-| `--native` | ✓ suite green; 34 of the 36 corpus scenes byte-identical |
+| interpreter | ✓ suite green; all 36 corpus scenes byte-identical |
+| `--native` | ✓ suite green; all 36 corpus scenes byte-identical |
 | `--native-wasm` (headless WASI) | ✓ builds; a parse-and-render program answers as the interpreter does |
 | `--html` (browser) | compiles; the render path is pure loft, but see below |
 
