@@ -71,6 +71,24 @@ pub enum PaintKind { Stroked, Solid, Linear, Radial }
 /// `Stroked` is the absence of a fill, not a fill of nothing: it is what sends a
 /// `Poly` down the pen path instead of the polygon path, and the two produce
 /// completely different pictures from the same points.
+pub struct FrondSpec {
+  count: integer = 8,
+  len1: float = 0.1,
+  len2: float = 0.1,
+  wid1: float = 3.0,
+  wid2: float = 3.0,
+  ang1: float = 30.0,
+  ang2: float = 30.0,
+  mirror: boolean = false,
+  jitter: float = 0.5,
+  clump: float = 0.6,
+  fray: float = 0.4,
+  bow: float = 0.0,
+  seed: integer = 1,
+  depth: integer = 1,
+  sub: float = 0.32,
+}
+
 pub struct Paint {
   pk: PaintKind = Stroked,
   c1: integer = 0,
@@ -1566,23 +1584,6 @@ pub struct Frond {
 /// A struct rather than twenty parameters, because the fractal recursion builds a
 /// MODIFIED copy of it — a parameter list that long is one a caller gets wrong in
 /// order, and the recursion is the caller.
-pub struct FrondSpec {
-  count: integer = 8,
-  len1: float = 0.1,
-  len2: float = 0.1,
-  wid1: float = 3.0,
-  wid2: float = 3.0,
-  ang1: float = 30.0,
-  ang2: float = 30.0,
-  mirror: boolean = false,
-  jitter: float = 0.5,
-  clump: float = 0.6,
-  fray: float = 0.4,
-  bow: float = 0.0,
-  seed: integer = 1,
-  depth: integer = 1,
-  sub: float = 0.32,
-}
 
 /// A linear array of tapered strokes rooted along the spine `(x1,y1)-(x2,y2)`.
 /// @FR-Seed-NonUniform
