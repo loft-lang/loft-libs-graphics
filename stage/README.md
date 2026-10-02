@@ -144,8 +144,8 @@ test that ticks exactly that case.
 ⚠ **The instance attribute is a FRAME INDEX, not a uv rect.**  An animating sprite dirties
 **one** float per frame instead of four, which is what keeps *upload only what changed*
 meaningful with a screen full of walking mobs — the packed grid (`cols`, `rows`) is static
-and uploads once.  Deriving the uv from that grid is the shader's job; today the GL path
-draws untextured quads, so the attribute is packed and bound but not yet read.
+and uploads once.  Deriving the uv from that grid is the shader's job; the GL path draws
+untextured quads, so the attribute is packed and bound and no shader reads it.
 
 ## Moving a node — one write switch, two doors
 
@@ -498,6 +498,7 @@ under the first's scissor.
 `@STG-005` a release belongs to the press · `@STG-006` a click falls through a hole ·
 `@STG-007` a clip inherits and intersects ·
 `@STG-008` ambient motion is free and visual only — [tests/worked-examples.loft](tests/worked-examples.loft).
+A guide: [docs/01-getting-started.loft](docs/01-getting-started.loft).
 
 ## Provenance
 
