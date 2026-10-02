@@ -1,0 +1,115 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// @NAME: Getting Started
+// @TITLE: Move a value from one number to another over time, with an easing curve, and chain moves.
+//
+// `tween` is a value that arrives: a `Tween` goes from `from` to `to` over a duration, shaped
+// by one of eleven easing curves, and lands EXACTLY on `to`. A `Track` runs several, one after
+// another or side by side.
+//
+// Time is an INTEGER count of whatever unit your clock already uses — this package never names
+// seconds or a frame rate. It does not draw or set anything either: it answers a number, and
+// writing that number somewhere is yours.
+use tween::*;
+
+fn main() {
+  // A move from 0 to 100 over 1000 units, slow at the end.
+  slide = tween_new(0.0, 100.0, 1000, Curve.Cubic, Shape.Out);
+  _ = slide.advance(500);
+  halfway = slide.value();
+  println("half the time: {halfway}");
+  assert(halfway == 87.5, "Cubic Out has covered 7/8 of the way at half the time");
+  _ = slide.advance(500);
+  println("all the time : {slide.value()}, done {slide.done()}");
+  assert(slide.value() == 100.0 && slide.done(), "and it lands exactly");
+
+  // Every section below is a function, and `main` calls each one: a section nothing calls
+  // still compiles, but its assertions never run.
+  the_leftover_is_handed_back();
+  a_chain_runs_one_after_another();
+  the_curves_and_their_ends();
+  a_delay_and_a_rewind();
+}
+
+// That prints:
+//
+//     half the time: 87.5
+//     all the time : 100, done true
+//
+// ## The leftover is handed back
+//
+// A frame rarely ends exactly where a tween does. `advance` answers the units it did NOT use —
+// zero while it is running, the overshoot once it has finished — and that number is what the
+// next move must already have run for. Dropping it makes a sequence's total length depend on
+// the frame rate.
+
+fn the_leftover_is_handed_back() {
+  blink = tween_new(1.0, 0.0, 300);
+  assert(blink.advance(250) == 0, "still running: nothing left over");
+  left = blink.advance(250);
+  assert(left == 200 && blink.value() == 0.0, "finished 200 units into this step");
+  println("leftover: {left} units past the end");
+}
+
+// ## A chain runs one after another
+//
+// `track_new()` is a `Chain` by default: each link gets the time the previous one did not use,
+// so a frame that crosses from one link into the next runs both for the right amounts.
+// `track_new(Parallel)` gives every link the same time instead. `value_at(i)` reads link `i`.
+
+fn a_chain_runs_one_after_another() {
+  steps = track_new();
+  steps.add(tween_new(0.0, 10.0, 100));
+  steps.add(tween_new(10.0, 30.0, 100));
+  _ = steps.advance(150);
+  assert(steps.active() == 1, "the first link is done, the second is running");
+  assert(steps.value_at(0) == 10.0 && steps.value_at(1) == 20.0, "half way through the second");
+  together = track_new(Parallel);
+  together.add(tween_new(0.0, 1.0, 100));
+  together.add(tween_new(0.0, 1.0, 200));
+  assert(together.advance(250) == 50, "a parallel group ends with its LONGEST link");
+  println("chain   : link {steps.active()} at {steps.value_at(1)}");
+}
+
+// ## The curves, and their ends
+//
+// `Curve` has eleven shapes — `Linear Quad Cubic Quart Quint Sine Expo Circ Back Elastic
+// Bounce` — and `Shape` three directions: `In` (slow start), `Out` (slow end), `InOut` (both).
+// `ease(curve, shape, t)` is the curve on its own, for progress `t` you compute yourself.
+//
+// Every one of the thirty-three is exactly 0 at `t = 0` and exactly 1 at `t = 1`, including
+// the two whose textbook formulas miss (Sine, Expo). And `Back` and `Elastic` go outside 0..1
+// in between on purpose — clamping the result would undo the effect you chose them for.
+
+fn the_curves_and_their_ends() {
+  assert(ease(Curve.Sine, Shape.In, 1.0) == 1.0, "exact at the end");
+  assert(ease(Curve.Expo, Shape.In, 0.0) == 0.0, "exact at the start");
+  dip = ease(Curve.Back, Shape.In, 0.3);
+  assert(dip < 0.0, "Back pulls below 0 before it goes");
+  assert(lerp(10.0, 20.0, 0.25) == 12.5, "lerp is the straight line ease runs along");
+  println("curves  : Back at 0.3 is {dip:.4}");
+}
+
+// ## A delay, and a rewind
+//
+// `delay(units)` waits before starting; during the wait the tween reads `from` and is not
+// done. `rewind()` puts it back at the start, delay and all, to run the same move again.
+
+fn a_delay_and_a_rewind() {
+  pop = tween_new(0.0, 1.0, 100);
+  pop.delay(50);
+  _ = pop.advance(80);
+  assert(pop.value() == 0.3, "50 waited, then 30 of 100 run");
+  _ = pop.advance(100);
+  assert(pop.done(), "finished");
+  pop.rewind();
+  assert(pop.value() == 0.0 && !pop.done(), "back at the start, waiting again");
+  println("delay   : waited, ran, rewound");
+}
+
+// ## Where to go next
+//
+// - `tests/worked-examples.loft` — `@TWN-001` … `@TWN-003`: integer time and the leftover,
+//   the `lerp` spelling that hits the end, and the exact endpoints of every curve.
+// - `fixstep` — a frame clock whose units (`CLOCK_UNITS_PER_SECOND`) feed `advance`, and
+//   `clock_units_from_seconds` to state a duration in seconds.

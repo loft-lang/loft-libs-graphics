@@ -1,0 +1,111 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// @NAME: Getting Started
+// @TITLE: Test whether rectangles and circles overlap, measure by how much, and push one out.
+//
+// `shapes` is 2D collision as plain geometry: an axis-aligned `Rect`, a `Circle`, tests that
+// answer whether two of them overlap, the penetration depth on each axis that a collision
+// response needs, and a `Proxy` — a handful of boxes standing in for a sprite's real outline.
+//
+// It does not draw (that is `graphics`), it keeps no world or broad phase — every test is
+// one pair — and it does not move anything: it answers how far, and the caller moves.
+use shapes::*;
+
+fn main() {
+  player = Rect { rx: 10.0, ry: 10.0, rw: 8.0, rh: 8.0 };
+  wall = Rect { rx: 16.0, ry: 0.0, rw: 4.0, rh: 40.0 };
+  hit = rects_overlap(player, wall);
+  depth = rect_overlap_depth(player, wall);
+  println("overlap : {hit}, depth x {depth.ox}, y {depth.oy}");
+  assert(hit && depth.ox == 2.0 && depth.oy == 18.0, "2 sideways to get out, 18 upwards");
+
+  // Every section below is a function, and `main` calls each one: a section nothing calls
+  // still compiles, but its assertions never run.
+  touching_is_not_overlapping();
+  push_out_along_the_smaller_depth();
+  a_circle_is_not_its_box();
+  a_proxy_hugs_the_outline();
+}
+
+// That prints:
+//
+//     overlap : true, depth x 2, y 18
+//
+// A depth is how far one shape must move along that axis to stop overlapping — 2 to the left
+// to leave the wall's side, 18 up to clear its top — not how much of it is inside.
+//
+// ## The one that bites: touching is not overlapping
+//
+// Every test here is STRICT: two rectangles sharing an edge do not overlap, and neither do
+// tangent circles. That is what lets a row of abutting floor tiles sit quietly under a player,
+// and what lets a mover pushed out by exactly its penetration depth be done — it now touches,
+// and touching is not a hit. A test written with `<=` instead would keep reporting the
+// collision it just resolved.
+
+fn touching_is_not_overlapping() {
+  a = Rect { rx: 0.0, ry: 0.0, rw: 10.0, rh: 10.0 };
+  b = Rect { rx: 10.0, ry: 0.0, rw: 10.0, rh: 10.0 };
+  assert(!rects_overlap(a, b), "sharing the edge at x = 10 is not an overlap");
+  assert(!circles_overlap(Circle { cx: 0.0, cy: 0.0, cr: 5.0 }, Circle { cx: 10.0, cy: 0.0, cr: 5.0 }),
+         "tangent circles do not overlap");
+  assert(!aabb_overlap(0.0, 0.0, 10.0, 10.0, 10.0, 0.0, 10.0, 10.0), "the raw form agrees");
+  println("touch   : a shared edge is not a hit");
+}
+
+// ## Push out along the smaller depth
+//
+// `rect_overlap_depth` answers how far the two interpenetrate on each axis — UNSIGNED, so which
+// way to push is the caller's to work out from the positions. The smaller of the two is the
+// cheapest way out, and pushing by exactly that leaves the shapes touching, which the strict
+// test then reads as resolved. `aabb_depth_x` / `aabb_depth_y` answer the same from raw
+// coordinates, allocating nothing.
+
+fn push_out_along_the_smaller_depth() {
+  player = Rect { rx: 10.0, ry: 10.0, rw: 8.0, rh: 8.0 };
+  wall = Rect { rx: 16.0, ry: 0.0, rw: 4.0, rh: 40.0 };
+  d = rect_overlap_depth(player, wall);
+  assert(d.ox < d.oy, "x is the cheaper way out");
+  // The wall is to the right, so the push is to the left.
+  moved = Rect { rx: player.rx - d.ox, ry: player.ry, rw: player.rw, rh: player.rh };
+  assert(moved.rx == 8.0 && !rects_overlap(moved, wall), "pushed by exactly the depth, now resolved");
+  assert(aabb_depth_x(10.0, 10.0, 8.0, 8.0, 16.0, 0.0, 4.0, 40.0) == 2.0, "the raw form agrees");
+  println("push    : move by the smaller depth, away from the other shape");
+}
+
+// ## A circle is not its bounding box
+//
+// `rect_circle_overlap` is a true circle test: near a rectangle's corner, a circle whose box
+// overlaps the rectangle may not touch it at all. And a circle wholly inside the rectangle
+// counts as overlapping — containment is the deepest overlap there is.
+
+fn a_circle_is_not_its_box() {
+  r = Rect { rx: 0.0, ry: 0.0, rw: 10.0, rh: 10.0 };
+  near_corner = Circle { cx: 13.0, cy: 13.0, cr: 4.0 };
+  assert(!rect_circle_overlap(r, near_corner), "its box overlaps the corner; the circle does not");
+  assert(rect_circle_overlap(r, Circle { cx: 5.0, cy: 5.0, cr: 1.0 }), "inside counts");
+  println("circle  : near a corner the box would lie; the circle test does not");
+}
+
+// ## A proxy hugs the outline
+//
+// One box around a sprite collides with empty corners. A `Proxy` is a few boxes that follow
+// the art — a packer derives them from a sprite's opaque texels — and `proxy_hits` asks whether
+// any of them touches a rectangle, with the same strict boundary. `bounds()` is the one box a
+// proxy replaces, for a cheap first cull, and an EMPTY proxy hits nothing.
+
+fn a_proxy_hugs_the_outline() {
+  // An L-shaped sprite: a tall bar on the left and a foot along the bottom.
+  ell = Proxy { boxes: [Rect { rx: 0.0, ry: 0.0, rw: 4.0, rh: 16.0 }, Rect { rx: 4.0, ry: 12.0, rw: 12.0, rh: 4.0 }] };
+  empty_corner = Rect { rx: 8.0, ry: 2.0, rw: 4.0, rh: 4.0 };
+  assert(rects_overlap(ell.bounds(), empty_corner), "the one-box stand-in collides there");
+  assert(!ell.proxy_hits(empty_corner), "the proxy does not: that corner is empty");
+  assert(ell.proxy_hits(Rect { rx: 10.0, ry: 13.0, rw: 2.0, rh: 2.0 }), "the foot is solid");
+  assert(!Proxy { boxes: [] }.proxy_hits(empty_corner), "an empty proxy hits nothing");
+  println("proxy   : a few boxes that follow the art, not one around it");
+}
+
+// ## Where to go next
+//
+// - `tests/worked-examples.loft` — `@SHP-001` … `@SHP-003`: the strict boundary, what the depth
+//   numbers do and do not say, and the corner where a circle's box lies.
+// - `assets` — where a packer derives a sprite's proxy from its alpha (`cell_proxy`).

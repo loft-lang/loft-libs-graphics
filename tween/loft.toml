@@ -1,6 +1,6 @@
 [package]
 name    = "tween"
-version = "0.1.1"
+version = "0.1.2"
 loft    = ">=2026.10.0"
 repository = "loft-libs-graphics"
 description = "Property tweens in exact integer time — eleven easing curves, chains and groups"

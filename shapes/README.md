@@ -26,6 +26,10 @@ See [src/shapes.loft](src/shapes.loft).  Major primitives:
 - `rect_overlap_depth(a, b) -> Overlap` — unsigned penetration on each axis.
 - `aabb_overlap` / `aabb_depth_x` / `aabb_depth_y` — the same answers from raw
   coordinates, allocating nothing (safe in a hot loop).
+- `Proxy` — a few boxes standing in for a sprite's outline: `proxy_hits`,
+  `proxies_overlap`, `bounds`, `area`, `overshoot`.
+
+A guide: [docs/01-getting-started.loft](docs/01-getting-started.loft).
 
 ## Worked examples
 
@@ -36,6 +40,5 @@ depth numbers do and do not say, `@SHP-003` why a circle is not its bounding box
 
 ## Provenance
 
-Extracted from the loft monorepo's `lib/shapes/` 2026-05-24
-as part of [@PLAN12](https://github.com/jjstwerff/loft/blob/main/doc/claude/lib_plans/12-library-extraction/README.md)
-Phase 5 (loft-libs-graphics chunk).
+Part of the loft-libs-graphics chunk — loft's
+[library extraction plan](https://github.com/loft-lang/loft/blob/main/doc/claude/lib_plans/12-library-extraction/README.md).

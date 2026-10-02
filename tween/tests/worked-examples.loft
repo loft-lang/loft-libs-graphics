@@ -1,0 +1,50 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Worked examples for `tween` (@PLN141): each `test_*` is a running demonstration of a
+// contract the signatures cannot state, cited from the function it explains with
+// `// Example: @TWN-00N`.
+use tween::*;
+
+// @TWN-001 — time is an INTEGER count of your clock's units, and `advance` answers the
+// leftover.  Sixty steps of 50 000 and thirty of 100 000 are both exactly the 3 000 000 a
+// tween of that duration needs, so it lands on `to` at either rate; and the units past its end
+// are handed back, which is what lets a chain run its next link for exactly that long.
+fn test_integer_time_lands_and_hands_back_the_rest() {
+  at60 = tween_new(0.0, 1.0, 3000000);
+  for _i in 0..60 { _ = at60.advance(50000); }
+  at30 = tween_new(0.0, 1.0, 3000000);
+  for _i in 0..30 { _ = at30.advance(100000); }
+  assert(at60.value() == 1.0 && at30.value() == 1.0, "both rates arrive exactly");
+  short = tween_new(0.0, 1.0, 100);
+  assert(short.advance(130) == 30, "30 units past the end are handed back");
+  chain = track_new();
+  chain.add(tween_new(0.0, 1.0, 100));
+  chain.add(tween_new(1.0, 2.0, 100));
+  _ = chain.advance(150);
+  assert(chain.active() == 1 && chain.value_at(1) == 1.5, "the second link ran for the 50 the first left");
+}
+
+// @TWN-002 — `lerp` is `a·(1−t) + b·t`, and the other spelling misses the end.  `a + (b−a)·t`
+// loses `b` inside `b − a` when the two are far apart: from 1e17 to 1.0 it arrives at 0.0.
+fn test_lerp_hits_the_end_the_other_form_misses() {
+  a = 1e17;
+  b = 1.0;
+  assert(lerp(a, b, 1.0) == 1.0, "lerp arrives at b");
+  assert(a + (b - a) * 1.0 == 0.0, "the other spelling arrives at 0");
+  assert(lerp(2.0, 4.0, 0.5) == 3.0, "and in the middle it is the ordinary answer");
+}
+
+// @TWN-003 — every curve is exact at both ends because `ease` never asks the curve there,
+// and `Back` / `Elastic` leave [0, 1] on purpose.  The raw `curve_in(Sine, 1.0)` is
+// 0.9999999999999999 — the hole `ease` closes — and clamping an overshooting curve's result
+// undoes the overshoot it was chosen for.
+fn test_endpoints_are_exact_and_overshoot_is_meant() {
+  for c in [Curve.Linear, Quad, Sine, Expo, Back, Elastic, Bounce] {
+    for s in [Shape.In, Out, InOut] {
+      assert(ease(c, s, 0.0) == 0.0 && ease(c, s, 1.0) == 1.0, "exact ends for every curve and shape");
+    }
+  }
+  assert(curve_in(Sine, 1.0) < 1.0, "the raw curve misses the end");
+  assert(ease(Back, In, 0.3) < 0.0, "Back pulls back below 0 before it goes");
+}

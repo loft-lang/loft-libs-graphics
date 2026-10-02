@@ -1,6 +1,6 @@
 [package]
 name = "stage"
-version = "0.18.5"
+version = "0.18.7"
 
 # ⚠ FIRST published release, so both floors are this release itself — there is no
 # earlier one it could be a drop-in for.  The 0.x numbers below it were used
@@ -13,7 +13,7 @@ description = "A retained 2-D scene for loft: a node tree you mutate, with trans
 categories  = ["graphics", "game"]
 
 [dependencies]
-graphics = ">=0.5.0"
+graphics = ">=0.9.6"
 tween = ">=0.1.0"
 
 [library]
