@@ -1,0 +1,111 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// @NAME: Getting Started
+// @TITLE: Write a sprite as lines of text, render it, see what was not drawn, and measure it.
+//
+// `drawing` renders a `.draw` scene: a picture written as lines of text — a polygon, a circle,
+// a tapered stroke, a gradient — with every coordinate a FRACTION of the paper. Text diffs,
+// reviews, and can be written by something that cannot see; this renders it, pixel for pixel
+// as the Python renderer it replaces does.
+//
+// It parses a scene into a `Sketch`, renders a `Sketch` onto a `graphics::Canvas`, and
+// measures it: named elements get bounding boxes, and `check` lines state facts about those
+// boxes that can be evaluated without looking at the picture.
+use drawing::*;
+use graphics::*;
+
+fn sword() -> text {
+  `size 64x64
+Background transparent
+name blade
+Poly (0.48,0.10) (0.52,0.10) (0.52,0.70) (0.48,0.70) rgb=190,196,206
+name pommel
+Circle (0.50,0.78) r=0.06 rgb=120,90,50
+name guard
+Poly (0.30,0.72)@3 (0.70,0.72)@3 stroke=86,62,38
+check blade.cx ~ 0.5
+check guard.w > blade.w
+`
+}
+
+fn main() {
+  sk = parse_scene(sword());
+  cv = render(sk);
+  println("paper {sk.sw}x{sk.sh}, {len(sk.ops)} marks, canvas {cv.width}x{cv.height}");
+  assert(len(sk.ops) == 3 && cv.width == 64, "three marks on a 64-pixel paper");
+  // The blade runs down the middle; the corner is left transparent.
+  assert(graphics::color_a(cv.get_pixel(32, 20)) == 255, "the blade is inked");
+  assert(graphics::color_a(cv.get_pixel(2, 2)) == 0, "the background is transparent");
+
+  // Every section below is a function, and `main` calls each one: a section nothing calls
+  // still compiles, but its assertions never run.
+  what_was_not_drawn();
+  measure_without_looking();
+  write_a_png();
+}
+
+// That prints:
+//
+//     paper 64x64, 3 marks, canvas 64x64
+//
+// The grammar, in short: `size WxH` is the paper and the only pixel count in a scene;
+// `Background transparent` for a sprite; `Poly` is the workhorse — filled when it names a fill
+// (`rgb=`, `fill=`, `grad=`, `radial=`), a pen stroke when it does not, with `@N` for the pen
+// width at a point and `~` for a point the line curves through; `Circle (cx,cy) r=R`;
+// `Line (x,y) - (x,y)`. The README has the full table.
+//
+// ## What was not drawn
+//
+// A scene that is short of a mark says so. A line no command accepts lands in
+// `Sketch.unparsed` with its line number — a typo must read as a syntax problem, not as a
+// missing shape. A mark this release recognises and does not draw (`Petals`) lands in
+// `Sketch.deferred`.
+
+fn what_was_not_drawn() {
+  sk = parse_scene("size 8x8\nCirlce (0.5,0.5) r=0.2 rgb=1,2,3\nPetals (0.5,0.5) n=6 r=0.1");
+  assert(sk.unparsed == ["line 2: Cirlce (0.5,0.5) r=0.2 rgb=1,2,3"], "the typo, with its line");
+  assert(sk.deferred == ["line 3: Petals"], "recognised, not drawn");
+  println("missing : {len(sk.unparsed)} unparsed, {len(sk.deferred)} deferred");
+}
+
+// ## Measure without looking
+//
+// `name` tags every mark after it with an element name, and each element gets a bounding box
+// in paper fractions (`Elem.bx0 by0 bx1 by1`). A `check` line states a fact about those boxes —
+// `blade.cx ~ 0.5`, `guard.w > blade.w` — and `eval_checks` measures them; `scene_ok` says
+// whether the scene parsed and every check held, and `metric_report` writes it all out the
+// way the Python renderer's `stats.txt` does.
+
+fn measure_without_looking() {
+  sk = parse_scene(sword());
+  results = eval_checks(sk);
+  assert(len(results) == 2 && results[0].ok && results[1].ok, "the blade is centred, the guard is wider");
+  assert(scene_ok(sk, results), "parsed whole, and every check holds");
+  for e in sk.elems {
+    if e.ename == "blade" { assert(e.bx0 == 0.48 && e.bx1 == 0.52, "the blade's box, as written"); }
+  }
+  println("checks  : {len(results)} of {len(results)} hold");
+}
+
+// ## Write a PNG
+//
+// `render_file(source_path, png_path)` parses a `.draw` file, renders it, writes the PNG and
+// answers the `Sketch` — so the caller can still read `unparsed` and run the checks.
+
+fn write_a_png() {
+  src = "guide-sword.draw";
+  out = "guide-sword.png";
+  f = file(src);
+  f.write(sword());
+  sk = render_file(src, out);
+  assert(len(sk.unparsed) == 0 && file(out).size > 0, "drawn and written");
+  println("png     : {out} written");
+  delete(src);
+  delete(out);
+}
+
+// ## Where to go next
+//
+// - `tests/worked-examples.loft` — `@DRW-001` … `@DRW-003`: coordinates are fractions of the
+//   paper, what is not drawn is listed, and a `name` tags every mark after it.
+// - `graphics` — the `Canvas` a scene is rendered onto.

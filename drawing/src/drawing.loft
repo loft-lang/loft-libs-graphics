@@ -37,11 +37,11 @@
 //
 // ── WHAT THIS BUILD DRAWS ───────────────────────────────────────────
 //
-// `size`, `Background`, `name`, `Line`, `Circle`, `Poly`, with solid fills
-// (`rgb=` / `fill=`), coloured strokes (`stroke=`), pen widths (`w=`, and the
-// per-point `@N` taper), and smooth points (`~`).  `grad=` / `radial=` fills and
-// the `Petals` / `Fronds` arrays parse and are listed in `Sketch.deferred` — they
-// are recognised, and a caller can see they were not drawn.
+// `size`, `Background`, `name`, `Line`, `Circle`, `Poly`, `Fronds`, with solid,
+// linear and radial fills (`rgb=` / `fill=` / `grad=` / `radial=`), coloured
+// strokes (`stroke=`), pen widths (`w=`, and the per-point `@N` taper), and smooth
+// points (`~`).  `Petals` parses and is listed in `Sketch.deferred` — recognised,
+// and a caller can see it was not drawn.
 use graphics::*;
 pub use raster::*;
 pub use scan::*;
@@ -131,6 +131,7 @@ pub struct Landmark {
 /// mesh3d, so the collision is a hard error — the same trap `graphics::Coord`
 /// hit with `Point`.  Reach for `Sketch` in `.draw` code and the 3-D names stay
 /// where they belong.
+// Example: @DRW-002
 pub struct Sketch {
   sw: integer = 800,
   sh: integer = 800,
@@ -820,6 +821,7 @@ fn parse_landmark(sc: Sketch, s: text) -> boolean {
 /// tidy — `Circle` is tried before `Poly`, `Line` last of all.  Keep it: a
 /// grammar this loose is defined by the order its alternatives are tried in,
 /// and re-sorting it silently re-reads lines that sit in two alternatives.
+// Example: @DRW-001
 pub fn parse_scene(src: text) -> Sketch {
   sc = Sketch { sw: 800, sh: 800, transparent: false, ops: [], elems: [], landmarks: [],
                checks: [], unparsed: [], deferred: [] };
@@ -1080,6 +1082,7 @@ pub fn eval_check(sk: const Sketch, raw: text) -> Check {
 }
 
 /// Every `check` the scene states, measured.
+// Example: @DRW-003
 pub fn eval_checks(sk: const Sketch) -> vector<Check> {
   ev_out: vector<Check> = [];
   for c in sk.checks { ev_out += [eval_check(sk, c)]; }
