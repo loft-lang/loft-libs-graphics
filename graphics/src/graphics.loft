@@ -451,13 +451,10 @@ pub fn draw_bezier(self: Canvas, bx0: integer, by0: integer, bx1: integer, by1: 
       // Push second half first (so first half is popped next).
       // Truncate-then-append: the stack pointer `bz_top` is always
       // the next free slot; truncating to `bz_top` ensures `+=`
-      // appends at that slot.  The slice allocations are cheap for
-      // the typical sub-32-element bezier subdivision depth.  Uses
-      // a temp local because `v = v[0..n]` (self-slice-assign) is
-      // currently broken — values become null, only the length is
-      // preserved (filed; workaround: temp local).
-      bz_tx = bz_sx[0..bz_top]; bz_sx = bz_tx;
-      bz_ty = bz_sy[0..bz_top]; bz_sy = bz_ty;
+      // appends at that slot.  A vector keeps its own slice in place
+      // (`v = v[0..n]`), so the pop costs no copy.
+      bz_sx = bz_sx[0..bz_top];
+      bz_sy = bz_sy[0..bz_top];
       bz_sx += [bz_mx, bz_m123x, bz_m23x, bz_p3x];
       bz_sy += [bz_my, bz_m123y, bz_m23y, bz_p3y];
       bz_top += 4;
