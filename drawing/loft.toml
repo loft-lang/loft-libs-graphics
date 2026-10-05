@@ -1,7 +1,7 @@
 [package]
 name = "drawing"
-version = "0.4.0"
-loft = ">=2026.10.0"
+version = "0.4.1"
+loft    = ">=2026.10.0"
 repository = "loft-libs-graphics"
 description = "Render a .draw scene — a sprite authored as lines of text — pixel-identically to the Python renderer it replaces"
 categories = ["graphics", "asset-format"]

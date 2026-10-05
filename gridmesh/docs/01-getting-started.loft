@@ -1,0 +1,148 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// @NAME: Getting Started
+// @TITLE: Turn a hex grid into a mesh chunk by chunk, and rebuild only the chunks an edit touched.
+//
+// `gridmesh` is a toolkit for rules that turn a grid of cells into geometry LOCALLY — a wall
+// between two filled cells, a rounded edge, a surface — where each cell's geometry depends only
+// on its near neighbours. It cuts the grid into square chunks, hands you one chunk at a time
+// (the cells it owns, plus the neighbouring cells across its border that it may read), and
+// keeps track of which chunks an edit made stale, so a change to one cell rebuilds one chunk
+// rather than the world.
+//
+// You supply the rule; `gridmesh` supplies the partition, the neighbour lookup, the dirty
+// bookkeeping and a flat segment mesh to emit into. Coordinates are hex OFFSET coordinates:
+// whole rows, every odd row shifted half a cell.
+use gridmesh::*;
+
+// A rule: from every owned cell, one segment to each filled neighbour on its right-hand
+// side (axes 0..2), so every edge is emitted once, by the cell at its left end.
+fn build_chunk(f: const ChunkField, ci: const ChunkInput) -> SegMesh {
+  m = seg_mesh_new();
+  for ix in ci.cell_ixs {
+    x = f.xs[ix] ?? 0;
+    y = f.ys[ix] ?? 0;
+    for d in 0..3 {
+      nx = step_x(x, y, d, 1);
+      ny = step_y(x, y, d, 1);
+      if idx_at(f.cidx, nx, ny) >= 0 {
+        emit_segment(m, 1, x as float, y as float, 0.0, nx as float, ny as float, 0.0, 7, ix);
+      }
+    }
+  }
+  m
+}
+
+fn main() {
+  // Four cells in a row; chunks of 1 << 3 = 8 cells a side; a halo of one cell.
+  xs: vector<integer> = [5, 6, 7, 8];
+  ys: vector<integer> = [0, 0, 0, 0];
+  f = field_new(0, xs, ys, 3, 1);
+  world = seg_mesh_new();
+  for ci in all_inputs(f, 1) {
+    seg_mesh_append(world, build_chunk(f, ci));
+  }
+  println("full build: {seg_len(world)} segments from {len(all_inputs(f, 1))} chunks");
+  assert(seg_len(world) == 3, "5-6, 6-7 and 7-8: the edge across the border once, by its owner");
+
+  // Every section below is a function, and `main` calls each one: a section nothing calls
+  // still compiles, but its assertions never run.
+  owned_and_halo();
+  an_edit_rebuilds_one_chunk();
+  a_border_edit_reaches_the_neighbour();
+  walking_the_grid();
+}
+
+// That prints:
+//
+//     full build: 3 segments from 2 chunks
+//
+// The cell at x = 8 is in the second chunk, and the edge 7-8 is emitted once — by the first
+// chunk, which owns 7. That is the partition doing its job: each cell is owned by exactly one
+// chunk, and a rule that emits only for its OWNED cells never doubles a border.
+//
+// ## Owned cells and halo cells
+//
+// A `ChunkInput` carries two lists that mean opposite things. `cell_ixs` are the cells this
+// chunk owns: emit for these. `halo_ixs` are cells of OTHER chunks within `halo_k` of the
+// border: a rule may read them as context, and must never emit for them.
+
+fn owned_and_halo() {
+  xs: vector<integer> = [5, 6, 7, 8];
+  ys: vector<integer> = [0, 0, 0, 0];
+  f = field_new(0, xs, ys, 3, 1);
+  inputs = all_inputs(f, 1);
+  assert(len(inputs) == 2, "two chunks hold cells");
+  for ci in inputs {
+    if ci.key.cx == 0 {
+      assert(ci.cell_ixs == [0, 1, 2] && ci.halo_ixs == [3], "x 5..7 owned; it can see 8");
+    } else {
+      assert(ci.cell_ixs == [3] && ci.halo_ixs == [2], "x 8 owned; it can see 7");
+    }
+  }
+  println("partition : every cell owned once, borders seen from both sides");
+}
+
+// ## An edit rebuilds one chunk
+//
+// An edit does not rebuild anything. `field_add_cell`, `field_mark_dirty` (a cell's payload
+// changed) and `field_remove_cell` record the change and mark the chunks whose meshes it made
+// stale. `collect_dirty_inputs` hands back those chunks — skipping any that hold no cells — and
+// `clear_dirty` must come AFTER the rebuild, or every later collect returns them again.
+
+fn an_edit_rebuilds_one_chunk() {
+  xs: vector<integer> = [5, 6, 7, 8];
+  ys: vector<integer> = [0, 0, 0, 0];
+  f = field_new(0, xs, ys, 3, 1);
+  field_add_cell(f, 9, 0);
+  // Row 0 is within the halo of the row above, so chunk (1, -1) is marked too; it holds no
+  // cells, so it is not in the work-list.
+  assert(dirty_count(f) == 2, "its own chunk and the empty one above");
+  work = collect_dirty_inputs(f, 1);
+  assert(len(work) == 1 && work[0].cell_ixs == [3, 4], "one chunk to rebuild: x 8 and the new 9");
+  rebuilt = build_chunk(f, work[0]);
+  assert(seg_len(rebuilt) == 1, "8-9 is the only edge it owns");
+  clear_dirty(f);
+  assert(len(collect_dirty_inputs(f, 1)) == 0, "cleared: nothing stale");
+  println("edit      : one chunk rebuilt, {seg_len(rebuilt)} segment");
+}
+
+// ## A border edit reaches the neighbour
+//
+// A cell within `halo_k` of a chunk border is read by the chunk across it, so an edit there
+// marks both. Recolouring x = 7, the last column of chunk 0, dirties chunk 1 as well.
+
+fn a_border_edit_reaches_the_neighbour() {
+  xs: vector<integer> = [5, 6, 7, 8];
+  ys: vector<integer> = [0, 0, 0, 0];
+  f = field_new(0, xs, ys, 3, 1);
+  field_mark_dirty(f, 7, 0);
+  assert(chunk_is_dirty(f, 7, 0) && chunk_is_dirty(f, 8, 0), "both sides of the border");
+  assert(len(collect_dirty_inputs(f, 1)) == 2, "two chunks with cells to rebuild");
+  println("border    : an edit at the edge rebuilds both sides");
+}
+
+// ## Walking the grid
+//
+// `step_x` and `step_y` move `k` steps along hex axis `d` (0..5) and are always used as a PAIR
+// on the same (x, y): on odd rows the x of a diagonal step depends on the row. `idx_at` finds
+// the cell at a coordinate, answering -1 — not null — for an empty one; `nbr_count_idx` counts
+// a cell's filled neighbours.
+
+fn walking_the_grid() {
+  xs: vector<integer> = [0, 1, 0, 1];
+  ys: vector<integer> = [0, 0, 1, 1];
+  cidx = build_index(xs, ys);
+  // Axis 1 from (0, 0) lands on row 1 at x 0; from (0, 1), an odd row, it lands on (1, 2).
+  assert(step_x(0, 0, 1, 1) == 0 && step_y(0, 0, 1, 1) == 1, "even row: straight up");
+  assert(step_x(0, 1, 1, 1) == 1 && step_y(0, 1, 1, 1) == 2, "odd row: shifted half a cell");
+  assert(idx_at(cidx, 1, 1) == 3 && idx_at(cidx, 5, 5) == -1, "a miss is -1");
+  assert(nbr_count_idx(cidx, 0, 0) == 2, "(0, 0) touches (1, 0) and (0, 1)");
+  println("walk      : axis steps, -1 for a miss");
+}
+
+// ## Where to go next
+//
+// - `tests/worked-examples.loft` — `@GRM-001` … `@GRM-005`: the edit → collect → rebuild →
+//   clear cycle, owned versus halo cells, stable cell indices across a removal, render groups
+//   (`collect_dirty_groups`), and walking the grid.

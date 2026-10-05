@@ -1,9 +1,9 @@
 // Copyright (c) 2026 Jurjen Stellingwerff
 // SPDX-License-Identifier: LGPL-3.0-or-later
 //
-// text2d — text that always draws.  @PLN144/@PLN145 arc B.
+// text2d — text that always draws.
 //
-// ⚠ WHY A BUILT-IN FACE EXISTS AT ALL.  `graphics::write_text` needs three things
+// ⚠ WHY A BUILT-IN FACE EXISTS AT ALL.  `graphics`' `draw_text` needs three things
 // at once: a GL context, the native rasteriser, and a font FILE.  Under `loft
 // test` the rasteriser answers *"native function not loaded"*, so a repo that
 // tests its UI headlessly answers by having no text — and two shipped surfaces in
@@ -56,26 +56,31 @@ pub fn blit_glyph(cv: graphics::Canvas, code: integer, x: integer, y: integer,
   }
 }
 
-// Width in pixels of `s` at scale 1, INCLUDING the single-pixel gap after every
-// glyph but the last.  Exact — the caller can centre with it and be right.
+// The scale a glyph is drawn at: below 1 draws at 1.  Every measurement reads it
+// too, so what is measured is what is drawn.
+fn drawn_scale(scale: integer) -> integer { if scale < 1 { 1 } else { scale } }
+
+// Width in pixels of `s` at `scale`, INCLUDING the gap after every glyph but the
+// last — the ink extent.  Exact: it is what `write_text` answers, so the caller can
+// centre with it and be right.
+// Example: @TXD-001
 pub fn text_width(s: text, scale: integer) -> integer {
   n = 0;
   for _c in s { n = n + 1; }
   if n == 0 { return 0; }
-  (n * (face::GLYPH_W + 1) - 1) * scale
+  (n * (face::GLYPH_W + 1) - 1) * drawn_scale(scale)
 }
 
 // Height of one line at `scale`.
-pub fn line_height(scale: integer) -> integer { face::GLYPH_H * scale }
+pub fn line_height(scale: integer) -> integer { face::GLYPH_H * drawn_scale(scale) }
 
 // ⚠ NAMED `write_text`, NOT `draw_text`.  `graphics` already has `draw_text` as a
-// METHOD on `Canvas`, and a method spelling outranks a library's free function of
-// the same name (loft#940) — so a bare `draw_text(cv, …)` here resolves to the
-// seven-parameter GL one and fails at the call site with an arity error that names
-// neither library.  A distinct verb costs nothing and is reachable.
+// METHOD on `Canvas`, and a name has one body per receiver type: a free
+// `draw_text(cv: Canvas, …)` here would be refused as a redefinition of it.
 //
-// Draw `s` with its top-left at (x, y).  Answers the width drawn, so a caller can
-// lay out the next run without measuring twice.
+// Draw `s` with its top-left at (x, y).  Answers the width drawn — `text_width(s,
+// scale)`, 0 for an empty string — so a caller can lay out the next run without
+// measuring twice.
 //
 // ⚠ Iterates CHARACTERS, not bytes.  `len(text)` counts characters and an indexed
 // read is bytes, so a byte loop truncates multi-byte text silently — the trap the
@@ -84,14 +89,13 @@ pub fn line_height(scale: integer) -> integer { face::GLYPH_H * scale }
 // one character was missing.
 pub fn write_text(cv: graphics::Canvas, s: text, x: integer, y: integer,
                  colour: integer, scale: integer) -> integer {
-  sc = if scale < 1 { 1 } else { scale };
-  rows = face::face_rows();
+  sc = drawn_scale(scale);
   pen = x;
   for ch in s {
     blit_glyph(cv, ch as integer, pen, y, colour, sc);
     pen = pen + (face::GLYPH_W + 1) * sc;
   }
-  pen - x - sc
+  if pen == x { 0 } else { pen - x - sc }
 }
 
 // Draw `s` centred in the box (bx, by, bw, bh).  The commonest thing a HUD wants,
@@ -111,6 +115,8 @@ pub fn write_centred(cv: graphics::Canvas, s: text, bx: integer, by: integer,
 // Brick Buster pre-baked digits 0-9 and one texture per level numeral to avoid it.
 // A glyph sheet is written once; a new string only re-lays-out quads over it.
 
+// A glyph atlas: a canvas of glyph cells, the codepoint each cell holds, the scale they
+// were drawn at, and how many times the sheet itself changed (`a_writes`).
 pub struct Atlas {
   a_cv: graphics::Canvas,
   a_codes: vector<integer>,   // codepoint held in each cell, in cell order
@@ -154,6 +160,7 @@ pub fn atlas_glyph_count(self: const Atlas) -> integer { self.a_next }
 // How many times the sheet has been WRITTEN.  A GL consumer uploads on exactly
 // these, so a caller can assert that a changing label costs no upload — which is
 // the property the whole arc exists for.
+// Example: @TXD-003
 pub fn atlas_writes(self: const Atlas) -> integer { self.a_writes }
 
 // The cell holding `code`, rasterising it on first use.  -1 when the sheet is full.
@@ -351,6 +358,7 @@ pub const ALIGN_RIGHT: integer = 2;
 
 // The first `n` CHARACTERS of `s`.  The cure for the trap above, and public
 // because every caller that slices text by a measured count needs it.
+// Example: @TXD-002
 pub fn take_chars(s: text, n: integer) -> text {
     if n <= 0 { return ""; }
     out = "";

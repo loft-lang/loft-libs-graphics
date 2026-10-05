@@ -1,0 +1,15 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The codes a caller passes to the `gl_*` calls and compares input against are PUBLIC: a
+// program that writes `use graphics::*;` reaches `KEY_SPACE`, `GL_BLEND`, `EV_KEY_DOWN` by name,
+// which is how `input`'s bindings are written.  A constant without `pub` is not exported, and a
+// glob import does not bring it in.
+use graphics::*;
+
+fn test_the_codes_are_reachable_by_a_glob_import() {
+  assert(KEY_SPACE == 32 && KEY_A == 97 && KEY_LEFT == 130 && KEY_F12 > KEY_F1, "key codes");
+  assert(GL_DEPTH_TEST != GL_BLEND && BLEND_ONE != BLEND_ZERO, "capabilities and blend factors");
+  assert(DRAW_TRIANGLES != DRAW_LINES, "draw modes");
+  assert(EV_NONE != EV_KEY_DOWN && MOD_SHIFT != MOD_CTRL, "events and modifiers");
+}

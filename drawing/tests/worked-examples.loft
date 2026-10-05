@@ -1,0 +1,51 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Worked examples for `drawing` (@PLN141): each `test_*` is a running demonstration of a
+// contract the signatures cannot state, cited from the function it explains with
+// `// Example: @DRW-00N`.
+use drawing::*;
+use graphics::*;
+
+// @DRW-001 — coordinates are FRACTIONS of the paper, so `size` is the only pixel count in a
+// scene.  The same marks at two sizes parse to the same points and measure the same element
+// box; only the canvas they are drawn on changes.  A coordinate written as a pixel (`(16,16)`)
+// is a point sixteen papers away.
+fn test_coordinates_are_fractions_of_the_paper() {
+  body = "Background transparent\nname sq\nPoly (0.25,0.25) (0.75,0.25) (0.75,0.75) (0.25,0.75) rgb=200,40,40";
+  small = parse_scene("size 16x16\n" + body);
+  large = parse_scene("size 32x32\n" + body);
+  assert(small.ops[0].pts[0].ptx == 0.25 && large.ops[0].pts[0].ptx == 0.25, "the point is the fraction");
+  assert(small.elems[0].bx1 == 0.75 && large.elems[0].bx1 == 0.75, "and so is the measured box");
+  a = render(small);
+  b = render(large);
+  assert(a.width == 16 && b.width == 32, "only the canvas follows `size`");
+  assert(graphics::color_a(a.get_pixel(8, 8)) == 255 && graphics::color_a(b.get_pixel(16, 16)) == 255, "the centre is inked at both");
+  assert(graphics::color_a(a.get_pixel(1, 1)) == 0 && graphics::color_a(b.get_pixel(2, 2)) == 0, "the corner is clear at both");
+}
+
+// @DRW-002 — a scene that is short of a mark SAYS so.  A line no command accepts lands in
+// `unparsed` (a typo reads as a syntax problem, not as a missing shape), and a mark this release
+// recognises but does not draw lands in `deferred` — so the caller learns the picture is
+// incomplete without comparing it by eye.
+fn test_what_is_not_drawn_is_listed() {
+  sk = parse_scene("size 8x8\nPloy (0.1,0.1) (0.9,0.1) (0.5,0.9) rgb=1,2,3\nPetals (0.5,0.5) n=6 r=0.1");
+  assert(len(sk.ops) == 0, "nothing was drawn");
+  assert(sk.unparsed == ["line 2: Ploy (0.1,0.1) (0.9,0.1) (0.5,0.9) rgb=1,2,3"], "the typo, with its line");
+  assert(sk.deferred == ["line 3: Petals"], "the mark this release does not draw");
+}
+
+// @DRW-003 — `name` tags EVERY mark after it until the next `name`, and an element named but
+// never drawn is an absence (`seen` false), not a box at the origin.  A `check` measures those
+// boxes, so a mark left under the wrong name moves the measurement, not the picture.
+fn test_a_name_tags_what_follows_it() {
+  sk = parse_scene(
+    "size 40x40\nname a\nPoly (0.1,0.1) (0.3,0.1) (0.3,0.3) (0.1,0.3) rgb=1,1,1\n" +
+    "Poly (0.5,0.5) (0.7,0.5) (0.7,0.7) (0.5,0.7) rgb=2,2,2\nname ghost\ncheck a.w ~ 0.6");
+  for e in sk.elems {
+    if e.ename == "a" { assert(e.seen && e.bx0 == 0.1 && e.bx1 == 0.7, "both polys widen a's box"); }
+    if e.ename == "ghost" { assert(!e.seen, "named, never drawn: no box"); }
+  }
+  rs = eval_checks(sk);
+  assert(len(rs) == 1 && rs[0].ok, "a.w is 0.6: 0.1 to 0.7");
+}

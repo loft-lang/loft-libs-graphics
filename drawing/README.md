@@ -19,7 +19,7 @@ Poly (0.30,0.72)@7 (0.70,0.72)@7 stroke=86,62,38
 ```
 
 ```loft
-use drawing;
+use drawing::*;
 
 sk = render_file("sword.draw", "sword.png");
 for u in sk.unparsed { println("sword.draw {u}") }
@@ -36,8 +36,8 @@ language can build rather than a build step that needs Python beside it.
 draws, pixel for pixel.** Not approximately. Every sprite in that corpus already looks the
 way it looks; "close enough" means all of them quietly change the first time they are
 re-rendered, and nobody would be able to say which change was intended. So the gate is a
-byte diff against the original renderer over the whole corpus, and it is green: **28 of 28
-scenes, 0 pixels different**.
+byte diff against the original renderer over the whole corpus: **all 36 of the crawler's
+scenes render with 0 pixels different**, on both backends, the two `Lock` scenes included.
 
 Three things fall out of that, and each of them cost a probe to learn.
 
@@ -67,6 +67,12 @@ never names. Bicubic has negative lobes, so the result overshoots: a hard 40→2
 enlarged 4× spans 28..212. Computing the ramp directly at final size is smoother and
 wrong, so `graphics::resize_bicubic` reproduces the two steps instead.
 
+A guide: [docs/01-getting-started.loft](docs/01-getting-started.loft). The contracts a
+signature cannot state are running tests in
+[tests/worked-examples.loft](tests/worked-examples.loft) — `@DRW-001` coordinates are
+fractions of the paper, `@DRW-002` what is not drawn is listed, `@DRW-003` a `name` tags every
+mark after it.
+
 ## The grammar
 
 Coordinates are FRACTIONS of the paper — origin top-left, y down — so a scene is
@@ -82,8 +88,8 @@ resolution-independent and `size` is the only place a pixel count appears.
 | `Poly (x,y)[~][@w] … [w=N] [stroke=R,G,B] [<fill>]` | the workhorse: filled if it names a fill, a pen stroke if it does not |
 | `Fronds (x,y)-(x,y) n=N len=L [len2= w= w2= ang= ang2= mirror= jitter= field= fray= bow= seed= depth= sub= stroke=]` | a seeded, non-uniform array of tapered strokes rooted along a spine |
 | `Brush <name> hair [w=12] [period=48] [seed=1] [gap=0.35]` · `Brush <name> file=<png> [period=]` | a footprint for `Lock`: the built-in split-bristle image, or an authored PNG (rows along the stroke, columns across) |
-| `Lock (x,y)[~] … [brush=] [w0=2] [w=10] [swell=0.3] [body=0.8] [tips=3] [tipvar=0.35] [spread=8] [seed=1] [rgb=] [dark=] [lit=] [light=x,y,z] [alpha=1] [flip=1]` | one lock of hair or tuft of fur: the brush dragged root→tip, pinched at `w0`, swelling to `w`, ending in `tips` spikes of uneven length; shaded `dark` underneath, `rgb` on the crest, `lit` toward the light; painted OVER what is beneath, so lay locks back to front |
-| `landmark <name> = <value>` · `check …` | read and carried; the report channel itself is not in this release |
+| `Lock (x,y)[~] … [brush=] [w0=2] [w=10] [swell=0.3] [body=0.8] [tips=3] [tipvar=0.35] [spread=8] [seed=1] [rgb=] [dark=] [lit=] [light=x,y,z] [alpha=1] [flip=0]` | one lock of hair or tuft of fur: the brush dragged root→tip, pinched at `w0`, swelling to `w`, ending in `tips` spikes of uneven length; shaded `dark` underneath, `rgb` on the crest, `lit` toward the light; painted OVER what is beneath, so lay locks back to front |
+| `landmark <name> = <value>` · `check …` | a named value, and a fact about element boxes that `eval_checks` measures |
 | `# …` | a comment, and a searchable note |
 
 `<fill>` is one of:
@@ -131,6 +137,9 @@ typo'd mark has to read as a syntax problem, not as a geometry one.
 - `parse_scene(src) -> Sketch` · `parse_scene_at(src, base_dir) -> Sketch` (what a
   `Brush … file=` path is relative to) · `render(sk) -> graphics::Canvas` ·
   `render_file(src_path, out_png) -> Sketch`
+- `eval_checks(sk) -> vector<Check>` · `eval_check(sk, line)` · `scene_ok(sk, results)` ·
+  `metric_report(sk, results) -> text` — the metric channel, in the Python renderer's
+  `stats.txt` spelling; `Check.` `claim` `ok` `lhs` `rhs` `tol` `err` `report`
 - `Sketch.` `sw` `sh` `transparent` `ops` `elems` `landmarks` `checks` `unparsed` `deferred`
   `brushes` `base_dir`
 - `Op.` `kind` (`Sky` / `Fill` / `Stroke` / `Lock`) `pts` `paint` `widths` `w` `color`
@@ -146,19 +155,10 @@ typo'd mark has to read as a syntax problem, not as a geometry one.
 - `PaintKind.` `Stroked` `Solid` `Linear` `Radial` — `Paint.spec` is `ax,ay,bx,by` for a
   linear fill and `cx,cy,r` for a radial one, or **empty** meaning "derive it from the
   shape's own bounding box"
-- `raster::` `fill_poly` · `wide_line` · `thin_line` · `round_up` · `round_down` · `pt` ·
-  `Pt` — the Pillow-compatible rasteriser, public because anything that wants to agree with
-  the same oracle needs it. Reach it with a **second `use`, in this order**:
-
-  ```loft
-  use drawing;
-  use raster;          // ⚠ AFTER `use drawing;` — see below
-  ```
-
-  and qualify as `raster::fill_poly`. `raster` is a sibling module of this package rather
-  than a package of its own, so nothing resolves it until `drawing`'s entry file has been
-  loaded and pulled it in — put it first and you get *"Library 'raster' not found"*. The
-  two-level `drawing::raster::…` spelling does not parse at all.
+- `fill_poly` · `wide_line` · `thin_line` · `round_up` · `round_down` · `pt` · `Pt` — the
+  Pillow-compatible rasteriser, public because anything that wants to agree with the same
+  oracle needs it.  It lives in the package's `raster` module and the entry passes it on, so
+  it is `drawing::fill_poly` after `use drawing;`, or bare after `use drawing::*;`.
 
 ⚠ The parsed scene is a `Sketch`, not a `Scene`: `mesh3d::Scene` owns that name and
 `graphics` depends on mesh3d, so the collision is a hard error — the same trap
@@ -241,19 +241,13 @@ Rust port — and 84 % of the whole interpreted run to `graphics`' resample.
 
 | target | state |
 |---|---|
-| interpreter | ✓ suite green, and the 28-scene corpus gate |
-| `--native` | ✓ suite green, and the 28-scene corpus gate |
-| `--native-wasm` (headless WASI) | ✗ blocked by a dependency — see below |
+| interpreter | ✓ suite green; all 36 corpus scenes byte-identical |
+| `--native` | ✓ suite green; all 36 corpus scenes byte-identical |
+| `--native-wasm` (headless WASI) | ✓ builds; a parse-and-render program answers as the interpreter does |
 | `--html` (browser) | compiles; the render path is pure loft, but see below |
 
 This package is pure loft — no `#native`, no inline `#rust` — so its own code has nothing
-target-specific in it. Both limits come from `graphics`, which it draws through, and from
-`imaging`, whose native PNG decoder a `Brush … file=` footprint needs.
-
-`--native-wasm` does not build: `graphics`' native crate links glutin/GL, which is not
-wasm-clean, so the cross-build fails before anything of this package is reached (`imaging`
-is blocked on the same target for a different upstream reason,
-[loft#967](https://github.com/loft-lang/loft/issues/967)).
+target-specific in it. A `Brush … file=` footprint decodes its PNG through `imaging`.
 
 `--html` emits a page. Everything this package computes — `parse_scene`, `render`, and the
 whole rasteriser — is pure loft and runs there, because `Canvas`, `rgba`, `resize_lanczos`

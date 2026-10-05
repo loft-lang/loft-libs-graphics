@@ -105,6 +105,7 @@ const BOUNCE_S4 = 0.9545454545454546;   // 2.625 / 2.75
 // ⚠ There is no clamp HERE on purpose; every arm reads the curve through
 // `curve_at`, which is where the endpoints are decided.  See the header for
 // why in front of the reflections is the wrong side of them.
+// Example: @TWN-003
 pub fn ease(c: Curve, s: Shape, t: float) -> float {
     match s {
         In    => curve_at(c, t),

@@ -2,21 +2,16 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 //
 // gridmesh — shared primitives for chunk-local, bounded-extent grid→mesh
-// generation.  The crystal routine (lib/audience_crystal) is the prototype
-// for a CLASS of world-building algorithms (wall placement, edge rounding,
-// surface generation) that run as LOCAL routines over a limited set of
-// world chunks and produce meshes that don't extend much outside their
-// chunk.  This library houses the reusable pipeline — spatial-index
-// neighbour queries, neighbour gather, bounded mesh accumulation keyed by
-// owning cell, dirty-region / per-chunk rebuild — so `audience_crystal`
-// and `lib/moros_render` (the real world) share it.  It is a TOOLKIT of
-// primitives, not a framework: each consumer supplies its own per-cell
-// rule and calls these.
+// generation: world-building rules (wall placement, edge rounding, surface
+// generation) that run as LOCAL routines over a limited set of chunks and
+// produce meshes that do not extend much outside their chunk.  It holds the
+// reusable pipeline — spatial-index neighbour queries, bounded mesh
+// accumulation keyed by owning cell, dirty-region / per-chunk rebuild.  A
+// TOOLKIT of primitives, not a framework: each consumer supplies its own
+// per-cell rule and calls these.
 //
-// Phase A: the coordinate + spatial-index primitives, extracted verbatim
-// from audience_crystal so its output is unchanged.  (Chunking + halo +
-// bounded extent + dirty rebuild, and a coordinate-layout adapter for
-// moros's axial flat-top grid, land in later phases.)
+// Coordinates are hex OFFSET coordinates: whole rows, every odd row shifted
+// half a cell (`step_x` / `step_y` carry the parity rule).
 
 // A coord→cell-index reference, stored in the spatial-index hash keyed on
 // the encoded coordinate `ck`.
@@ -30,10 +25,8 @@ pub fn enc_coord(x: integer, y: integer) -> integer {
 
 // Build the coord→cell-index spatial index for a placement-ordered cell
 // list given as parallel (xs, ys).  O(N), built once and reusable across
-// neighbour/on-axis queries.  (@P300 — assigning a hash-returning call's
-// result to a local — was fixed 2026-05-21, so this helper replaces the
-// old inline-build workaround the consumers used.)
-pub fn build_index(xs: vector<integer>, ys: vector<integer>) -> hash<CellRef[ck]> {
+// neighbour/on-axis queries.
+pub fn build_index(xs: const vector<integer>, ys: const vector<integer>) -> hash<CellRef[ck]> {
   cidx: hash<CellRef[ck]> = [];
   for bi_i in 0..len(xs) {
     cidx += [CellRef{ck: enc_coord(xs[bi_i], ys[bi_i]), ix: bi_i}];
@@ -74,14 +67,14 @@ pub fn step_y(_x: integer, y: integer, d: integer, k: integer) -> integer {
 // — `index` is a reserved keyed-collection-type keyword in loft.)
 // Example: @GRM-005 — a miss is the -1 sentinel, so guard with `>= 0`, not a
 // null test.
-pub fn idx_at(cidx: hash<CellRef[ck]>, x: integer, y: integer) -> integer {
+pub fn idx_at(cidx: const hash<CellRef[ck]>, x: integer, y: integer) -> integer {
   r = cidx[enc_coord(x, y)];
   if r == null { return 0 - 1; }
   r.ix
 }
 
 // Index-backed filled-neighbour count (distance 1) — the 6 axis-1 cells.
-pub fn nbr_count_idx(cidx: hash<CellRef[ck]>, cx: integer, cy: integer) -> integer {
+pub fn nbr_count_idx(cidx: const hash<CellRef[ck]>, cx: integer, cy: integer) -> integer {
   c = 0;
   for d in 0..6 {
     if idx_at(cidx, step_x(cx, cy, d, 1), step_y(cx, cy, d, 1)) >= 0 { c = c + 1; }
@@ -129,13 +122,13 @@ pub fn emit_segment(m: SegMesh, kind: integer,
 }
 
 // Number of segments in the mesh.
-pub fn seg_len(m: SegMesh) -> integer { len(m.kinds) }
+pub fn seg_len(m: const SegMesh) -> integer { len(m.kinds) }
 
 // Append all of `src`'s segments onto `dst` (concatenate the nine parallel
 // arrays).  Used to assemble a render-group mesh from its chunks' CACHED
 // meshes and to concatenate chunk meshes into a full build — order-preserving,
 // so the consumer can rely on a stable per-group draw order.
-pub fn seg_mesh_append(dst: SegMesh, src: SegMesh) {
+pub fn seg_mesh_append(dst: SegMesh, src: const SegMesh) {
   dst.kinds += src.kinds;
   dst.x0s += src.x0s; dst.y0s += src.y0s; dst.z0s += src.z0s;
   dst.x1s += src.x1s; dst.y1s += src.y1s; dst.z1s += src.z1s;
@@ -143,19 +136,18 @@ pub fn seg_mesh_append(dst: SegMesh, src: SegMesh) {
   dst.cell_ix += src.cell_ix;
 }
 
-// ── B2: ChunkField + chunk partition + wired-in dirty index ───────────
+// ── ChunkField: chunk partition + wired-in dirty index ─────────────────
 //
 // The FIELD tracks WHERE cells are: placement-ordered coords (index 0 =
-// oldest), the Phase-A spatial index, the chunk partition, and — wired in
+// oldest), the spatial index, the chunk partition, and — wired in
 // as a first-class member — the dirty-chunk INDEX, a keyed SET deduped by
 // construction (`hash<ChunkKey[ck]>`).  It is payload- and mesh-agnostic:
 // the consumer keeps its own colours/heights/meshes and indexes them by
 // the cell indices the field hands out.  `halo_k` lives on the field so an
 // edit can mark the adjacent chunk(s) dirty when the edited cell is within
 // the halo radius of a chunk border (those chunks' meshes read it through
-// the halo).  The keyed-set ops it relies on all landed in plan-44:
-// `+=` dedup-insert (@P306), `if f.dirty[ck]` membership, `f.dirty = []`
-// clear (@P307 OpClearKeyed).
+// the halo).  The dirty set is a keyed collection: `+=` inserts without
+// duplicates, `f.dirty[ck]` tests membership, `f.dirty = []` clears it.
 
 // A chunk-space coordinate.  `ck = enc_coord(cx, cy)` is its identity for
 // dedup in the dirty index.
@@ -196,11 +188,14 @@ struct ChunkBucket {
   cell_ixs: vector<integer>,
 }
 
+// A grid of cells partitioned into chunks: the cell coordinates, a coordinate-to-cell
+// index, and the dirty chunks and per-chunk buckets kept up to date as cells are added.
+// `field_new` makes one and `field_add_cell` grows it.
 pub struct ChunkField {
-  layout:      integer,                // HexLayout tag (Phase A: OffsetPointy = 0)
+  layout:      integer,                // coordinate layout: 0, odd-row offset — the one there is
   xs:          vector<integer>,        // cell coords (index 0 = oldest)
   ys:          vector<integer>,
-  cidx:        hash<CellRef[ck]>,      // coord -> cell index (Phase A)
+  cidx:        hash<CellRef[ck]>,      // coord -> cell index
   chunk_shift: integer,                // chunk = coord >> chunk_shift (5 = 32×32)
   halo_k:      integer,                // halo radius (border-dirty propagation)
   dirty:       hash<ChunkKey[ck]>,     // WIRED-IN dirty-chunk index (keyed set; dedup)
@@ -210,10 +205,13 @@ pub struct ChunkField {
                                        // extraction is O(dirty), not a re-scan.
 }
 
-// Build a field from placement-ordered coords.  The dirty index starts
-// empty; the spatial index (cidx) and the chunk->cell partition (buckets)
-// are built once (O(N)) and maintained incrementally thereafter
-// (field_add_cell), so a later collect_dirty_inputs is O(dirty), not O(N).
+// Build a field from placement-ordered coords.  `layout` is 0 (odd-row
+// offset coordinates, the only layout); `chunk_shift` makes a chunk 1 <<
+// chunk_shift cells a side; `halo_k` is how far across a border a rule may
+// read.  The dirty index starts empty; the spatial index (cidx) and the
+// chunk->cell partition (buckets) are built once (O(N)) and maintained
+// incrementally thereafter (field_add_cell), so a later collect_dirty_inputs
+// is O(dirty), not O(N).
 pub fn field_new(layout: integer, xs: vector<integer>, ys: vector<integer>,
                  chunk_shift: integer, halo_k: integer) -> ChunkField {
   f = ChunkField{
@@ -236,7 +234,7 @@ pub fn field_new(layout: integer, xs: vector<integer>, ys: vector<integer>,
 
 // Insert (x, y)'s chunk into the dirty index, plus any adjacent chunk whose
 // mesh reads (x, y) through its halo (i.e. (x, y) is within halo_k of that
-// border).  `+=` dedups by key (@P306), so many edits in one chunk and the
+// border).  `+=` dedups by key, so many edits in one chunk and the
 // overlapping border marks all coalesce to one entry per chunk.
 fn mark_borders(f: ChunkField, x: integer, y: integer) {
   cs = 1 << f.chunk_shift;
@@ -307,7 +305,7 @@ pub fn field_remove_cell(f: ChunkField, x: integer, y: integer) {
   mark_borders(f, x, y);             // SAME dirty-marking as field_add_cell
 }
 
-// Clear the dirty index after a rebuild (@P307 OpClearKeyed: in-place free).
+// Clear the dirty index after a rebuild.
 // Example: @GRM-001 — where `clear_dirty` sits in the edit → collect → rebuild
 // cycle, and what skipping it costs.
 pub fn clear_dirty(f: ChunkField) {
@@ -315,10 +313,10 @@ pub fn clear_dirty(f: ChunkField) {
 }
 
 // Number of chunks currently dirty (verification / O(dirty) sizing).
-pub fn dirty_count(f: ChunkField) -> integer { len(f.dirty) }
+pub fn dirty_count(f: const ChunkField) -> integer { len(f.dirty) }
 
 // Is the chunk owning (x, y) currently marked dirty?
-pub fn chunk_is_dirty(f: ChunkField, x: integer, y: integer) -> boolean {
+pub fn chunk_is_dirty(f: const ChunkField, x: integer, y: integer) -> boolean {
   k = chunk_of(x, y, f.chunk_shift);
   if f.dirty[k.ck] { true } else { false }
 }
@@ -344,8 +342,8 @@ struct SeenIx { ix: integer }
 // Gather the ≤halo_k border-neighbour cells (in OTHER chunks) of a chunk's
 // owned cells.  Walks the 6 hex axes up to halo_k steps (the axis-neighbour
 // pattern of `nbr_count_idx` / the crystal rule); deduped by cell index.
-// (A full k-ring halo for surface rules is a Phase-C extension.)
-fn gather_halo(f: ChunkField, cell_ixs: vector<integer>, this_ck: integer,
+// Cells reached only off-axis (a full k-ring) are not gathered.
+fn gather_halo(f: const ChunkField, cell_ixs: const vector<integer>, this_ck: integer,
                halo_k: integer) -> vector<integer> {
   halo: vector<integer> = [];
   seen: hash<SeenIx[ix]> = [];
@@ -374,7 +372,7 @@ fn gather_halo(f: ChunkField, cell_ixs: vector<integer>, this_ck: integer,
 // Reads the wired-in `f.buckets` (no re-partition).
 // Example: @GRM-002 — emit for `cell_ixs`, only READ `halo_ixs`; the partition that
 // makes border geometry appear exactly once.
-pub fn all_inputs(f: ChunkField, halo_k: integer) -> vector<ChunkInput> {
+pub fn all_inputs(f: const ChunkField, halo_k: integer) -> vector<ChunkInput> {
   out: vector<ChunkInput> = [];
   for b in f.buckets {
     halo = gather_halo(f, b.cell_ixs, b.ck, halo_k);
@@ -390,7 +388,7 @@ pub fn all_inputs(f: ChunkField, halo_k: integer) -> vector<ChunkInput> {
 // dirty chunk with no owned cells (a halo-marked empty neighbour) is
 // skipped.  Clear the dirty index after rebuilding.
 // Example: @GRM-001 — the edit → collect → rebuild → clear cycle end to end.
-pub fn collect_dirty_inputs(f: ChunkField, halo_k: integer) -> vector<ChunkInput> {
+pub fn collect_dirty_inputs(f: const ChunkField, halo_k: integer) -> vector<ChunkInput> {
   out: vector<ChunkInput> = [];
   for dk in f.dirty {
     b = f.buckets[dk.ck];
@@ -413,6 +411,8 @@ pub fn collect_dirty_inputs(f: ChunkField, halo_k: integer) -> vector<ChunkInput
 // caches a mesh per chunk and assembles a group's VBO from its chunks'
 // cached meshes, re-uploading only groups that contain a dirty chunk.
 
+// One render group: `(gx, gy)` its position in group coordinates (chunk coordinates
+// divided by `group_dim`), `gk` the two encoded as one key.  `group_of` answers it.
 pub struct GroupKey { gk: integer, gx: integer, gy: integer }
 
 // The chunk ck's a group contains that actually hold cells (the assemble
@@ -432,7 +432,7 @@ pub fn group_of(cx: integer, cy: integer, group_dim: integer) -> GroupKey {
 
 // One GroupInput per group that holds cells (the full-build work-list).
 // O(chunks): each non-empty chunk dedups into its group's chunk list.
-pub fn all_groups(f: ChunkField, group_dim: integer) -> vector<GroupInput> {
+pub fn all_groups(f: const ChunkField, group_dim: integer) -> vector<GroupInput> {
   acc: hash<GroupAcc[gk]> = [];
   for b in f.buckets {
     g = group_of(b.cx, b.cy, group_dim);
@@ -458,7 +458,7 @@ pub fn all_groups(f: ChunkField, group_dim: integer) -> vector<GroupInput> {
 // (Never scans all chunks, which would make per-edit cost grow with N.)
 // Example: @GRM-004 — `chunk_cks` lists the group's CLEAN chunks too (copy their
 // cached meshes); reading it as "chunks to rebuild" rebuilds the whole group.
-pub fn collect_dirty_groups(f: ChunkField, group_dim: integer) -> vector<GroupInput> {
+pub fn collect_dirty_groups(f: const ChunkField, group_dim: integer) -> vector<GroupInput> {
   dirty_groups: hash<GroupKey[gk]> = [];
   for dk in f.dirty {
     dirty_groups += [group_of(dk.cx, dk.cy, group_dim)];   // dedup by gk

@@ -108,6 +108,7 @@ pub use easing::*;
 //
 // `t` outside `[0, 1]` extrapolates, which is what makes the overshooting
 // curves (`Back`, `Elastic`) work.
+// Example: @TWN-002
 pub fn lerp(a: float, b: float, t: float) -> float {
     a * (1.0 - t) + b * t
 }
@@ -158,6 +159,7 @@ pub fn delay(self: Tween, units: integer) {
 //
 // ⚠ Non-positive time is dropped rather than owed (`fixstep`'s rule 2), so a
 // paused consumer may call this every frame.
+// Example: @TWN-001
 pub fn advance(self: Tween, units: integer) -> integer {
     if units <= 0 { return 0; }
     left = units;
