@@ -66,11 +66,11 @@ const SMOOTH_SAMPLES = 10;
 /// How a mark is filled, if it is filled at all.
 pub enum PaintKind { Stroked, Solid, Linear, Radial }
 
-/// A mark's fill descriptor.
-///
-/// `Stroked` is the absence of a fill, not a fill of nothing: it is what sends a
-/// `Poly` down the pen path instead of the polygon path, and the two produce
-/// completely different pictures from the same points.
+/// The settings of one `Fronds` line: how many strokes run along the spine, how their
+/// length, width and angle ramp from the first to the last (`len1` → `len2`, `wid1` →
+/// `wid2`, `ang1` → `ang2`), and how far they stray from a regular comb — `jitter`,
+/// `clump`, `fray` and `bow`, all drawn from `seed`.  `mirror` repeats each stroke on the
+/// other side of the spine; `depth` and `sub` grow smaller fronds off each one.
 pub struct FrondSpec {
   count: integer = 8,
   len1: float = 0.1,
@@ -89,6 +89,12 @@ pub struct FrondSpec {
   sub: float = 0.32,
 }
 
+/// A mark's fill descriptor.
+///
+/// `Stroked` is the absence of a fill, not a fill of nothing: it is what sends a
+/// `Poly` down the pen path instead of the polygon path, and the two produce
+/// completely different pictures from the same points.  `c1` is the fill colour, and
+/// `c2` the second colour of a `Linear` or `Radial` gradient.
 pub struct Paint {
   pk: PaintKind = Stroked,
   c1: integer = 0,
