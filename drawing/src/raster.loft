@@ -39,8 +39,8 @@ use graphics::*;
 /// and not on -1.  Keep coordinates fractional right up to the rasteriser and
 /// the port and the oracle round the same way.
 pub struct Pt {
-  ptx: float,
-  pty: float,
+  pub ptx: float,
+  pub pty: float,
 }
 
 /// Build a point without spelling the field names.

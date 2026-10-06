@@ -21,9 +21,9 @@
 /// A scan either lands (`ok`) or does not, and the caller needs BOTH the value
 /// and where to carry on from, so every reader answers all three at once.
 pub struct Scan {
-  ok: boolean,
-  at: integer,
-  value: float,
+  pub ok: boolean,
+  pub at: integer,
+  pub value: float,
 }
 
 /// The did-not-land answer, which every reader below returns when it cannot

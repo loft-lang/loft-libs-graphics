@@ -15,7 +15,7 @@
 
 // A coord→cell-index reference, stored in the spatial-index hash keyed on
 // the encoded coordinate `ck`.
-pub struct CellRef { ck: integer, ix: integer }
+pub struct CellRef { pub ck: integer, pub ix: integer }
 
 // Encode an offset coord into one integer key.  The hex world is small;
 // ±2^20 per axis covers it with room to spare and stays within i64.
@@ -93,11 +93,11 @@ pub fn nbr_count_idx(cidx: const hash<CellRef[ck]>, cx: integer, cy: integer) ->
 // no precision loss vs what is rendered) and kind/colour are `u8`
 // (M1 narrowing: ~60 % less memory than the i64/f64 prototype).
 pub struct SegMesh {
-  kinds:   vector<u8>,
-  x0s:     vector<single>, y0s: vector<single>, z0s: vector<single>,
-  x1s:     vector<single>, y1s: vector<single>, z1s: vector<single>,
-  colors:  vector<u8>,
-  cell_ix: vector<integer>,
+  pub kinds:   vector<u8>,
+  pub x0s:     vector<single>, pub y0s: vector<single>, pub z0s: vector<single>,
+  pub x1s:     vector<single>, pub y1s: vector<single>, pub z1s: vector<single>,
+  pub colors:  vector<u8>,
+  pub cell_ix: vector<integer>,
 }
 
 // An empty segment mesh: the nine parallel arrays `emit_segment` appends into.
@@ -151,7 +151,7 @@ pub fn seg_mesh_append(dst: SegMesh, src: const SegMesh) {
 
 // A chunk-space coordinate.  `ck = enc_coord(cx, cy)` is its identity for
 // dedup in the dirty index.
-pub struct ChunkKey { ck: integer, cx: integer, cy: integer }
+pub struct ChunkKey { pub ck: integer, pub cx: integer, pub cy: integer }
 
 // floor(v / cs) for cs > 0, correct for negative coords (truncating `/`
 // would map cells across the origin to the wrong chunk).  Mirrors moros's
@@ -182,10 +182,10 @@ pub fn chunk_of(x: integer, y: integer, shift: integer) -> ChunkKey {
 // Defined before ChunkField so the `buckets` keyed field type resolves
 // (a forward reference leaves its known_type unset → parse OOB).
 struct ChunkBucket {
-  ck:       integer,
-  cx:       integer,
-  cy:       integer,
-  cell_ixs: vector<integer>,
+  pub ck:       integer,
+  pub cx:       integer,
+  pub cy:       integer,
+  pub cell_ixs: vector<integer>,
 }
 
 // A grid of cells partitioned into chunks: the cell coordinates, a coordinate-to-cell
@@ -193,13 +193,13 @@ struct ChunkBucket {
 // `field_new` makes one and `field_add_cell` grows it.
 pub struct ChunkField {
   layout:      integer,                // coordinate layout: 0, odd-row offset — the one there is
-  xs:          vector<integer>,        // cell coords (index 0 = oldest)
-  ys:          vector<integer>,
-  cidx:        hash<CellRef[ck]>,      // coord -> cell index
+  pub xs:          vector<integer>,        // cell coords (index 0 = oldest)
+  pub ys:          vector<integer>,
+  pub cidx:        hash<CellRef[ck]>,      // coord -> cell index
   chunk_shift: integer,                // chunk = coord >> chunk_shift (5 = 32×32)
-  halo_k:      integer,                // halo radius (border-dirty propagation)
-  dirty:       hash<ChunkKey[ck]>,     // WIRED-IN dirty-chunk index (keyed set; dedup)
-  buckets:     hash<ChunkBucket[ck]>,
+  pub halo_k:      integer,                // halo radius (border-dirty propagation)
+  pub dirty:       hash<ChunkKey[ck]>,     // WIRED-IN dirty-chunk index (keyed set; dedup)
+  pub buckets:     hash<ChunkBucket[ck]>,
                                        // WIRED-IN chunk -> owned cell indices,
                                        // maintained incrementally so dirty-chunk
                                        // extraction is O(dirty), not a re-scan.
@@ -331,9 +331,9 @@ pub fn chunk_is_dirty(f: const ChunkField, x: integer, y: integer) -> boolean {
 // forwards it as a context arg, so the per-chunk working set stays small
 // and cache-resident (copying the whole index per chunk would be O(N)).
 pub struct ChunkInput {
-  key:      ChunkKey,
-  cell_ixs: vector<integer>,   // cells owned by this chunk (emit for these)
-  halo_ixs: vector<integer>,   // ≤halo_k border-neighbour cells (read-only context)
+  pub key:      ChunkKey,
+  pub cell_ixs: vector<integer>,   // cells owned by this chunk (emit for these)
+  pub halo_ixs: vector<integer>,   // ≤halo_k border-neighbour cells (read-only context)
 }
 
 // Internal: a cell-index set for halo dedup.
@@ -413,11 +413,11 @@ pub fn collect_dirty_inputs(f: const ChunkField, halo_k: integer) -> vector<Chun
 
 // One render group: `(gx, gy)` its position in group coordinates (chunk coordinates
 // divided by `group_dim`), `gk` the two encoded as one key.  `group_of` answers it.
-pub struct GroupKey { gk: integer, gx: integer, gy: integer }
+pub struct GroupKey { pub gk: integer, pub gx: integer, gy: integer }
 
 // The chunk ck's a group contains that actually hold cells (the assemble
 // work-list).  No mesh here — gridmesh partitions; the consumer owns meshes.
-pub struct GroupInput { key: GroupKey, chunk_cks: vector<integer> }
+pub struct GroupInput { key: GroupKey, pub chunk_cks: vector<integer> }
 
 // Internal accumulator for all_groups (keyed so chunks dedup into their group).
 struct GroupAcc { gk: integer, gx: integer, gy: integer, chunk_cks: vector<integer> }

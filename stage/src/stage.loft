@@ -81,7 +81,7 @@ pub struct StageNode {
     nd_oy: float,
     nd_w: float,
     nd_h: float,
-    nd_colour: integer,
+    pub nd_colour: integer,
     nd_visible: boolean,
     nd_atlas: integer,
     nd_u0: float,
@@ -91,11 +91,11 @@ pub struct StageNode {
     nd_alpha: float,
     nd_mask: integer,        // index into `st_masks`, or -1 for solid
     nd_clips: boolean,       // does this node clip its own subtree?
-    nd_clipped: boolean,     // derived: is anything clipping it?
-    nd_cx0: float,           // derived: the effective clip, world axis-aligned
-    nd_cy0: float,
-    nd_cx1: float,
-    nd_cy1: float,
+    pub nd_clipped: boolean,     // derived: is anything clipping it?
+    pub nd_cx0: float,           // derived: the effective clip, world axis-aligned
+    pub nd_cy0: float,
+    pub nd_cx1: float,
+    pub nd_cy1: float,
     nd_key: text,            // the mob kind, e.g. "orc" — resolution starts here
     nd_action: text,         // what it is doing, e.g. "walk"
     nd_facing: float,        // where it points, in radians; kept in BOTH models
@@ -105,8 +105,8 @@ pub struct StageNode {
     nd_cols: integer,        // the atlas grid this node's cells live in
     nd_rows: integer,
     nd_sway: float,          // ambient sway amplitude in pixels; 0 is still
-    nd_phase: float,         // derived from POSITION, so neighbours are out of step
-    nd_cue: float,           // derived: 0 at the near plane, 1 at the far one
+    pub nd_phase: float,         // derived from POSITION, so neighbours are out of step
+    pub nd_cue: float,           // derived: 0 at the near plane, 1 at the far one
     nd_layer: integer,       // ordering BAND — outranks depth entirely
     nd_depth: float,         // distance INTO the screen; larger draws first
     nd_disabled: boolean,    // D1: refuses to fire, and reads `Disabled`
@@ -120,12 +120,12 @@ pub struct StageNode {
     // `nd_parent < 0` branch two lines up already applies to a root.  With the
     // zero record it would be the transform that collapses every child to a
     // point: silent, geometric, and visible only as a picture that is not there.
-    nd_a: float = 1.0,
-    nd_b: float = 0.0,
-    nd_c: float = 0.0,
-    nd_d: float = 1.0,
-    nd_tx: float = 0.0,
-    nd_ty: float = 0.0,
+    pub nd_a: float = 1.0,
+    pub nd_b: float = 0.0,
+    pub nd_c: float = 0.0,
+    pub nd_d: float = 1.0,
+    pub nd_tx: float = 0.0,
+    pub nd_ty: float = 0.0,
 }
 
 // Everything one ordering band carries: how much of the camera it feels, what
@@ -169,21 +169,21 @@ pub struct View {
 // The compiler refusing is the good outcome; after publishing, this rename is one
 // nobody can make.  Same reason the node is `StageNode`.
 pub struct StageLight {
-    lt_x: float,
-    lt_y: float,
-    lt_r: float,             // radius; the reach is 0 at exactly this distance
-    lt_colour: integer,      // packed 0xRRGGBB
-    lt_power: float,         // intensity multiplier; 1.0 is full at the centre
+    pub lt_x: float,
+    pub lt_y: float,
+    pub lt_r: float,             // radius; the reach is 0 at exactly this distance
+    pub lt_colour: integer,      // packed 0xRRGGBB
+    pub lt_power: float,         // intensity multiplier; 1.0 is full at the centre
 }
 
 // A 2D scene and everything that drives it: its nodes and masks, the draw order
 // `compose` derives, the views, lights and depth cue it paints with, and its pointer,
 // focus and tween state.  `stage_new` makes an empty one; every other call changes it.
 pub struct Stage {
-    st_nodes: vector<StageNode>,
+    pub st_nodes: vector<StageNode>,
     st_masks: vector<Mask>,
     st_capture: integer,      // the node holding the press, or -1
-    st_order: vector<integer>,   // draw order, derived by `compose`
+    pub st_order: vector<integer>,   // draw order, derived by `compose`
     st_cue: boolean,             // is the depth cue on?
     st_cue_near: float,
     st_cue_far: float,
@@ -256,51 +256,51 @@ pub struct Mask {
 // been handed a legal answer to a question they did not ask.  That is exactly the
 // case `omitted-field-zero` exists to warn about, answered here at the declaration.
 pub struct Place {
-    pl_w: float = 0.0,       // size in the node's own units; 0 x 0 draws nothing
-    pl_h: float = 0.0,
-    pl_colour: integer = 0,  // packed 0xRRGGBB, as `DrawRect` carries
-    pl_visible: boolean = true,
-    pl_atlas: integer = 0,   // which texture page; a run may only merge within one
-    pl_u0: float = 0.0,      // the sprite's rect within that page
-    pl_v0: float = 0.0,
-    pl_u1: float = 1.0,
-    pl_v1: float = 1.0,
-    pl_alpha: float = 1.0,
-    pl_mask: integer = -1,   // index from `add_mask`, or -1 for solid
-    pl_clips: boolean = false,  // clip this node's subtree to its own bounds
-    pl_key: text = "",          // the mob kind; "" opts out of by-name resolution
-    pl_seq: integer = -1,       // from `add_sequence`; -1 is a still sprite
-    pl_cols: integer = 1,       // the atlas grid the cells are packed in
-    pl_rows: integer = 1,
-    pl_sway: float = 0.0,       // ambient sway amplitude, in pixels
-    pl_layer: integer = 0,      // background / world / UI are BANDS, not numbers
-    pl_depth: float = 0.0,      // distance INTO the screen: LARGER draws first, so
+    pub pl_w: float = 0.0,       // size in the node's own units; 0 x 0 draws nothing
+    pub pl_h: float = 0.0,
+    pub pl_colour: integer = 0,  // packed 0xRRGGBB, as `DrawRect` carries
+    pub pl_visible: boolean = true,
+    pub pl_atlas: integer = 0,   // which texture page; a run may only merge within one
+    pub pl_u0: float = 0.0,      // the sprite's rect within that page
+    pub pl_v0: float = 0.0,
+    pub pl_u1: float = 1.0,
+    pub pl_v1: float = 1.0,
+    pub pl_alpha: float = 1.0,
+    pub pl_mask: integer = -1,   // index from `add_mask`, or -1 for solid
+    pub pl_clips: boolean = false,  // clip this node's subtree to its own bounds
+    pub pl_key: text = "",          // the mob kind; "" opts out of by-name resolution
+    pub pl_seq: integer = -1,       // from `add_sequence`; -1 is a still sprite
+    pub pl_cols: integer = 1,       // the atlas grid the cells are packed in
+    pub pl_rows: integer = 1,
+    pub pl_sway: float = 0.0,       // ambient sway amplitude, in pixels
+    pub pl_layer: integer = 0,      // background / world / UI are BANDS, not numbers
+    pub pl_depth: float = 0.0,      // distance INTO the screen: LARGER draws first, so
                                 // `depth = -y` puts a lower sprite in front. A 2.5-D
                                 // scene sets it from the footprint — a hex row, or a
                                 // projected height — never from the artwork
-    pl_x: float = 0.0,
-    pl_y: float = 0.0,
-    pl_rot: float = 0.0,     // radians; +ve turns +x toward +y
-    pl_sx: float = 1.0,
-    pl_sy: float = 1.0,
-    pl_ox: float = 0.0,      // the origin, in the node's own units
-    pl_oy: float = 0.0,
+    pub pl_x: float = 0.0,
+    pub pl_y: float = 0.0,
+    pub pl_rot: float = 0.0,     // radians; +ve turns +x toward +y
+    pub pl_sx: float = 1.0,
+    pub pl_sy: float = 1.0,
+    pub pl_ox: float = 0.0,      // the origin, in the node's own units
+    pub pl_oy: float = 0.0,
 }
 
 // A point, so a caller can ask where something ended up without unpacking six
 // floats.  `world_point` is the only honest way to check a transform: a matrix
 // means nothing except through what it does to a point.
 pub struct Bounds {
-    b_x0: float,
-    b_y0: float,
-    b_x1: float,
-    b_y1: float,
+    pub b_x0: float,
+    pub b_y0: float,
+    pub b_x1: float,
+    pub b_y1: float,
 }
 
 // A point in world coordinates, as `world_point` and `world_origin` answer it.
 pub struct P2 {
-    p_x: float,
-    p_y: float,
+    pub p_x: float,
+    pub p_y: float,
 }
 
 // An empty stage: no nodes, one view, the camera at the origin and ambient
@@ -610,16 +610,16 @@ pub fn world_origin(self: const Stage, idx: integer) -> P2 {
 // shape.  Until it is published (@PLN145 `D0`) the types cannot literally be
 // shared, and one of the two must eventually give — see the plan.
 pub struct UiRect {
-    r_x: integer,
-    r_y: integer,
-    r_w: integer,
-    r_h: integer,
+    pub r_x: integer,
+    pub r_y: integer,
+    pub r_w: integer,
+    pub r_h: integer,
 }
 
 // A packed 0xRRGGBB colour, as `lavition_ui` carries it.
 pub struct DrawRect {
-    dr_rect: UiRect,
-    dr_colour: integer,
+    pub dr_rect: UiRect,
+    pub dr_colour: integer,
 }
 
 // One line of text to draw, in the command shape `lavition_ui` takes: the text, its left
@@ -702,15 +702,15 @@ pub fn opaque(colour: integer) -> integer {
 
 // One run of consecutive instances that share an atlas.
 pub struct Batch {
-    b_layer: integer,        // one run, one layer — so one camera offset
-    b_atlas: integer,
-    b_first: integer,        // index of the first instance in the packed buffer
-    b_count: integer,
-    b_clipped: boolean,      // the scissor this run needs, if any
-    b_cx0: float,
-    b_cy0: float,
-    b_cx1: float,
-    b_cy1: float,
+    pub b_layer: integer,        // one run, one layer — so one camera offset
+    pub b_atlas: integer,
+    pub b_first: integer,        // index of the first instance in the packed buffer
+    pub b_count: integer,
+    pub b_clipped: boolean,      // the scissor this run needs, if any
+    pub b_cx0: float,
+    pub b_cy0: float,
+    pub b_cx1: float,
+    pub b_cy1: float,
 }
 
 // Floats per instance in the packed buffer: a 2x3 affine, the sprite's uv rect,

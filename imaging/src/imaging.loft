@@ -19,10 +19,10 @@
 // Example: @IMG-004 — the range is not a clamp: doubling a bright channel stores
 // 0, so brightening turns the brightest pixels black.
 pub struct Pixel {
-  const r: integer limit(0, 255),
-  const g: integer limit(0, 255),
-  const b: integer limit(0, 255),
-  const a: integer limit(0, 255) = 255
+  pub const r: integer limit(0, 255),
+  pub const g: integer limit(0, 255),
+  pub const b: integer limit(0, 255),
+  pub const a: integer limit(0, 255) = 255
 }
 
 // Returns the pixel colour as a packed 24-bit integer (0xRRGGBB).
@@ -57,10 +57,10 @@ pub fn opaque(self: Pixel, cutoff: integer = 128) -> boolean {
 // `len(data) == width * height` always holds on an image `png()` handed back.
 // Example: @IMG-001 — the addressing rule, and what the null check buys.
 pub struct Image {
-  name: text,
-  width: integer,
-  height: integer,
-  data: vector<Pixel>
+  pub name: text,
+  pub width: integer,
+  pub height: integer,
+  pub data: vector<Pixel>
 }
 
 // Native function: decode a PNG file into an Image struct.

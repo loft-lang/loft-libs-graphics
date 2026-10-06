@@ -72,21 +72,21 @@ pub enum PaintKind { Stroked, Solid, Linear, Radial }
 /// `clump`, `fray` and `bow`, all drawn from `seed`.  `mirror` repeats each stroke on the
 /// other side of the spine; `depth` and `sub` grow smaller fronds off each one.
 pub struct FrondSpec {
-  count: integer = 8,
-  len1: float = 0.1,
-  len2: float = 0.1,
-  wid1: float = 3.0,
-  wid2: float = 3.0,
-  ang1: float = 30.0,
-  ang2: float = 30.0,
-  mirror: boolean = false,
-  jitter: float = 0.5,
-  clump: float = 0.6,
-  fray: float = 0.4,
-  bow: float = 0.0,
-  seed: integer = 1,
-  depth: integer = 1,
-  sub: float = 0.32,
+  pub count: integer = 8,
+  pub len1: float = 0.1,
+  pub len2: float = 0.1,
+  pub wid1: float = 3.0,
+  pub wid2: float = 3.0,
+  pub ang1: float = 30.0,
+  pub ang2: float = 30.0,
+  pub mirror: boolean = false,
+  pub jitter: float = 0.5,
+  pub clump: float = 0.6,
+  pub fray: float = 0.4,
+  pub bow: float = 0.0,
+  pub seed: integer = 1,
+  pub depth: integer = 1,
+  pub sub: float = 0.32,
 }
 
 /// A mark's fill descriptor.
@@ -96,13 +96,13 @@ pub struct FrondSpec {
 /// completely different pictures from the same points.  `c1` is the fill colour, and
 /// `c2` the second colour of a `Linear` or `Radial` gradient.
 pub struct Paint {
-  pk: PaintKind = Stroked,
-  c1: integer = 0,
-  c2: integer = 0,
+  pub pk: PaintKind = Stroked,
+  pub c1: integer = 0,
+  pub c2: integer = 0,
   /// `Linear`: `ax,ay,bx,by`.  `Radial`: `cx,cy,r`.  Empty means "derive it from
   /// the shape's own bounding box", which is what a fill with no `dir=` / `at=`
   /// asks for.
-  spec: vector<float>,
+  pub spec: vector<float>,
 }
 
 /// What an op does.  `Lock` is the brush stroke — see [brush.loft](brush.loft).
@@ -115,43 +115,43 @@ pub enum OpKind { Sky, Fill, Stroke, Lock }
 /// paper size is a property of the scene and the supersample factor is a
 /// property of the renderer — neither belongs in a parsed mark.  @FR-Scene-Fraction
 pub struct Op {
-  kind: OpKind = Sky,
-  pts: vector<raster::Pt>,
-  paint: Paint,
+  pub kind: OpKind = Sky,
+  pub pts: vector<raster::Pt>,
+  pub paint: Paint,
   /// Stroke: one width per point (a taper).  Empty means the uniform `w`.
-  widths: vector<float>,
-  w: integer = 3,
+  pub widths: vector<float>,
+  pub w: integer = 3,
   /// Stroke ink, or `Sky`'s top colour.
-  color: integer = 0,
+  pub color: integer = 0,
   /// `Sky`'s bottom colour.
-  color2: integer = 0,
+  pub color2: integer = 0,
   /// `Lock`: the stroke's style, and the index of its brush in `Sketch.brushes`
   /// (`-1` for every other kind).
-  style: brush::LockStyle,
-  brush: integer = -1,
+  pub style: brush::LockStyle,
+  pub brush: integer = -1,
 }
 
 /// A named group of marks and the box they cover, in paper fractions.
 pub struct Elem {
-  ename: text = "",
+  pub ename: text = "",
   /// False until a mark has actually contributed a point: an element that is
   /// named and never drawn has no box, and answering `0,0,0,0` for it would be a
   /// measurement rather than an absence.
-  seen: boolean = false,
-  bx0: float = 0.0,
-  by0: float = 0.0,
-  bx1: float = 0.0,
-  by1: float = 0.0,
+  pub seen: boolean = false,
+  pub bx0: float = 0.0,
+  pub by0: float = 0.0,
+  pub bx1: float = 0.0,
+  pub by1: float = 0.0,
   /// How many marks the scene had drawn when this element first took ink, or
   /// `-1` for one that never did.  It orders the metric report the way the
   /// oracle's does — by first ink, not by where the `name` line sits.
-  first_at: integer = -1,
+  pub first_at: integer = -1,
 }
 
 /// A `landmark <name> = <value>` line.
 pub struct Landmark {
-  lname: text = "",
-  lvalue: float = 0.0,
+  pub lname: text = "",
+  pub lvalue: float = 0.0,
 }
 
 /// A parsed scene: the paper, the ordered draw program, and everything the
@@ -163,21 +163,21 @@ pub struct Landmark {
 /// where they belong.
 // Example: @DRW-002
 pub struct Sketch {
-  sw: integer = 800,
-  sh: integer = 800,
-  transparent: boolean = false,
-  ops: vector<Op>,
-  elems: vector<Elem>,
-  landmarks: vector<Landmark>,
+  pub sw: integer = 800,
+  pub sh: integer = 800,
+  pub transparent: boolean = false,
+  pub ops: vector<Op>,
+  pub elems: vector<Elem>,
+  pub landmarks: vector<Landmark>,
   checks: vector<text>,
   /// `line N: <text>` for every line no command accepted.  @FR-Scene-Unparsed
-  unparsed: vector<text>,
+  pub unparsed: vector<text>,
   /// `line N: <what>` for every mark this build recognises but does not draw.
   /// @FR-Scene-Deferred
-  deferred: vector<text>,
+  pub deferred: vector<text>,
   /// The footprints the scene's `Brush` lines defined, plus the default `hair`
   /// once a `Lock` asked for it.
-  brushes: vector<brush::Brush>,
+  pub brushes: vector<brush::Brush>,
   /// The directory a `Brush … file=` path is relative to — the scene's own,
   /// which `render_file` knows and a caller holding source text may not.
   base_dir: text = "",
@@ -1066,22 +1066,22 @@ fn val_err(name: text) -> Val { Val { ok: false, value: 0.0, err: "{name}?" } }
 /// One evaluated `check` line.
 pub struct Check {
   /// The check as written, with any `tol` clause removed — what the report echoes.
-  claim: text = "",
-  ok: boolean = false,
+  pub claim: text = "",
+  pub ok: boolean = false,
   /// The two sides, as measured.  Both `0.0` when a name did not resolve.
-  lhs: float = 0.0,
-  rhs: float = 0.0,
+  pub lhs: float = 0.0,
+  pub rhs: float = 0.0,
   /// The tolerance `~` was judged at; the other operators ignore it.
   ///
   /// ⚠ Spelled `0.02` and not `DEFAULT_TOL`: a field default that names a
   /// file-scope constant is an internal compiler error today
   /// ([loft#1086](https://github.com/loft-lang/loft/issues/1086)).
-  tol: float = 0.02,
+  pub tol: float = 0.02,
   /// Empty when the check was measured, whatever its verdict.  Otherwise the
   /// unresolved name (`head.middle?`) or `(unparsed)` for a line with no operator.
-  err: text = "",
+  pub err: text = "",
   /// The one-line report, in `draw.py`'s spelling.
-  report: text = "",
+  pub report: text = "",
 }
 
 /// What `~` means without a `tol` clause: a fraction of the paper.
@@ -1581,8 +1581,8 @@ pub fn lowfreq(lseed: integer, lu: float) -> float { noise::seed_wave(lseed, lu)
 
 /// One frond: a centreline in paper fractions and a width per point.
 pub struct Frond {
-  fpts: vector<raster::Pt>,
-  fwid: vector<float>,
+  pub fpts: vector<raster::Pt>,
+  pub fwid: vector<float>,
 }
 
 /// Everything a `Fronds` line says about the array, past its two endpoints.

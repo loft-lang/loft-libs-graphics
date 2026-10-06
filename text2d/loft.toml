@@ -1,6 +1,6 @@
 [package]
 name = "text2d"
-version = "0.4.5"
+version = "0.4.6"
 
 # ⚠ FIRST published release, so both floors are this release itself — there is no
 # earlier one it could be a drop-in for.  The 0.x numbers below it were used
