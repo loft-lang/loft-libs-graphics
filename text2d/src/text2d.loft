@@ -128,9 +128,9 @@ pub struct Atlas {
 
 // One glyph placed on a line: where it goes, and which cell it comes from.
 pub struct Quad {
-  q_x: integer,
-  q_y: integer,
-  q_cell: integer,
+  pub q_x: integer,
+  pub q_y: integer,
+  pub q_cell: integer,
 }
 
 // A sheet with room for `capacity` glyphs at `scale`.  Shelf-packed in a grid,

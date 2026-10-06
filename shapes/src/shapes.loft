@@ -7,17 +7,17 @@
 
 /// Axis-aligned bounding box for 2D collision.
 pub struct Rect {
-  rx: float,
-  ry: float,
-  rw: float,
-  rh: float,
+  pub rx: float,
+  pub ry: float,
+  pub rw: float,
+  pub rh: float,
 }
 
 /// Circle shape for 2D collision.
 pub struct Circle {
-  cx: float,
-  cy: float,
-  cr: float,
+  pub cx: float,
+  pub cy: float,
+  pub cr: float,
 }
 
 /// Test whether two axis-aligned rectangles overlap.
@@ -60,8 +60,8 @@ pub fn rect_circle_overlap(r: const Rect, c: const Circle) -> boolean {
 
 /// Overlap depth between two rectangles on each axis.
 pub struct Overlap {
-  ox: float,
-  oy: float,
+  pub ox: float,
+  pub oy: float,
 }
 
 /// Compute the overlap depth between two rectangles on each axis: how far one must
@@ -132,7 +132,7 @@ pub fn aabb_depth_y(ax: float, ay: float, aw: float, ah: float,
 /// tighter axis beat a convex hull on mean, median and worst case, and need no
 /// shape kind this library does not already have.
 pub struct Proxy {
-  boxes: vector<Rect>,
+  pub boxes: vector<Rect>,
 }
 
 /// Does anything in the proxy overlap `r`?

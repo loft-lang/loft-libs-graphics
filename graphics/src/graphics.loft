@@ -75,9 +75,9 @@ pub fn color_a(color: integer) -> integer {
 // A 2D pixel canvas backed by a flat vector of RGBA integers.
 // Pixels are stored row-major: data[y * width + x].
 pub struct Canvas {
-  const width: integer,
-  const height: integer,
-  const data: vector<integer>
+  pub const width: integer,
+  pub const height: integer,
+  pub const data: vector<integer>
 }
 
 // `count` copies of `value`, built by doubling rather than one element
@@ -578,8 +578,8 @@ pub fn fill_triangle(self: Canvas, tx0: integer, ty0: integer, tx1: integer, ty1
 /// mesh3d's too. Reach for `Coord` in 2-D graphics code and the 3-D names stay
 /// where they belong.
 pub struct Coord {
-  px: integer,
-  py: integer,
+  pub px: integer,
+  pub py: integer,
 }
 
 /// Fill a closed polygon under the EVEN-ODD rule.
@@ -1642,7 +1642,7 @@ pub struct Painter2D {
   p2_flat: integer,        // flat color shader
   p2_tex: integer,         // textured quad shader (V-flipped)
   p2_vao: integer,         // shared unit-quad VAO
-  p2_proj: vector<float>,           // orthographic projection (16 floats)
+  pub p2_proj: vector<float>,           // orthographic projection (16 floats)
 }
 
 /// Create a Painter2D for a window of size `screen_w` x `screen_h`.
