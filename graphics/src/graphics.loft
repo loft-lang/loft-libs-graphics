@@ -1530,7 +1530,7 @@ void main() {{
 /// A sprite sheet backed by a Canvas atlas uploaded as a GL texture.
 /// Sprites are arranged in a grid of `ss_cols` x `ss_rows` cells.
 pub struct SpriteSheet {
-  const ss_tex: integer,      // GL texture handle
+  pub const ss_tex: integer,  // GL texture handle
   const ss_shader: integer,   // textured quad shader
   const ss_vao: integer,      // unit quad VAO (shared)
   const ss_cols: integer,
@@ -1640,8 +1640,8 @@ void main() {{
 /// `draw_rect_at`, `draw_sprite_at`, and `draw_texture_at` to render.
 pub struct Painter2D {
   p2_flat: integer,        // flat color shader
-  p2_tex: integer,         // textured quad shader (V-flipped)
-  p2_vao: integer,         // shared unit-quad VAO
+  pub p2_tex: integer,     // textured quad shader (V-flipped)
+  pub p2_vao: integer,     // shared unit-quad VAO
   pub p2_proj: vector<float>,           // orthographic projection (16 floats)
 }
 
