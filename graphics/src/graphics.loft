@@ -1021,7 +1021,7 @@ struct GroupVbo {
 // The vertex buffers of a grouped mesh: one `GroupVbo` per group key in `slots`, all
 // sharing one vertex layout (`stride` floats per vertex) and one `draw_mode`.
 pub struct GroupVboSet {
-  slots:     hash<GroupVbo[gk]>,   // not const: reassigned (`set.slots = []`) + grown via `+=`
+  pub slots: hash<GroupVbo[gk]>,   // not const: reassigned (`set.slots = []`) + grown via `+=`
   const stride:    integer,   // floats per vertex (e.g. 14 crystal, 10 ground)
   const draw_mode: integer,   // DRAW_TRIANGLES / DRAW_LINES / …
 }
