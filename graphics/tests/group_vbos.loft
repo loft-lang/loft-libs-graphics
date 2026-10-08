@@ -1,0 +1,11 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// A renderer asks whether a group already has its buffers and how many groups a set holds
+// (dryopea's ground and entity passes): `GroupVboSet.slots` is readable outside this library.
+use graphics::*;
+
+fn test_a_new_set_holds_no_groups() {
+  set = group_vbos_new(10, DRAW_TRIANGLES);
+  assert(len(set.slots) == 0, "a new set holds no groups, got {len(set.slots)}");
+}
