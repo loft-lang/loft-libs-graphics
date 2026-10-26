@@ -63,20 +63,22 @@ pub struct Image {
   pub data: vector<Pixel>
 }
 
-// Native function: decode a PNG file into an Image struct.
-// Bare `#native` → symbol `n_load_png` by convention (the fn name).
-fn load_png(path: text, image: Image) -> boolean;
-#native
+// The PNG codec is C99 (`c/imaging.c`, built by loft itself with `cc` as the package's
+// `[c] shim`): the file's size, its pixels read into a buffer the caller sized, and a buffer
+// written as RGB or RGBA.  A `vector<Pixel>` crosses as its element bytes — four per pixel,
+// r g b a — so no copy stands between the codec and the image.
+fn png_size(path: text) -> integer;
+#c "lim_png_size" "int64_t(const char*)"
+fn png_read(path: text, data: vector<Pixel>) -> boolean;
+#c "lim_png_read" "int(const char*, void*, int64_t)"
+fn png_write(path: text, width: integer, height: integer, data: const vector<Pixel>) -> boolean;
+#c "lim_png_write" "int(const char*, int64_t, int64_t, const void*, int64_t)"
 
-// Native function: encode an Image struct as a PNG file.
-// Explicit override: the loft wrapper is `save_png_native` but the
-// native symbol is `n_save_png` (a pure-loft `save_png` wraps it).
-fn save_png_native(image: const Image, path: text) -> boolean;
-#native "n_save_png"
-
-// Write this image to a PNG file. Returns true on success.
+// Write this image to a PNG file: RGB when every pixel is opaque, RGBA otherwise.  Returns
+// true on success; false for an empty image, a data vector shorter than width * height, or a
+// path that cannot be written.
 pub fn save_png(self: const Image, path: text) -> boolean {
-  save_png_native(self, path)
+  png_write(path, self.width, self.height, self.data)
 }
 
 // Decodes a PNG file and returns an Image.
@@ -92,15 +94,18 @@ pub fn save_png(self: const Image, path: text) -> boolean {
 // Example: @IMG-002 — every colour type arrives as RGBA, and a source without an
 // alpha channel is opaque rather than invisible.
 pub fn png(self: File) -> Image? {
-  // Early returns, not a nested `if … { result } else { null }`: on a `-> Image?`
-  // function that nesting hands back the half-built `result` instead of null in
-  // loft releases before the fix, so an undecodable file read as an empty image.
   if self.format != Format.TextFile {
     return null;
   }
-  result = Image { };
-  if !load_png(self.path, result) {
+  size = png_size(self.path);
+  if size < 0 {
     return null;
   }
-  result
+  width = size / 4294967296 ?? 0;
+  height = size % 4294967296 ?? 0;
+  data: vector<Pixel> = [for _ in 0..width * height { Pixel { r: 0, g: 0, b: 0 } }];
+  if !png_read(self.path, data) {
+    return null;
+  }
+  Image { name: self.path.basename(), width: width, height: height, data: data }
 }

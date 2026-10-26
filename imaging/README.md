@@ -33,8 +33,13 @@ A guide: [docs/01-getting-started.loft](docs/01-getting-started.loft).
 `Image.data` is one flat, row-major `vector<Pixel>`: the pixel at (x, y) is
 `data[y * width + x]`, and `len(data) == width * height`.
 
-Native code (cdylib `loft_imaging`) backs the PNG codec via the `png`
-crate.
+The PNG codec is C99 (`c/imaging.c`): its own inflate and deflate, CRC-32 and
+Adler-32, the five filters, every colour type and depth, tRNS and Adam7.  loft
+builds it with `cc` as the package's `[c] shim` and the `#c` declarations in
+`src/imaging.loft` bind it — no Rust crate and no rustc, one source for the
+interpreter, `--native` and the C backend.  Reading answers 8-bit RGBA as the
+`png` crate's `normalize_to_color8` did; writing picks RGB or RGBA from the
+pixels, as before.
 
 ## Worked examples
 
@@ -51,12 +56,8 @@ than edited (and the local you read it into is a view of its slot), `@IMG-004`
 |---|---|
 | interpreter | ✓ suite green |
 | `--native` | ✓ suite green |
-| `--native-wasm` (headless WASI) | ✓ builds and decodes as the interpreter does |
-| `--html` (browser) | ✓ bridge in `wasm/`, landed 0.2.1 |
-
-The browser bridge routes `n_load_png` / `n_save_png` to the browser's
-Image/OffscreenCanvas API through `loft_gl` host imports, and path-deps the
-sibling loft checkout, so nothing needs publishing to crates.io for it to build.
+| the C backend (`--emit-c`) | ✓ suite green — the shim compiles into the unit |
+| `--native-wasm` / `--html` | ✗ not claimed since 0.5.0: a `#c` binding has no C ABI on a wasm target.  0.4 carried a Rust wasm bridge; a shim compiled to wasm with a C cross-compiler is the route back |
 
 ## Provenance
 
