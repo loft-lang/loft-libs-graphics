@@ -100,10 +100,13 @@ fn test_remove_cell() {
   assert(dirty_count(f) >= 1, "remove marked the chunk dirty (same path as add)");
   // the removed index is gone from its chunk bucket → a rebuild won't emit it.
   b1 = f.buckets[chunk_of(8, 0, 3).ck];
-  assert(b1 != null, "removed cell's chunk bucket still exists");
-  // `?? []` cannot mask a missing bucket — the assert above has already failed if
-  // there is none, so the default is unreachable rather than a weaker check.
-  assert(!frc_has(b1.cell_ixs ?? [], 1), "bucket no longer lists the removed index 1");
+  // The guard clause proves the bucket present below it on every loft: an `assert` narrows
+  // only on lofts that read it as a guard, and a `?? []` behind one is redundant there.
+  if b1 == null {
+    assert(false, "removed cell's chunk bucket still exists");
+    return;
+  }
+  assert(!frc_has(b1.cell_ixs, 1), "bucket no longer lists the removed index 1");
   // removing a coord with no cell is a harmless no-op.
   field_remove_cell(f, 99, 99);
   assert(idx_at(f.cidx, 0, 0) == 0, "remove-miss is a no-op");
