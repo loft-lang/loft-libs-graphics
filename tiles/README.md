@@ -31,6 +31,7 @@ loft install tiles
 | `sheet_from_png(path, tile_w, tile_h, …)`, `sheet_from_image(img, …)` | through `imaging` |
 | `surface(width, height) -> integer?`, `clear(surface, colour)` | colours are RGB565: `rgb(r, g, b)` |
 | `draw(surface, sheet, tile, x, y, flip_h, flip_v, flip_d)` | a sprite is a tile drawn this way; clipped, transparency skipped |
+| `draw(..., shade)` / `SHADES` | a tile darker: shade 0 is as drawn, `SHADES - 1` (7) about a quarter of the light; each sheet keeps its palette at every shade, so a shade costs nothing |
 | `layer(cells, cols, rows) -> integer?`, `cell(tile, flips…)`, `set_cell`, `get_cell` | a cell is `(tile + 1) \| flags << 24`, 0 empty |
 | `layer_from_tiled_csv(csv, cols, rows, firstgid = 1)`, `from_tiled(gid, firstgid)` | Tiled's flip bits included |
 | `draw_layer(surface, layer, sheet, cam_x = 0, cam_y = 0)` | one call per layer, scrolled to the pixel |
