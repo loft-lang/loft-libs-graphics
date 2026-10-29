@@ -1,0 +1,208 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// tiles — tile sheets, map layers and sprites on a small 16-bit surface, scaled up once per
+// frame.  Built for a handheld (the Tanmatsu: a 32-bit core, 768 KB of fast SRAM, an 800x480
+// panel whose framebuffer is in slower PSRAM), and the same on every target.
+//
+// The shape of a frame: compose it at 1x on a `Surface` (200x120 for a 4x scale on 800x480 is
+// 48 KB), drawing map layers and sprites, then `present` it scaled — and on the device, rotated
+// a quarter turn into the portrait panel's framebuffer.  Only that last step touches the large
+// buffer, once per pixel.
+//
+// A sheet is converted once, when it is made: one byte per pixel (index 0 transparent, 1..255
+// RGB565 colours), tile after tile.  A Kenney 16 px pack of 132 tiles is 34 KB that way, where
+// RGBA would be 135 KB.  Colours are RGB565 — `rgb(r, g, b)` makes one — and a sheet with more
+// than 255 of them, once in RGB565, is refused.
+//
+// Orientation is Tiled's: a tile is transposed (the diagonal flip) first, then mirrored
+// horizontally, then vertically, so the eight combinations are the eight ways a square can lie.
+//
+// Handles: a sheet, a surface or a layer is a positive integer, null when it could not be made.
+use imaging;
+
+fn tl_set_new(rgba: const vector<u8>, width: integer, height: integer, tile_w: integer,
+              tile_h: integer, spacing: integer, margin: integer) -> integer;
+#c "tl_set_new" "int64_t(const uint8_t*, int64_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t)"
+fn tl_set_count(set: integer) -> integer;
+#c "tl_set_count" "int64_t(int64_t)"
+fn tl_set_colours(set: integer) -> integer;
+#c "tl_set_colours" "int64_t(int64_t)"
+fn tl_set_free(set: integer);
+#c "tl_set_free" "void(int64_t)"
+fn tl_surf_new(width: integer, height: integer) -> integer;
+#c "tl_surf_new" "int64_t(int32_t, int32_t)"
+fn tl_surf_free(surf: integer);
+#c "tl_surf_free" "void(int64_t)"
+fn tl_clear(surf: integer, colour: integer);
+#c "tl_clear" "void(int64_t, int32_t)"
+fn tl_pixels(surf: integer, out: vector<i32>);
+#c "tl_pixels" "void(int64_t, int32_t*)"
+fn tl_draw(surf: integer, set: integer, tile: integer, x: integer, y: integer, flags: integer);
+#c "tl_draw" "void(int64_t, int64_t, int32_t, int32_t, int32_t, int32_t)"
+fn tl_map_new(cells: const vector<i32>, cols: integer, rows: integer) -> integer;
+#c "tl_map_new" "int64_t(const int32_t*, int64_t, int32_t, int32_t)"
+fn tl_map_free(map: integer);
+#c "tl_map_free" "void(int64_t)"
+fn tl_map_set(map: integer, x: integer, y: integer, cell: integer);
+#c "tl_map_set" "void(int64_t, int32_t, int32_t, int32_t)"
+fn tl_map_get(map: integer, x: integer, y: integer) -> integer;
+#c "tl_map_get" "int64_t(int64_t, int32_t, int32_t)"
+fn tl_draw_map(surf: integer, map: integer, set: integer, cam_x: integer, cam_y: integer);
+#c "tl_draw_map" "void(int64_t, int64_t, int64_t, int32_t, int32_t)"
+fn tl_present(surf: integer, out: vector<i32>, scale: integer, rotate: integer);
+#c "tl_present" "void(int64_t, int32_t*, int64_t, int32_t, int32_t)"
+
+fn handle(h: integer) -> integer? {
+  if h <= 0 { return null; }
+  h
+}
+
+fn flags(flip_h: boolean, flip_v: boolean, flip_d: boolean) -> integer {
+  (if flip_h { 1 } else { 0 }) + (if flip_v { 2 } else { 0 }) + (if flip_d { 4 } else { 0 })
+}
+
+/// An RGB565 colour from 8-bit channels: 5 bits of red, 6 of green, 5 of blue.
+pub fn rgb(r: integer, g: integer, b: integer) -> integer {
+  ((r & 255) / 8) * 2048 + ((g & 255) / 4) * 32 + (b & 255) / 8
+}
+
+// --- Sheets ---
+
+/// A sheet from `width * height` RGBA bytes, cut into `tile_w * tile_h` tiles with `margin`
+/// pixels round the sheet and `spacing` between tiles (Tiled's names).  A pixel with alpha
+/// below 128 is transparent.  Tiles are numbered from 0, row by row.  Null when the sizes do not
+/// fit or the sheet has more than 255 colours once in RGB565.
+pub fn sheet(rgba: const vector<u8>, width: integer, height: integer, tile_w: integer,
+             tile_h: integer, spacing: integer = 0, margin: integer = 0) -> integer? {
+  if len(rgba) < width * height * 4 { return null; }
+  handle(tl_set_new(rgba, width, height, tile_w, tile_h, spacing, margin))
+}
+
+/// A sheet from a decoded image (`imaging::png`).
+pub fn sheet_from_image(img: const imaging::Image, tile_w: integer, tile_h: integer,
+                        spacing: integer = 0, margin: integer = 0) -> integer? {
+  bytes: vector<u8> = [];
+  for p in img.data { bytes += [p.r as u8, p.g as u8, p.b as u8, p.a as u8]; }
+  sheet(bytes, img.width, img.height, tile_w, tile_h, spacing, margin)
+}
+
+/// A sheet from a PNG file.
+pub fn sheet_from_png(path: text, tile_w: integer, tile_h: integer, spacing: integer = 0,
+                      margin: integer = 0) -> integer? {
+  img = file(path).png();
+  if img == null { return null; }
+  sheet_from_image(img ?? imaging::Image { }, tile_w, tile_h, spacing, margin)
+}
+
+/// How many tiles a sheet holds, and how many colours (at most 255).
+pub fn tile_count(sheet: integer) -> integer {
+  tl_set_count(sheet)
+}
+
+pub fn colour_count(sheet: integer) -> integer {
+  tl_set_colours(sheet)
+}
+
+pub fn free_sheet(sheet: integer) {
+  tl_set_free(sheet);
+}
+
+// --- Surfaces ---
+
+/// A 1x RGB565 surface to compose a frame on, cleared to black.
+pub fn surface(width: integer, height: integer) -> integer? {
+  handle(tl_surf_new(width, height))
+}
+
+pub fn free_surface(surface: integer) {
+  tl_surf_free(surface);
+}
+
+/// Fill a surface with one RGB565 colour.
+pub fn clear(surface: integer, colour: integer) {
+  tl_clear(surface, colour);
+}
+
+/// Draw tile `tile` of `sheet` with its top-left at (x, y), in any of the eight orientations.
+/// A sprite is a tile drawn this way.  Transparent pixels and whatever falls off the surface
+/// are skipped.
+pub fn draw(surface: integer, sheet: integer, tile: integer, x: integer, y: integer,
+            flip_h: boolean = false, flip_v: boolean = false, flip_d: boolean = false) {
+  tl_draw(surface, sheet, tile, x, y, flags(flip_h, flip_v, flip_d));
+}
+
+/// The surface's pixels, row by row, each an RGB565 value.
+pub fn pixels(surface: integer, width: integer, height: integer) -> vector<i32> {
+  out: vector<i32> = [0 as i32; width * height];
+  tl_pixels(surface, out);
+  out
+}
+
+/// The surface scaled by the integer `scale`, as `present` hands it to a display: row by row,
+/// (width * scale) x (height * scale) RGB565 values — or, `rotate`d a quarter turn clockwise
+/// for a portrait panel, (height * scale) x (width * scale), the surface's top-left at the
+/// top-right.
+pub fn present(surface: integer, width: integer, height: integer, scale: integer,
+               rotate: boolean = false) -> vector<i32> {
+  out: vector<i32> = [0 as i32; width * height * scale * scale];
+  tl_present(surface, out, scale, if rotate { 1 } else { 0 });
+  out
+}
+
+// --- Map layers ---
+
+/// A layer cell: tile `tile` (from 0) in one of the eight orientations.  0 is an empty cell.
+pub fn cell(tile: integer, flip_h: boolean = false, flip_v: boolean = false,
+            flip_d: boolean = false) -> integer {
+  (tile + 1) + flags(flip_h, flip_v, flip_d) * 16777216
+}
+
+/// A Tiled global tile id (with its flip bits: 31 horizontal, 30 vertical, 29 diagonal) as a
+/// cell of a sheet whose first id is `firstgid`; 0 for an empty one or a tile of another sheet
+/// (an id below `firstgid`).
+pub fn from_tiled(gid: integer, firstgid: integer = 1) -> integer {
+  id = gid % 536870912;
+  if id < firstgid || id == 0 { return 0; }
+  bits = gid / 536870912;
+  cell(id - firstgid, bits / 4 % 2 == 1, bits / 2 % 2 == 1, bits % 2 == 1)
+}
+
+/// A map layer of `cols * rows` cells, row by row.  Null when the cell count does not match.
+pub fn layer(cells: const vector<integer>, cols: integer, rows: integer) -> integer? {
+  if len(cells) != cols * rows { return null; }
+  packed: vector<i32> = [];
+  for c in cells { packed += [c & 2147483647]; }
+  handle(tl_map_new(packed, cols, rows))
+}
+
+/// A layer from a Tiled layer's CSV data (`<data encoding="csv">`), its gids read by `from_tiled`.
+pub fn layer_from_tiled_csv(csv: text, cols: integer, rows: integer, firstgid: integer = 1) -> integer? {
+  cells: vector<integer> = [];
+  for part in csv.split(',') {
+    t = part.trim();
+    if len(t) > 0 { cells += [from_tiled(t as integer? ?? 0, firstgid)]; }
+  }
+  layer(cells, cols, rows)
+}
+
+pub fn free_layer(layer: integer) {
+  tl_map_free(layer);
+}
+
+/// Set or read one cell; a position off the map is ignored, and reads 0.
+pub fn set_cell(layer: integer, x: integer, y: integer, cell: integer) {
+  tl_map_set(layer, x, y, cell & 2147483647);
+}
+
+pub fn get_cell(layer: integer, x: integer, y: integer) -> integer {
+  tl_map_get(layer, x, y)
+}
+
+/// Draw every cell of `layer` that shows on `surface` when the layer's pixel (cam_x, cam_y) is
+/// the surface's top-left — one call per layer, scrolling to the pixel.  Draw layers back to
+/// front.
+pub fn draw_layer(surface: integer, layer: integer, sheet: integer, cam_x: integer = 0,
+                  cam_y: integer = 0) {
+  tl_draw_map(surface, layer, sheet, cam_x, cam_y);
+}

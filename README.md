@@ -22,6 +22,7 @@ All four are published to the registry and installable today.
 |---|---|---|
 | [`graphics/`](graphics/) | `graphics` — drawing primitives, 2D canvas + 3D scene rendering, OpenGL/WebGL bindings | v0.5.5 |
 | [`imaging/`](imaging/) | `imaging` — PNG load/save, image manipulation | v0.2.2 |
+| [`tiles/`](tiles/) | `tiles` — tile sheets, map layers and sprites on a 16-bit surface, scaled up once per frame | v0.1.0 |
 | [`shapes/`](shapes/) | `shapes` — 2D collision detection | v0.4.1 |
 | [`gridmesh/`](gridmesh/) | `gridmesh` — chunk-local mesh generation primitives | v0.2.1 |
 

@@ -19,4 +19,4 @@ jobs:
       contents: read
       pull-requests: read
     with:
-      packages: '["drawing", "graphics", "gridmesh", "imaging", "shapes", "stage", "text2d", "tween"]'
+      packages: '["drawing", "graphics", "gridmesh", "imaging", "shapes", "stage", "text2d", "tiles", "tween"]'

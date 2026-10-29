@@ -1,0 +1,177 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The tile layer, read back pixel by pixel; every expected value is computed by hand in its
+// cell.  The fixture sheet is 4x2 RGBA pixels, two 2x2 tiles side by side:
+//   tile 0:  R G      tile 1:  W W
+//            B .               W W      (. transparent)
+// In RGB565, R = 63488 (31 << 11), G = 2016 (63 << 5), B = 31, W = 65535; a fresh or cleared
+// surface is 0.  A tile drawn at (0, 0) on a 2x2 surface fills it, so a 2x2 cell reads as
+// `[top-left, top-right, bottom-left, bottom-right]`.
+use tiles;
+
+const R = 63488;
+const G = 2016;
+const B = 31;
+const W = 65535;
+
+fn px(r: integer, g: integer, b: integer, a: integer) -> vector<u8> {
+  [(r & 255) as u8, (g & 255) as u8, (b & 255) as u8, (a & 255) as u8]
+}
+
+// Row 0: R G W W; row 1: B . W W.
+fn fixture() -> integer {
+  bytes: vector<u8> = [];
+  bytes += px(255, 0, 0, 255);
+  bytes += px(0, 255, 0, 255);
+  bytes += px(255, 255, 255, 255);
+  bytes += px(255, 255, 255, 255);
+  bytes += px(0, 0, 255, 255);
+  bytes += px(0, 0, 0, 0);
+  bytes += px(255, 255, 255, 255);
+  bytes += px(255, 255, 255, 255);
+  tiles::sheet(bytes, 4, 2, 2, 2) ?? 0
+}
+
+fn show(v: const vector<i32>) -> text {
+  t = "";
+  for p in v { t += "{p},"; }
+  t
+}
+
+// Tile 0 drawn on a 2x2 surface with the given flips.
+fn oriented(flip_h: boolean, flip_v: boolean, flip_d: boolean) -> text {
+  s = tiles::surface(2, 2) ?? 0;
+  tiles::draw(s, fixture(), 0, 0, 0, flip_h, flip_v, flip_d);
+  show(tiles::pixels(s, 2, 2))
+}
+
+fn main() {
+  assert(tiles::rgb(255, 0, 0) == R && tiles::rgb(0, 255, 0) == G, "RGB565 red and green");
+  assert(tiles::rgb(0, 0, 255) == B && tiles::rgb(255, 255, 255) == W, "RGB565 blue and white");
+}
+
+fn test_sheet_counts() {
+  s = fixture();
+  assert(s > 0, "the sheet is made");
+  assert(tiles::tile_count(s) == 2, "two tiles, got {tiles::tile_count(s)}");
+  assert(tiles::colour_count(s) == 4, "R, G, B, W, got {tiles::colour_count(s)}");
+}
+
+// At (1, 1) on a 4x3 surface; the transparent pixel leaves the background.
+fn test_draw_places_and_keeps_transparency() {
+  s = tiles::surface(4, 3) ?? 0;
+  tiles::draw(s, fixture(), 0, 1, 1);
+  got = show(tiles::pixels(s, 4, 3));
+  assert(got == "0,0,0,0,0,{R},{G},0,0,{B},0,0,", "got {got}");
+}
+
+fn test_the_eight_orientations() {
+  assert(oriented(false, false, false) == "{R},{G},{B},0,", "as is: {oriented(false, false, false)}");
+  assert(oriented(true, false, false) == "{G},{R},0,{B},", "mirrored: {oriented(true, false, false)}");
+  assert(oriented(false, true, false) == "{B},0,{R},{G},", "flipped: {oriented(false, true, false)}");
+  assert(oriented(false, false, true) == "{R},{B},{G},0,", "transposed: {oriented(false, false, true)}");
+  assert(oriented(true, false, true) == "{B},{R},0,{G},", "a quarter turn clockwise: {oriented(true, false, true)}");
+  assert(oriented(true, true, false) == "0,{B},{G},{R},", "a half turn: {oriented(true, true, false)}");
+  assert(oriented(false, true, true) == "{G},0,{R},{B},", "a quarter turn back: {oriented(false, true, true)}");
+  assert(oriented(true, true, true) == "0,{G},{B},{R},", "the anti-transpose: {oriented(true, true, true)}");
+}
+
+// Tile 1 (white) half off the surface at either corner: only the pixel inside is drawn.
+fn test_clipping() {
+  s = tiles::surface(2, 2) ?? 0;
+  tiles::draw(s, fixture(), 1, -1, -1);
+  assert(show(tiles::pixels(s, 2, 2)) == "{W},0,0,0,", "top-left: {show(tiles::pixels(s, 2, 2))}");
+  t = tiles::surface(2, 2) ?? 0;
+  tiles::draw(t, fixture(), 1, 1, 1);
+  assert(show(tiles::pixels(t, 2, 2)) == "0,0,0,{W},", "bottom-right: {show(tiles::pixels(t, 2, 2))}");
+  tiles::draw(t, fixture(), 7, 0, 0);
+  assert(show(tiles::pixels(t, 2, 2)) == "0,0,0,{W},", "a tile the sheet has not draws nothing");
+  // Over the left and the right edge, whole rows: a column that is not clipped would land in
+  // the neighbouring row (x -1 of row 1 is x 1 of row 0, x 2 of row 0 is x 0 of row 1).
+  l = tiles::surface(2, 2) ?? 0;
+  tiles::draw(l, fixture(), 1, -1, 0);
+  assert(show(tiles::pixels(l, 2, 2)) == "{W},0,{W},0,", "left edge: {show(tiles::pixels(l, 2, 2))}");
+  r = tiles::surface(2, 2) ?? 0;
+  tiles::draw(r, fixture(), 1, 1, 0);
+  assert(show(tiles::pixels(r, 2, 2)) == "0,{W},0,{W},", "right edge: {show(tiles::pixels(r, 2, 2))}");
+}
+
+// A 7x4 sheet, margin 1, spacing 1: two 2x2 tiles at x 1..2 and 4..5, y 1..2, the rest magenta.
+// Tile 0 is red, tile 1 blue; neither may show magenta.
+fn test_margin_and_spacing() {
+  bytes: vector<u8> = [];
+  for y in 0..4 {
+    for x in 0..7 {
+      if y >= 1 && y <= 2 && x >= 1 && x <= 2 {
+        bytes += px(255, 0, 0, 255);
+      } else if y >= 1 && y <= 2 && x >= 4 && x <= 5 {
+        bytes += px(0, 0, 255, 255);
+      } else {
+        bytes += px(255, 0, 255, 255);
+      }
+    }
+  }
+  sh = tiles::sheet(bytes, 7, 4, 2, 2, 1, 1) ?? 0;
+  assert(tiles::tile_count(sh) == 2, "two tiles, got {tiles::tile_count(sh)}");
+  s = tiles::surface(4, 2) ?? 0;
+  tiles::draw(s, sh, 0, 0, 0);
+  tiles::draw(s, sh, 1, 2, 0);
+  got = show(tiles::pixels(s, 4, 2));
+  assert(got == "{R},{R},{B},{B},{R},{R},{B},{B},", "got {got}");
+}
+
+// A 2x1 layer [tile 0, tile 1] on a 4x2 surface scrolled one pixel right: tile 0's right column
+// at x 0 (G over transparent), tile 1 at x 1..2, and nothing past the map's end at x 3.
+fn test_layer_scrolls_to_the_pixel() {
+  m = tiles::layer([tiles::cell(0), tiles::cell(1)], 2, 1) ?? 0;
+  s = tiles::surface(4, 2) ?? 0;
+  tiles::draw_layer(s, m, fixture(), 1, 0);
+  got = show(tiles::pixels(s, 4, 2));
+  assert(got == "{G},{W},{W},0,0,{W},{W},0,", "got {got}");
+}
+
+// Tiled ids: bit 31 horizontal, 30 vertical, 29 diagonal; a cell is (tile + 1) | flags << 24.
+fn test_tiled_ids() {
+  assert(tiles::from_tiled(2) == 2, "gid 2 is tile 1");
+  assert(tiles::from_tiled(2147483650) == 16777218, "0x80000002: tile 1 mirrored");
+  assert(tiles::from_tiled(2684354561) == 83886081, "0xA0000001: tile 0 mirrored and transposed");
+  assert(tiles::from_tiled(0) == 0, "an empty cell");
+  assert(tiles::from_tiled(5, 10) == 0, "a tile of an earlier sheet");
+  m = tiles::layer_from_tiled_csv("1,2,\n0,2147483650", 2, 2) ?? 0;
+  assert(tiles::get_cell(m, 0, 0) == 1 && tiles::get_cell(m, 1, 0) == 2, "the first row");
+  assert(tiles::get_cell(m, 0, 1) == 0 && tiles::get_cell(m, 1, 1) == 16777218, "the second row");
+  tiles::set_cell(m, 0, 1, tiles::cell(1, true));
+  assert(tiles::get_cell(m, 0, 1) == 16777218, "a cell set");
+  assert(tiles::get_cell(m, 9, 9) == 0, "off the map reads 0");
+}
+
+// A 2x1 surface [R, G] scaled 2: two rows of R R G G.  Rotated a quarter turn clockwise it is
+// 1x2 (R over G), and scaled 2 that is 2x4.
+fn test_present_scales_and_rotates() {
+  s = tiles::surface(2, 1) ?? 0;
+  tiles::draw(s, fixture(), 0, 0, 0);
+  assert(show(tiles::present(s, 2, 1, 2)) == "{R},{R},{G},{G},{R},{R},{G},{G},", "scaled");
+  assert(show(tiles::present(s, 2, 1, 1, true)) == "{R},{G},", "rotated");
+  assert(show(tiles::present(s, 2, 1, 2, true)) == "{R},{R},{R},{R},{G},{G},{G},{G},", "rotated, scaled");
+  q = tiles::surface(2, 2) ?? 0;
+  tiles::draw(q, fixture(), 0, 0, 0);
+  got = show(tiles::present(q, 2, 2, 1, true));
+  assert(got == "{B},{R},0,{G},", "R G over B . turns to B R over . G: {got}");
+}
+
+fn test_clear() {
+  s = tiles::surface(2, 1) ?? 0;
+  tiles::clear(s, tiles::rgb(0, 255, 0));
+  assert(show(tiles::pixels(s, 2, 1)) == "{G},{G},", "cleared to green");
+}
+
+// 272 distinct RGB565 colours (red in 32 steps, green in 9) are more than a sheet's 255.
+fn test_too_many_colours() {
+  bytes: vector<u8> = [];
+  for i in 0..272 { bytes += px(i % 32 * 8, i / 32 * 4, 0, 255); }
+  assert(!tiles::sheet(bytes, 272, 1, 1, 1), "refused");
+  assert(!tiles::sheet(bytes, 4, 1, 8, 8), "a tile larger than the sheet");
+  assert(!tiles::surface(0, 5), "an empty surface");
+  assert(!tiles::layer([1, 2, 3], 2, 2), "a layer whose cells do not fill it");
+}

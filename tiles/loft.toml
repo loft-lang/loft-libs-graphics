@@ -1,0 +1,22 @@
+[package]
+name = "tiles"
+version = "0.1.0"
+loft = ">=2026.10.0"
+repository = "loft-libs-graphics"
+description = "Tile sheets, map layers and sprites on a small 16-bit surface, scaled up once per frame"
+
+# ⚠ FIRST release, so both floors are this release itself.
+api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
+data_compatible_with = "0.1.0"   # oldest own release whose stored data this reads
+
+[dependencies]
+imaging = ">=0.4.0"   # `sheet_from_image` / `sheet_from_png`
+
+[library]
+entry = "src/tiles.loft"
+
+# The core is C99 the package ships and loft builds itself with `cc` (and `clang` for the two
+# wasm targets): `c/tiles.c`, bound by the `#c` declarations in src/tiles.loft.  Pure
+# computation; a device's present is a layer that calls `tl_present565` with its framebuffer.
+[c]
+shim = "c/tiles.c"

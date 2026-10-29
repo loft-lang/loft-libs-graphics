@@ -1,0 +1,58 @@
+<!--
+Copyright (c) 2026 Jurjen Stellingwerff
+SPDX-License-Identifier: LGPL-3.0-or-later
+-->
+
+# tiles — tile sheets, map layers and sprites, scaled up once per frame
+
+A tile layer built for a small handheld (the Tanmatsu: a 32-bit core, 768 KB of fast SRAM, an
+800x480 panel whose framebuffer lives in slower PSRAM) and the same on every target.
+
+A frame is composed at 1x on a small RGB565 `surface` — 200x120 for a 4x scale on 800x480,
+48 KB — by drawing map layers and sprites, and then `present`ed once: scaled by an integer and,
+for the portrait panel, rotated a quarter turn.  Only the present touches the large buffer.
+
+A sheet is converted once, when it is made: one byte per pixel (index 0 transparent, 1..255
+RGB565 colours), tile after tile, so a Kenney 16 px pack (132 tiles) is 34 KB.  Orientation
+follows Tiled: transpose (the diagonal flip), then mirror horizontally, then vertically — all
+eight ways a tile can lie, as Tiled maps use them.
+
+## Install
+
+```sh
+loft install tiles
+```
+
+## API
+
+| Function | Notes |
+|---|---|
+| `sheet(rgba, width, height, tile_w, tile_h, spacing = 0, margin = 0) -> integer?` | null when the sizes do not fit or there are more than 255 colours once in RGB565 |
+| `sheet_from_png(path, tile_w, tile_h, …)`, `sheet_from_image(img, …)` | through `imaging` |
+| `surface(width, height) -> integer?`, `clear(surface, colour)` | colours are RGB565: `rgb(r, g, b)` |
+| `draw(surface, sheet, tile, x, y, flip_h, flip_v, flip_d)` | a sprite is a tile drawn this way; clipped, transparency skipped |
+| `layer(cells, cols, rows) -> integer?`, `cell(tile, flips…)`, `set_cell`, `get_cell` | a cell is `(tile + 1) \| flags << 24`, 0 empty |
+| `layer_from_tiled_csv(csv, cols, rows, firstgid = 1)`, `from_tiled(gid, firstgid)` | Tiled's flip bits included |
+| `draw_layer(surface, layer, sheet, cam_x = 0, cam_y = 0)` | one call per layer, scrolled to the pixel |
+| `present(surface, width, height, scale, rotate = false) -> vector<i32>` | the scaled (and rotated) frame, for tests; a device calls `tl_present565` with its framebuffer |
+| `pixels(surface, width, height)`, `tile_count`, `colour_count`, `free_*` | |
+
+## Speed
+
+`bench/frame.c` draws the frame a small game draws: a 200x120 surface, two 32x20 layers of
+16 px tiles with flips, 16 sprites, and a 4x present rotated into an 800x480 RGB565 buffer.
+On the x86-64 machine it was written on, a frame took 2.9–5.4 ms under varying load, the
+present most of it: memory traffic, one store per output pixel.  On the device the present's
+writes go to PSRAM; that number needs the device.
+
+## Targets
+
+| target | state |
+|---|---|
+| interpreter, `--native` | ✓ suite |
+| C backend (`--native-c`) | ✓ suite matches the interpreter on x86-64, 32-bit x86 and 32-bit RISC-V (under qemu) |
+| `--native-wasm` / `--html` | the core builds for wasm32 freestanding |
+
+## Provenance
+
+The core is `c/tiles.c`, a `[c] shim` loft builds itself.
