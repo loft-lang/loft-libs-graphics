@@ -26,10 +26,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Shades: a tile drawn darker is drawn through a darker copy of its sheet's palette, made once
+ * when the sheet is made, so shading costs nothing per pixel.  Level 0 is the tile as it is;
+ * each level after multiplies the channels by TL_SHADE[level] / 256, down to about a quarter,
+ * so the darkest shade still shows what is there. */
+#define TL_SHADES 8
+static const uint16_t TL_SHADE[TL_SHADES] = {256, 208, 168, 136, 110, 89, 72, 58};
+
 typedef struct {
     uint8_t *px;        /* count tiles of tw * th indices, tile after tile */
     int32_t tw, th, count, colours;
-    uint16_t pal[256];  /* pal[0] unused: index 0 is transparent */
+    uint16_t pal[TL_SHADES][256];  /* pal[level][0] unused: index 0 is transparent */
 } tl_set;
 
 typedef struct {
@@ -86,7 +93,7 @@ void tl_set_free(int64_t set);
  * do not fit or the sheet has more than 255 colours once in RGB565. */
 int64_t tl_set_new(const uint8_t *rgba, int64_t n, int32_t w, int32_t h, int32_t tw, int32_t th,
                    int32_t spacing, int32_t margin) {
-    int32_t cols, rows, t, x, y;
+    int32_t cols, rows, t, x, y, level;
     uint8_t *index_of;
     tl_set *s;
     int64_t handle;
@@ -131,7 +138,7 @@ int64_t tl_set_new(const uint8_t *rgba, int64_t n, int32_t w, int32_t h, int32_t
                         return 0;
                     }
                     s->colours++;
-                    s->pal[s->colours] = c;
+                    s->pal[0][s->colours] = c;
                     index_of[c] = (uint8_t) s->colours;
                 }
                 dst[y * tw + x] = index_of[c];
@@ -139,6 +146,14 @@ int64_t tl_set_new(const uint8_t *rgba, int64_t n, int32_t w, int32_t h, int32_t
         }
     }
     free(index_of);
+    for (level = 1; level < TL_SHADES; level++) {
+        int32_t k;
+        for (k = 1; k <= s->colours; k++) {
+            uint32_t c = s->pal[0][k], f = TL_SHADE[level];
+            uint32_t r = (((c >> 11) & 31) * f) >> 8, g = (((c >> 5) & 63) * f) >> 8, b = ((c & 31) * f) >> 8;
+            s->pal[level][k] = (uint16_t) ((r << 11) | (g << 5) | b);
+        }
+    }
     handle = tl_put(&tl_sets, s);
     if (handle == 0) {
         free(s->px);
@@ -224,6 +239,8 @@ void tl_pixels(int64_t surf, int32_t *out) {
  * skipped, and so is a transparent pixel. */
 static void tl_blit(tl_surf *d, const tl_set *s, int32_t tile, int32_t x, int32_t y, int32_t flags) {
     int32_t fh = flags & 1, fv = (flags >> 1) & 1, fd = (flags >> 2) & 1;
+    int32_t level = (flags >> 8) & 15;
+    const uint16_t *pal = s->pal[level < TL_SHADES ? level : TL_SHADES - 1];
     int32_t ow = fd ? s->th : s->tw, oh = fd ? s->tw : s->th;
     int32_t u0 = x < 0 ? -x : 0, v0 = y < 0 ? -y : 0;
     int32_t u1 = d->w - x < ow ? d->w - x : ow, v1 = d->h - y < oh ? d->h - y : oh;
@@ -242,7 +259,7 @@ static void tl_blit(tl_surf *d, const tl_set *s, int32_t tile, int32_t x, int32_
         uint16_t *q = d->px + (size_t) (y + v) * (size_t) d->w + (size_t) (x + u0);
         for (u = u0; u < u1; u++) {
             uint8_t i = *p;
-            if (i) *q = s->pal[i];
+            if (i) *q = pal[i];
             q++;
             p += step;
         }
@@ -254,7 +271,7 @@ void tl_draw(int64_t surf, int64_t set, int32_t tile, int32_t x, int32_t y, int3
 void tl_draw(int64_t surf, int64_t set, int32_t tile, int32_t x, int32_t y, int32_t flags) {
     tl_surf *d = (tl_surf *) tl_get(&tl_surfs, surf);
     tl_set *s = (tl_set *) tl_get(&tl_sets, set);
-    if (d && s) tl_blit(d, s, tile, x, y, flags & 7);
+    if (d && s) tl_blit(d, s, tile, x, y, flags & 0xF07);
 }
 
 /* ── Maps ── */

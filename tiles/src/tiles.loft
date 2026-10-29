@@ -124,12 +124,19 @@ pub fn clear(surface: integer, colour: integer) {
   tl_clear(surface, colour);
 }
 
+/// How many shades a tile can be drawn at: 0 is the tile as it is, `SHADES - 1` the darkest.
+pub const SHADES = 8;
+
 /// Draw tile `tile` of `sheet` with its top-left at (x, y), in any of the eight orientations.
 /// A sprite is a tile drawn this way.  Transparent pixels and whatever falls off the surface
-/// are skipped.
+/// are skipped.  `shade` darkens it: 0 is the tile as it is, and each shade up to
+/// `SHADES - 1` is darker, down to about a quarter of the light, so the darkest still shows
+/// what is there.  A shade costs nothing: each sheet keeps its palette at every shade.
 pub fn draw(surface: integer, sheet: integer, tile: integer, x: integer, y: integer,
-            flip_h: boolean = false, flip_v: boolean = false, flip_d: boolean = false) {
-  tl_draw(surface, sheet, tile, x, y, flags(flip_h, flip_v, flip_d));
+            flip_h: boolean = false, flip_v: boolean = false, flip_d: boolean = false,
+            shade: integer = 0) {
+  s = if shade < 0 { 0 } else if shade >= SHADES { SHADES - 1 } else { shade };
+  tl_draw(surface, sheet, tile, x, y, flags(flip_h, flip_v, flip_d) + s * 256);
 }
 
 /// The surface's pixels, row by row, each an RGB565 value.
