@@ -30,6 +30,7 @@ loft install tiles
 | `sheet(rgba, width, height, tile_w, tile_h, spacing = 0, margin = 0) -> integer?` | null when the sizes do not fit or there are more than 255 colours once in RGB565 |
 | `sheet_from_png(path, tile_w, tile_h, …)`, `sheet_from_image(img, …)` | through `imaging` |
 | `surface(width, height) -> integer?`, `clear(surface, colour)` | colours are RGB565: `rgb(r, g, b)` |
+| `rect(surface, x, y, w, h, colour)`, `frame(surface, x, y, w, h, colour)` | a filled rectangle and its one-pixel outline: a cursor, a selection, a palette's frame; clipped |
 | `draw(surface, sheet, tile, x, y, flip_h, flip_v, flip_d)` | a sprite is a tile drawn this way; clipped, transparency skipped |
 | `draw(..., shade)` / `SHADES` | a tile darker: shade 0 is as drawn, `SHADES - 1` (7) about a quarter of the light; each sheet keeps its palette at every shade, so a shade costs nothing |
 | `layer(cells, cols, rows) -> integer?`, `cell(tile, flips…)`, `set_cell`, `get_cell` | a cell is `(tile + 1) \| flags << 24`, 0 empty |
