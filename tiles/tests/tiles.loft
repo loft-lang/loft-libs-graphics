@@ -191,3 +191,45 @@ fn test_shades() {
   assert(show(tiles::pixels(u, 2, 2)) == "14791,14791,14791,14791,", "past the last: {show(tiles::pixels(u, 2, 2))}");
 }
 
+
+// A filled rectangle is clipped at every edge.  On a 4x3 surface, (-1, 1) 3x5 covers x 0..1 and
+// y 1..2; (3, 2) 9x9 only the bottom-right pixel.  Off the surface, or with no width or height,
+// it draws nothing.
+fn test_rect_clips() {
+  s = tiles::surface(4, 3) ?? 0;
+  tiles::rect(s, -1, 1, 3, 5, G);
+  tiles::rect(s, 3, 2, 9, 9, R);
+  tiles::rect(s, 4, 0, 1, 1, B);
+  tiles::rect(s, 0, -1, 4, 1, B);
+  tiles::rect(s, 0, 0, 0, 3, B);
+  tiles::rect(s, 0, 0, 2, -1, B);
+  got = show(tiles::pixels(s, 4, 3));
+  assert(got == "0,0,0,0,{G},{G},0,0,{G},{G},0,{R},", "got {got}");
+}
+
+// Sizes past 32 bits are clipped, not wrapped: 4294967297 is 2^32 + 1, which as a 32-bit
+// width would be 1 and fill one pixel of the two.
+fn test_rect_is_clipped_not_wrapped() {
+  s = tiles::surface(2, 1) ?? 0;
+  tiles::rect(s, 0, 0, 4294967297, 1, W);
+  assert(show(tiles::pixels(s, 2, 1)) == "{W},{W},", "got {show(tiles::pixels(s, 2, 1))}");
+  t = tiles::surface(2, 1) ?? 0;
+  tiles::rect(t, -1000000000000, -5, 2000000000000, 10, R);
+  assert(show(tiles::pixels(t, 2, 1)) == "{R},{R},", "got {show(tiles::pixels(t, 2, 1))}");
+}
+
+// The outline of a 4x3 rectangle at (0, 0) leaves the two middle pixels; one 3x3 at (-1, -1)
+// on a 3x3 surface keeps only its bottom row (x 0..1 at y 1) and its right column (x 1, y 0);
+// a 1x1 frame is one pixel and a 0-wide one nothing.
+fn test_frame() {
+  s = tiles::surface(4, 3) ?? 0;
+  tiles::frame(s, 0, 0, 4, 3, R);
+  got = show(tiles::pixels(s, 4, 3));
+  assert(got == "{R},{R},{R},{R},{R},0,0,{R},{R},{R},{R},{R},", "4x3: {got}");
+  t = tiles::surface(3, 3) ?? 0;
+  tiles::frame(t, -1, -1, 3, 3, B);
+  tiles::frame(t, 2, 2, 1, 1, G);
+  tiles::frame(t, 0, 2, 0, 1, W);
+  got = show(tiles::pixels(t, 3, 3));
+  assert(got == "0,{B},0,{B},{B},0,0,0,{G},", "clipped: {got}");
+}

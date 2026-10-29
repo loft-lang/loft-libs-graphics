@@ -185,6 +185,7 @@ void tl_set_free(int64_t set) {
 int64_t tl_surf_new(int32_t w, int32_t h);
 void tl_surf_free(int64_t surf);
 void tl_clear(int64_t surf, int32_t c565);
+void tl_rect(int64_t surf, int64_t x, int64_t y, int64_t w, int64_t h, int32_t c565);
 void tl_pixels(int64_t surf, int32_t *out);
 
 int64_t tl_surf_new(int32_t w, int32_t h) {
@@ -222,6 +223,24 @@ void tl_clear(int64_t surf, int32_t c565) {
     if (!s) return;
     n = (int64_t) s->w * s->h;
     for (i = 0; i < n; i++) s->px[i] = (uint16_t) c565;
+}
+
+/* The `w * h` rectangle with its top-left at (x, y) filled with one colour, clipped to the
+ * surface; nothing when `w` or `h` is not positive.  The sizes are 64-bit so that a rectangle
+ * reaching far past the surface is clipped, never wrapped: `x > s->w - w` is `x + w > s->w`
+ * without the sum. */
+void tl_rect(int64_t surf, int64_t x, int64_t y, int64_t w, int64_t h, int32_t c565) {
+    tl_surf *s = (tl_surf *) tl_get(&tl_surfs, surf);
+    int64_t x0, y0, x1, y1, u, v;
+    if (!s || w <= 0 || h <= 0) return;
+    x0 = x < 0 ? 0 : x;
+    y0 = y < 0 ? 0 : y;
+    x1 = x > s->w - w ? s->w : x + w;
+    y1 = y > s->h - h ? s->h : y + h;
+    for (v = y0; v < y1; v++) {
+        uint16_t *q = s->px + (size_t) v * (size_t) s->w;
+        for (u = x0; u < x1; u++) q[u] = (uint16_t) c565;
+    }
 }
 
 void tl_pixels(int64_t surf, int32_t *out) {
