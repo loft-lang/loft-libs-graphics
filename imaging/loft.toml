@@ -1,6 +1,6 @@
 [package]
 name = "imaging"
-version = "0.4.4"
+version = "0.5.0"
 loft = ">=2026.10.0"
 api_compatible_with  = "0.4.0"   # DECLARED BREAK: `png()` answers `Image?`.  It always
                                  # answered null on a missing or undecodable file; the
@@ -15,25 +15,11 @@ repository = "loft-libs-graphics"
 
 [library]
 entry = "src/imaging.loft"
-native = "loft_imaging"
 
-# Declares the COMPILE-time native crate so `--native` links the rlib
-# (`add_native_extern_flags`), not just the runtime dylib above.
-# Without it `loft --native test` fails with P269
-# "no implementation in any registered native crate".
-[native]
-crate = "loft-imaging"
-
-# Browser (`--html`) bridge for the store-mutating `#native` fns.  The
-# `--html` codegen routes `n_load_png`/`n_save_png` to the `pub fn`s in
-# `wasm/src/lib.rs`, which decode/encode via host imports (`loft_gl.*`
-# provided by `wasm/host.js`: the browser's Image/Canvas API).  The
-# bridge crate path-deps the sibling `loft` checkout (`../../../loft`),
-# the pattern the crypto/web bridges use — no crates.io publish needed.
-[wasm.bridge]
-crate = "loft-imaging-wasm"
-host_js = "wasm/host.js"
-
-[wasm.bridge.routes]
-n_load_png = "imaging_load_png"
-n_save_png = "imaging_save_png"
+# The native part is C99 the package ships and loft builds itself with `cc` (and with `clang`
+# for the two wasm targets): `c/imaging_png.c` over the vendored lodepng (`c/vendor/lodepng`,
+# zlib license), bound by the `#c` declarations in src/imaging.loft.  Memory in, memory out —
+# loft reads and writes the file — so every target, a 32-bit device included, decodes and
+# encodes with the same code.  No Rust crate, no rustc, no wasm bridge.
+[c]
+shim = "c/imaging_png.c"

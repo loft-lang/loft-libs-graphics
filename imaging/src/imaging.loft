@@ -1,7 +1,7 @@
 // Copyright (c) 2024 Jurjen Stellingwerff
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // --- Imaging ---
-// Types and functions for reading PNG images.
+// Types and functions for reading and writing PNG images.
 
 // Data per pixel of a PNG image.
 // Fields r, g, b hold red, green and blue intensity and `a` holds opacity, each
@@ -63,16 +63,67 @@ pub struct Image {
   pub data: vector<Pixel>
 }
 
-// Native function: decode a PNG file into an Image struct.
-// Bare `#native` → symbol `n_load_png` by convention (the fn name).
-fn load_png(path: text, image: Image) -> boolean;
-#native
+// The C part (c/imaging_png.c over the vendored lodepng): PNG bytes to RGBA and back, memory to
+// memory.  A decode or an encode answers a handle (0 on failure); its size is asked, its bytes
+// copied into a vector sized for them, and the handle freed.
+fn ip_decode(png: const vector<u8>) -> integer;
+#c "ip_decode" "int64_t(const uint8_t*, int64_t)"
+fn ip_encode(rgba: const vector<u8>, width: integer, height: integer, alpha: integer) -> integer;
+#c "ip_encode" "int64_t(const uint8_t*, int64_t, int32_t, int32_t, int32_t)"
+fn ip_width(h: integer) -> integer;
+#c "ip_width" "int64_t(int64_t)"
+fn ip_height(h: integer) -> integer;
+#c "ip_height" "int64_t(int64_t)"
+fn ip_size(h: integer) -> integer;
+#c "ip_size" "int64_t(int64_t)"
+fn ip_copy(h: integer, out: vector<u8>);
+#c "ip_copy" "void(int64_t, uint8_t*)"
+fn ip_free(h: integer);
+#c "ip_free" "void(int64_t)"
 
-// Native function: encode an Image struct as a PNG file.
-// Explicit override: the loft wrapper is `save_png_native` but the
-// native symbol is `n_save_png` (a pure-loft `save_png` wraps it).
-fn save_png_native(image: const Image, path: text) -> boolean;
-#native "n_save_png"
+// The bytes handle `h` holds, its handle freed.
+fn ip_take(h: integer) -> vector<u8> {
+  out: vector<u8> = [0 as u8; ip_size(h)];
+  ip_copy(h, out);
+  ip_free(h);
+  out
+}
+
+// Decode the PNG file `path` into `image`: false when it cannot be read or decoded.
+fn load_png(path: text, image: Image) -> boolean {
+  bytes = read_bytes(path) ?? [];
+  if len(bytes) == 0 { return false; }
+  h = ip_decode(bytes);
+  if h == 0 { return false; }
+  w = ip_width(h);
+  ht = ip_height(h);
+  rgba = ip_take(h);
+  image.name = path.basename();
+  image.width = w;
+  image.height = ht;
+  for i in 0..w * ht {
+    image.data += [Pixel { r: rgba[4 * i] ?? 0, g: rgba[4 * i + 1] ?? 0,
+                           b: rgba[4 * i + 2] ?? 0, a: rgba[4 * i + 3] ?? 0 }];
+  }
+  true
+}
+
+// Encode `image` as an 8-bit PNG file at `path`: RGB when every pixel is opaque, RGBA
+// otherwise.  False when the image is not whole (`len(data) != width * height`) or the file
+// cannot be written.
+fn save_png_native(image: const Image, path: text) -> boolean {
+  n = image.width * image.height;
+  if n <= 0 || len(image.data) != n { return false; }
+  rgba: vector<u8> = [];
+  alpha = 0;
+  for p in image.data {
+    rgba += [p.r as u8, p.g as u8, p.b as u8, p.a as u8];
+    if p.a != 255 { alpha = 1; }
+  }
+  h = ip_encode(rgba, image.width, image.height, alpha);
+  if h == 0 { return false; }
+  write_bytes(path, ip_take(h))
+}
 
 // Write this image to a PNG file. Returns true on success.
 pub fn save_png(self: const Image, path: text) -> boolean {

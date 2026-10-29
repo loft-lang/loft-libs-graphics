@@ -33,8 +33,11 @@ A guide: [docs/01-getting-started.loft](docs/01-getting-started.loft).
 `Image.data` is one flat, row-major `vector<Pixel>`: the pixel at (x, y) is
 `data[y * width + x]`, and `len(data) == width * height`.
 
-Native code (cdylib `loft_imaging`) backs the PNG codec via the `png`
-crate.
+The PNG codec is C99 the package ships: `c/imaging_png.c` over the vendored
+[lodepng](https://github.com/lvandeve/lodepng) (zlib license, `c/vendor/lodepng`),
+built by loft itself as a `[c] shim`.  Memory in, memory out — loft reads and
+writes the file — so every target, a 32-bit device included, decodes and encodes
+with the same code.  No Rust crate and no wasm bridge.
 
 ## Worked examples
 
@@ -51,12 +54,8 @@ than edited (and the local you read it into is a view of its slot), `@IMG-004`
 |---|---|
 | interpreter | ✓ suite green |
 | `--native` | ✓ suite green |
-| `--native-wasm` (headless WASI) | ✓ builds and decodes as the interpreter does |
-| `--html` (browser) | ✓ bridge in `wasm/`, landed 0.2.1 |
-
-The browser bridge routes `n_load_png` / `n_save_png` to the browser's
-Image/OffscreenCanvas API through `loft_gl` host imports, and path-deps the
-sibling loft checkout, so nothing needs publishing to crates.io for it to build.
+| C backend (`--native-c`) | ✓ suite matches the interpreter on x86-64, 32-bit x86 and 32-bit RISC-V (under qemu) |
+| `--native-wasm` / `--html` | the shim builds for wasm32 freestanding, as loft builds it there |
 
 ## Provenance
 
