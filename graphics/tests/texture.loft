@@ -6,6 +6,7 @@
 // 64 x 48 window the bottom half is capture rows 24-47.  Under Xvfb, start the server with
 // `-noreset` (see window.loft).
 use graphics::*;
+use imaging::*;
 
 fn display() -> boolean {
   (env_variable("DISPLAY") ?? "") != ""
@@ -146,4 +147,37 @@ fn test_the_window_is_the_target_again() {
   w.clear(GREEN);
   c = w.capture();
   assert(at(c, 32, 24) == GREEN, "the window is drawn into again: {at(c, 32, 24):x}");
+}
+
+// A PNG drawn 1:1 is the PNG: its top row on top, every pixel its own (a texel's centre samples
+// exactly, so linear filtering changes nothing).  Fully transparent texels are not drawn.
+fn test_a_png_becomes_a_texture() {
+  wo = open_window(64, 32, "g8-png");
+  if !display() { return; }
+  w = wo ?? return assert(false, "no window");
+  p = w.painter() ?? return assert(false, "painter");
+  t = w.load_texture("gold/gold-text-fixture.png") ?? return assert(false, "the PNG loads");
+  assert(t.width() == 64 && t.height() == 32, "size {t.width()}x{t.height()}");
+  gold = imaging::png(file("gold/gold-text-fixture.png")) ?? return assert(false, "gold decodes");
+  w.clear(0xFF000000);
+  p.image(t, 0.0, 0.0, 64.0, 32.0);
+  c = w.capture();
+  differ = 0;
+  for i in 0..64 * 32 {
+    q = gold.data[i];
+    if ((c.data[i] ?? 0) | 0xFF000000) != rgba(q.r, q.g, q.b, 255) { differ += 1; }
+  }
+  assert(differ == 0, "{differ} pixels differ from the PNG");
+  rgba_png = canvas(2, 1, rgba(10, 200, 30, 255));
+  rgba_png.set_pixel(1, 0, rgba(250, 0, 0, 0));
+  shot = "{source_dir()}/_tmp_gfx_g8_rgba.png";
+  assert(rgba_png.save_png(shot), "saved");
+  t2 = w.load_texture(shot) ?? return assert(false, "the RGBA PNG loads");
+  t2.filter(true);
+  w.clear(0xFF0000FF);
+  p.image(t2, 0.0, 0.0, 64.0, 32.0);
+  c = w.capture();
+  assert(at(c, 16, 16) == rgba(10, 200, 30, 255), "the opaque texel: {at(c, 16, 16):x}");
+  assert(at(c, 48, 16) == 0xFF0000FF, "the transparent texel is not drawn: {at(c, 48, 16):x}");
+  assert(!w.load_texture("no-such.png"), "a missing file is null");
 }

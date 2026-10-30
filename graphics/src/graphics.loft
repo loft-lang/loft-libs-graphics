@@ -1869,6 +1869,22 @@ pub fn render_to_window(self: const Window) {
   gg_render_to(self.handle, 0);
 }
 
+// Load a PNG file as a colour texture (filtered linearly, clamped at its edges), its top row at
+// texture coordinate 0 as a canvas uploads.  Any PNG colour type loads; 16-bit channels keep their
+// high byte.  A relative path resolves against the program's own directory, as `load_font`'s.
+// Null when the file is missing or is not a PNG this decoder reads.
+pub fn load_texture(self: const Window, path: text) -> Texture? {
+  full = path;
+  if !path.starts_with("/") {
+    dir = source_dir();
+    if dir != "" { full = "{dir}/{path}"; }
+  }
+  img = imaging::png(file(full)) ?? return null;
+  px: vector<integer> = [];
+  for p in img.data { px += [rgba(p.r, p.g, p.b, p.a)]; }
+  self.texture_from(Canvas { width: img.width, height: img.height, data: px })
+}
+
 // `content` drawn with `font` at `size` pixels to the em, in `color`, as a texture: the text with
 // 2 pixels of transparent margin around it — what 0.9's `create_text_texture` made, for
 // `Painter.image`.
