@@ -8,8 +8,11 @@
  * input.expected.  Posting into the process's own queue needs no accessibility grant (a CI runner
  * has none) and still takes every event through AppKit and the shim's pump.
  *
- * Keys and the wheel are built as CoreGraphics events (the modifier keys as FlagsChanged, as the
- * keyboard sends them), the clicks as NSEvents at a point in the window. */
+ * Keys are built as CoreGraphics events (the modifier keys as FlagsChanged, as the keyboard sends
+ * them), the clicks as NSEvents at a point in the window.  The wheel is the exception: an
+ * in-process scroll event has no window (the window server sets that on a real one), so AppKit
+ * has nothing to route it by — it goes straight to the shim's translation instead, placed where
+ * a window's own event would be. */
 #include "../c/graphics_gl.c"
 
 #if defined(GG_COCOA)
@@ -22,7 +25,6 @@ static cg_ref (*cg_scroll)(cg_ref, uint32_t, uint32_t, int32_t, ...);
 static void (*cg_set_type)(cg_ref, uint32_t);
 static void (*cg_set_flags)(cg_ref, uint64_t);
 static void (*cg_set_location)(cg_ref, cg_point);
-static void (*cg_set_field)(cg_ref, uint32_t, int64_t);
 static void (*cg_release)(cg_ref);
 static gg_window *win;
 static long win_number;
@@ -68,20 +70,18 @@ static void mouse(unsigned long type, int x, int y) {
         type, p, 0ul, 0.0, win_number, NULL, 0l, 1l, 1.0f));
 }
 
-/* A wheel step at (x, y) in the content, placed on the screen where the window shows it. */
+/* A wheel step at (x, y) in the content.  A windowless event's `locationInWindow` is the screen
+ * point (from the bottom), so the CoreGraphics location (from the top) is chosen to make that the
+ * point a window's event would carry: (x, height - y). */
 static void wheel(int delta, int x, int y) {
-    gc_rect frame = gc_rc(win->window, "frame");
-    gc_rect content = ((gc_rect (*)(gc_id, gc_sel, gc_rect)) gc.msg)(
-        win->window, gc_s("contentRectForFrameRect:"), frame);
     gc_rect screen = gc_rc(gc_o(gc_class("NSScreen"), "mainScreen"), "frame");
     cg_point at;
     cg_ref e = cg_scroll(NULL, 1, 1, delta); /* kCGScrollEventUnitLine */
-    at.x = content.x + x;
-    at.y = screen.height - (content.y + content.height - y);
+    at.x = (double) x;
+    at.y = screen.height - (double) (win->height - y);
     cg_set_location(e, at);
-    cg_set_field(e, 91, win_number); /* kCGMouseEventWindowUnderMousePointer */
-    cg_set_field(e, 92, win_number); /* … ThatCanHandleThisEvent */
-    post_cg(e);
+    gc_event(win, gc_o_p(gc_class("NSEvent"), "eventWithCGEvent:", e), GC_SCROLL);
+    cg_release(e);
 }
 
 static void print_events(int64_t h) {
@@ -127,7 +127,6 @@ int main(void) {
                  CG_SYM(cg_scroll, "CGEventCreateScrollWheelEvent") &&
                  CG_SYM(cg_set_type, "CGEventSetType") && CG_SYM(cg_set_flags, "CGEventSetFlags") &&
                  CG_SYM(cg_set_location, "CGEventSetLocation") &&
-                 CG_SYM(cg_set_field, "CGEventSetIntegerValueField") &&
                  CG_SYM(cg_release, "CFRelease"))) {
         puts("no CoreGraphics");
         return 2;
@@ -141,6 +140,7 @@ int main(void) {
     mouse(GC_LEFT_UP, 50, 60);
     mouse(GC_RIGHT_DOWN, 50, 60);
     mouse(GC_RIGHT_UP, 50, 60);
+    for (i = 0; i < 5; i++) gg_poll(h); /* the clicks taken before the wheel joins the queue */
     wheel(1, 50, 60);
     wheel(-1, 50, 60);
     tap(0x00, 0);         /* a */
