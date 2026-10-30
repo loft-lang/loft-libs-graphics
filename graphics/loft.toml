@@ -25,3 +25,4 @@ build-deps = "libgl-dev, libasound2-dev"
 [dependencies]
 mesh3d = ">=0.1.1"
 glb = ">=0.1.1"
+imaging = ">=0.5.1"

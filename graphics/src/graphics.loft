@@ -34,6 +34,7 @@
 
 use mesh3d::*;
 use glb::*;
+use imaging;
 
 // RGBA color packed as a single integer: 0xAARRGGBB.
 // Alpha: 255 = fully opaque, 0 = fully transparent.
@@ -874,17 +875,24 @@ fn resample(self: const Canvas, ow: integer, oh: integer, support0: float,
   rl_out
 }
 
-// Native: write packed pixel data to a PNG file.
-fn save_png_raw(path: text, width: integer, height: integer, data: const vector<integer>) -> boolean;
-#native "loft_save_png"
-
 // Save canvas as a PNG file. Automatically uses RGBA if any pixel has alpha < 255,
 // otherwise uses RGB. Returns true on success.
 // Example: @GFX-005 — the choice is read off the pixels, so ONE alpha-0 pixel
 // (a hand-written hex literal — @GFX-001) makes the whole file RGBA and that
 // pixel a transparent hole.
+//
+// The PNG is imaging's (a C shim over lodepng), so it is the same file on every target.  A
+// relative path resolves against the program's own directory, as loft's file I/O does.  False
+// when the canvas is not whole (fewer pixels than width x height) or the file cannot be written.
 pub fn save_png(self: const Canvas, path: text) -> boolean {
-  save_png_raw(path, self.width, self.height, self.data)
+  n = self.width * self.height;
+  if n <= 0 || len(self.data) < n { return false; }
+  img = imaging::Image { name: path, width: self.width, height: self.height, data: [] };
+  for i in 0..n {
+    c = self.data[i] ?? 0;
+    img.data += [imaging::Pixel { r: (c >> 16) & 255, g: (c >> 8) & 255, b: c & 255, a: (c >> 24) & 255 }];
+  }
+  img.save_png(path)
 }
 
 // Capture the current GL back-buffer to an RGB PNG.  Call after a frame's
@@ -1296,6 +1304,28 @@ pub fn gl_mouse_button() -> integer;
 // quantised at 20 px/line.
 pub fn gl_mouse_wheel() -> integer;
 #native "loft_gl_mouse_wheel"
+
+// --- Input as values: one `Event` per host input, in arrival order ---
+//
+// A window's `events()` answers what arrived since its last poll as a vector of `Event`s, oldest
+// first.  Each variant carries its own fields, so nothing is latched and nothing is read through
+// a separate accessor: `match ev { KeyDown { key, mods, repeat } => …, Text { content } => … }`.
+// `key` is a KEY_* code (ASCII lower-cased for a character key), `mods` a MOD_* bitmask,
+// `button` 1 = left, 2 = right, 4 = middle, `delta` positive scrolls up, positions are pixels
+// from the window's top-left corner.
+pub enum Event {
+  KeyDown { pub key: integer, pub mods: integer, pub repeat: boolean },
+  KeyUp { pub key: integer, pub mods: integer },
+  Text { pub content: text },
+  MouseDown { pub button: integer, pub x: float, pub y: float },
+  MouseUp { pub button: integer, pub x: float, pub y: float },
+  MouseMove { pub x: float, pub y: float },
+  Wheel { pub delta: integer, pub x: float, pub y: float },
+  TouchBegin { pub id: integer, pub x: float, pub y: float },
+  TouchMove { pub id: integer, pub x: float, pub y: float },
+  TouchEnd { pub id: integer, pub x: float, pub y: float },
+  Resize { pub width: integer, pub height: integer }
+}
 
 // --- Input events (Gap 01): an ordered, drained-per-frame event queue ---
 //
