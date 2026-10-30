@@ -17,6 +17,12 @@ repository = "loft-libs-graphics"
 entry = "src/graphics.loft"
 native = "loft_graphics_native"
 
+# The window and its GL context are C the package ships and loft builds itself with `cc`
+# (c/graphics_gl.c, bound by the `#c` declarations in src/graphics.loft); the rest of the native
+# part is still the Rust crate below, until 0.10 retires it (@PLN208).
+[c]
+shim = "c/graphics_gl.c"
+
 [native]
 crate = "loft-graphics-native"
 runtime-libs = "libGL.so.1, libasound.so.2"

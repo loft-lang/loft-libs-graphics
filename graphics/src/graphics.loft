@@ -1327,6 +1327,126 @@ pub enum Event {
   Resize { pub width: integer, pub height: integer }
 }
 
+// --- Windows as values: the OS window and its GL context, closed when it dies ---
+//
+//   w = open_window(800, 600, "game") ?? return;
+//   while w.poll() {
+//     for ev in w.events() { match ev { Resize { width, height } => relayout(width, height), _ => {} } }
+//     w.clear(rgba(0, 0, 0, 255));
+//     w.swap();
+//   }                              // the window closes here, when `w` dies
+//
+// A window answers null where none can open: no display, no GL 3.3, or a host without a window
+// yet (only Linux has one).  It is used from the thread that opened it; a call from another is
+// refused with a message.  It cannot be copied — move it, or pass it as an argument.
+
+// The C part (c/graphics_gl.c): X11 and GLX, opened at run time.  A window is a handle, 0 for none.
+fn gg_open(width: integer, height: integer, title: text, fullscreen: integer) -> integer;
+#c "gg_open" "int64_t(int64_t, int64_t, const char*, int64_t)"
+fn gg_poll(h: integer) -> integer;
+#c "gg_poll" "int64_t(int64_t)"
+fn gg_swap(h: integer);
+#c "gg_swap" "void(int64_t)"
+fn gg_clear(h: integer, color: integer);
+#c "gg_clear" "void(int64_t, int64_t)"
+fn gg_close(h: integer);
+#c "gg_close" "void(int64_t)"
+fn gg_width(h: integer) -> integer;
+#c "gg_width" "int64_t(int64_t)"
+fn gg_height(h: integer) -> integer;
+#c "gg_height" "int64_t(int64_t)"
+fn gg_event_count(h: integer) -> integer;
+#c "gg_event_count" "int64_t(int64_t)"
+fn gg_events(h: integer, out: vector<integer>);
+#c "gg_events" "void(int64_t, int64_t*, int64_t)"
+fn gg_read_pixels(h: integer, out: vector<integer>);
+#c "gg_read_pixels" "void(int64_t, int64_t*, int64_t)"
+
+// An open window.  `close` ends it early; otherwise it closes when its owner dies.
+pub struct Window {
+  handle: integer,
+}
+
+fn OpDrop(self: Window) {
+  if self.handle != 0 { gg_close(self.handle); }
+}
+
+// Open a window of `width` x `height` pixels titled `title`, with an OpenGL 3.3 core context
+// current on this thread.  Null when no window can open here.
+pub fn open_window(width: integer, height: integer, title: text) -> Window? {
+  h = gg_open(width, height, title, 0);
+  if h == 0 { return null; }
+  Window { handle: h }
+}
+
+// Open a borderless window covering the screen; read its size with `width()` and `height()`.
+pub fn open_fullscreen(title: text) -> Window? {
+  h = gg_open(0, 0, title, 1);
+  if h == 0 { return null; }
+  Window { handle: h }
+}
+
+// Take the window's pending input and apply a resize; false once the window was asked to close
+// (or was closed).  Call once per frame, then read `events()`.
+pub fn poll(self: Window) -> boolean {
+  self.handle != 0 && gg_poll(self.handle) != 0
+}
+
+// What arrived since the previous `events()`, oldest first.
+pub fn events(self: Window) -> vector<Event> {
+  out: vector<Event> = [];
+  n = gg_event_count(self.handle);
+  if n == 0 { return out; }
+  words: vector<integer> = [0; 5 * n];
+  gg_events(self.handle, words);
+  for i in 0..n {
+    tag = words[5 * i] ?? 0;
+    if tag == EV_RESIZE {
+      out += [
+        Resize { width: words[5 * i + 1] ?? 0, height: words[5 * i + 2] ?? 0 },
+      ];
+    }
+  }
+  out
+}
+
+// Clear the frame to `color` (packed 0xAARRGGBB, as `rgba` packs it) and the depth buffer.
+pub fn clear(self: Window, color: integer) {
+  gg_clear(self.handle, color);
+}
+
+// Present the frame.  Its alpha is forced opaque first, so a compositor never shows through it.
+pub fn swap(self: Window) {
+  gg_swap(self.handle);
+}
+
+// The drawable's size in pixels; it follows a resize at `poll`.
+pub fn width(self: Window) -> integer {
+  gg_width(self.handle)
+}
+
+// And its height.
+pub fn height(self: Window) -> integer {
+  gg_height(self.handle)
+}
+
+// The frame drawn so far, as a canvas — read it after the draws and before `swap`.
+pub fn capture(self: Window) -> Canvas {
+  cw = gg_width(self.handle);
+  ch = gg_height(self.handle);
+  px = filled(cw * ch, 0);
+  gg_read_pixels(self.handle, px);
+  Canvas { width: cw, height: ch, data: px }
+}
+
+// Close the window now.  Its death later does nothing more.
+pub fn close(self: Window) {
+  if self.handle != 0 {
+    gg_close(self.handle);
+    self.handle = 0;
+  }
+}
+
 // --- Input events (Gap 01): an ordered, drained-per-frame event queue ---
 //
 // The polling API above loses text, key-repeat, per-event modifiers, and event
