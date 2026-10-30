@@ -1,0 +1,70 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Text rasterized in loft (@PLN208 G7): a glyph's coverage is fontdue 0.9.3's, byte for byte, and
+// text drawn on a canvas is 0.9's gold image.  No display and no native code: these run wherever
+// loft does.  The expected bytes are fontdue's own (`Font::rasterize`, 0.9.3, default settings),
+// printed by a small Rust program over this font.
+use graphics::*;
+use imaging::*;
+
+const FIXTURE = "../examples/LiberationSansNarrow-Bold.ttf";
+
+fn test_a_glyph_is_fontdues() {
+  f = load_font(FIXTURE) ?? return assert(false, "the fixture font loads");
+  g = f.rasterize('A', 12.0);
+  assert(
+    g.xmin == 0 && g.ymin == 0 && g.width == 7 && g.height == 9,
+    "A at 12: {g.xmin} {g.ymin} {g.width}x{g.height}"
+  );
+  assert((g.advance as float - 7.101562).abs() < 0.000001, "A advance {g.advance}");
+  want = [
+    0, 0, 21, 65, 27, 0, 0, 0, 0, 131, 255, 155, 0, 0, 0, 0, 207, 197, 230, 1, 0, 0, 28, 255, 61,
+    253, 52, 0, 0, 104, 226, 0, 200, 128, 0, 0, 181, 204, 104, 189, 204, 0, 10, 247, 234, 227, 231,
+    254, 26, 78, 254, 24, 0, 7, 245, 101, 154, 206, 0, 0, 0, 180, 177,
+  ];
+  assert(g.coverage == want, "A at 12: {g.coverage}");
+}
+
+// `é` is a composite in this font: the `e` and the accent placed by a component transform.
+fn test_a_composite_glyph_is_fontdues() {
+  f = load_font(FIXTURE) ?? return assert(false, "the fixture font loads");
+  g = f.rasterize('é', 13.0);
+  assert(
+    g.xmin == 0 && g.ymin == -1 && g.width == 6 && g.height == 11,
+    "é at 13: {g.xmin} {g.ymin} {g.width}x{g.height}"
+  );
+  want = [
+    0, 0, 0, 44, 136, 19, 0, 0, 9, 214, 112, 0, 0, 0, 48, 86, 0, 0, 0, 110, 234, 238, 113, 0, 51,
+    254, 107, 84, 254, 43, 127, 253, 56, 53, 235, 114, 146, 254, 232, 232, 232, 127, 129, 251, 3, 0,
+    0, 0, 64, 255, 101, 50, 212, 63, 0, 146, 253, 255, 170, 4, 0, 0, 15, 19, 0, 0,
+  ];
+  assert(g.coverage == want, "é at 13: {g.coverage}");
+}
+
+fn test_a_space_covers_nothing() {
+  f = load_font(FIXTURE) ?? return assert(false, "the fixture font loads");
+  g = f.rasterize(' ', 13.0);
+  assert(g.width == 0 && g.height == 0 && len(g.coverage) == 0, "a space has no bitmap");
+  assert((g.advance as float - 2.964355).abs() < 0.000001, "but it advances {g.advance}");
+}
+
+// 0.9 drew "AV" at 18 px, kerned, into tests/gold/gold-text-fixture.png.
+fn test_text_on_a_canvas_is_the_gold_image() {
+  f = load_font(FIXTURE) ?? return assert(false, "the fixture font loads");
+  cv = canvas(64, 32, rgb(255, 255, 255));
+  cv.draw_text(f, "AV", 18.0, 4, 4, rgb(0, 0, 0));
+  gold = file("gold/gold-text-fixture.png").png() ?? return assert(false, "the gold image decodes");
+  assert(gold.width == 64 && gold.height == 32, "gold size");
+  differ = 0;
+  inked = 0;
+  for i in 0..64 * 32 {
+    p = gold.data[i];
+    want = rgba(p.r, p.g, p.b, 255);
+    got = (cv.data[i] ?? 0) | 0xFF000000;
+    if got != want { differ += 1; }
+    if want != rgb(255, 255, 255) { inked += 1; }
+  }
+  assert(inked > 100, "the gold image holds the text: {inked} pixels");
+  assert(differ == 0, "{differ} of {64 * 32} pixels differ from the gold image");
+}

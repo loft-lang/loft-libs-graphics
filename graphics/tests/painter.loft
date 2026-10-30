@@ -123,3 +123,17 @@ fn test_groups_reupload_on_their_own() {
   got = [at(c, 8, 24), at(c, 24, 24), at(c, 40, 24), at(c, 56, 24)];
   assert(got == [BLACK, WHITE, BLACK, WHITE], "group 1 moved, group 2 kept: {got}");
 }
+
+// A text texture is the text with a 2-pixel margin, as 0.9's `create_text_texture` made it.
+fn test_a_text_texture_holds_its_text() {
+  wo = open_window(64, 48, "g7-text-texture");
+  if !display() { return; }
+  w = wo ?? return assert(false, "no window");
+  f = load_font("../examples/LiberationSansNarrow-Bold.ttf") ?? return assert(
+    false,
+    "the font loads"
+  );
+  t = w.text_texture(f, "AV", 18.0, rgb(0, 0, 0));
+  assert(t.width() == f.measure("AV", 18.0) as integer + 5, "width {t.width()}");
+  assert(t.height() == f.line_height(18.0)+4, "height {t.height()}");
+}

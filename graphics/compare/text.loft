@@ -1,0 +1,48 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Text on a canvas through the 0.10 `Font` against 0.9's font handle and fontdue (@PLN208 G7).
+// A comparison, not a test: it needs 0.9's Rust crate, so it runs on the interpreter and
+// `--native` (no display needed):
+//
+//   loft --tests compare/text.loft
+//
+// Every string at every size and colour is drawn on a fresh canvas both ways and the canvases
+// must be equal pixel for pixel.  Kerned pairs, digits and punctuation, accented composites, a
+// fractional size, and a translucent colour (blended by coverage).
+use graphics::*;
+
+fn texts() -> vector<text> {
+  [
+    "AV", "Hello, World!", "WAVE Ty To Yo", "0123456789 +-*/=", "éàüçñ ÅÖ", "jagged pqy",
+    "{{[(|)]}}",
+  ]
+}
+
+fn test_text_matches_0_9() {
+  f = load_font("../examples/LiberationSansNarrow-Bold.ttf") ?? return assert(
+    false,
+    "the font loads"
+  );
+  h = gl_load_font("../examples/LiberationSansNarrow-Bold.ttf");
+  differ = 0;
+  inked = 0;
+  cases = 0;
+  for t in texts() {
+    for size in [9.0, 13.0, 17.5, 24.0, 40.0] {
+      for color in [rgb(0, 0, 0), rgba(200, 30, 90, 140)] {
+        a = canvas(260, 56, rgb(250, 245, 230));
+        b = canvas(260, 56, rgb(250, 245, 230));
+        a.draw_text(f, t, size, 3, 2, color);
+        b.draw_text(h, t, size, 3, 2, color);
+        cases += 1;
+        for i in 0..260 * 56 {
+          if (a.data[i] ?? 0) != (b.data[i] ?? 0) { differ += 1; }
+          if (b.data[i] ?? 0) != rgb(250, 245, 230) { inked += 1; }
+        }
+      }
+    }
+  }
+  assert(cases == 70 && inked > 10000, "{cases} cases, {inked} inked pixels");
+  assert(differ == 0, "{differ} pixels differ from 0.9 over {cases} cases");
+}
