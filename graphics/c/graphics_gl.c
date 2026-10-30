@@ -84,7 +84,14 @@ void gg_instance_attrib(int64_t mesh, int64_t buf, int64_t location, int64_t com
 #define GG_MOD_SUPER 8
 
 #if defined(__linux__) && !defined(__wasm__)
+#define GG_X11 1 /* a window through X11 and GLX, opened at run time */
+#elif defined(__wasm__) && defined(LOFT_BROWSER)
+#define GG_BROWSER 1 /* the page's canvas, through its `loft_gl` imports (WebGL2) */
+#endif
 
+#if defined(GG_X11) || defined(GG_BROWSER)
+
+#if defined(GG_X11)
 #include <dlfcn.h>
 #include <pthread.h>
 
@@ -235,6 +242,8 @@ typedef struct {
 #define GLX_CONTEXT_PROFILE_MASK_ARB 0x9126
 #define GLX_CONTEXT_CORE_PROFILE_BIT_ARB 0x1
 
+#endif /* GG_X11 */
+
 #define GL_DEPTH_BUFFER_BIT 0x0100
 #define GL_COLOR_BUFFER_BIT 0x4000
 #define GL_DEPTH_TEST 0x0B71
@@ -282,11 +291,12 @@ typedef struct {
 #define GL_DYNAMIC_DRAW 0x88E8
 #define GL_UNSIGNED_INT 0x1405
 
+#if defined(GG_X11)
 typedef void *gx_fbconfig;
 typedef void *gx_context;
 typedef int (*gx_error_handler)(void *, gx_error_event *);
 
-/* Every entry point a window calls, resolved when it opens. */
+/* The X and GLX entry points a window calls, resolved when it opens. */
 typedef struct {
     void *(*XOpenDisplay)(const char *);
     int (*XCloseDisplay)(void *);
@@ -327,6 +337,12 @@ typedef struct {
     void (*glXSwapBuffers)(void *, gx_xid);
     void (*glXDestroyContext)(void *, gx_context);
     void (*glXSwapIntervalEXT)(void *, gx_xid, int);
+} gg_x_api;
+#endif /* GG_X11 */
+
+/* Every GL entry point a window calls: resolved through GLX when it opens, or the page's
+ * `loft_gl` imports in a browser. */
+typedef struct {
 
     void (*glClearColor)(float, float, float, float);
     void (*glClear)(unsigned);
@@ -395,12 +411,16 @@ typedef struct {
 } gg_api;
 
 typedef struct {
-    void *libx11, *libgl;
     gg_api api;
+#if defined(GG_X11)
+    gg_x_api xa;
+    void *libx11, *libgl;
     void *display;
     gx_xid window, colormap, wm_delete;
     gx_context context;
     pthread_t thread;
+    void *im, *ic; /* the input method and context, when the server has one */
+#endif
     int width, height, should_close;
     int closed; /* `gg_close` ran: the context and the X window are gone */
     unsigned target; /* the framebuffer draws go to, 0 for the window */
@@ -411,7 +431,6 @@ typedef struct {
     int64_t text_len, text_cap;
     unsigned char keys[256]; /* which KEY_* codes are down */
     int mouse_x, mouse_y, buttons;
-    void *im, *ic; /* the input method and context, when the server has one */
 } gg_window;
 
 /* A shader or a mesh: its GL names and the window whose context made them. */
@@ -434,6 +453,7 @@ static gg_res *gg_res_of(int64_t h) {
     return (gg_res *) (intptr_t) h;
 }
 
+#if defined(GG_X11)
 /* The window whose context is current on this thread, so a call on another window's resource
  * rebinds only when the window changes.  Speed only: every call names its own window. */
 static __thread gg_window *gg_current;
@@ -451,14 +471,14 @@ static int gg_on_thread(gg_window *w, const char *what) {
 static int gg_use(gg_window *w, const char *what) {
     if (!w || w->closed || !gg_on_thread(w, what)) return 0;
     if (gg_current != w) {
-        w->api.glXMakeCurrent(w->display, w->window, w->context);
+        w->xa.glXMakeCurrent(w->display, w->window, w->context);
         gg_current = w;
     }
     return 1;
 }
 
 #define GG_SYM(lib, name)                                                                         \
-    (*(void **) (&w->api.name) = dlsym(w->lib, #name), w->api.name != NULL)
+    (*(void **) (&w->xa.name) = dlsym(w->lib, #name), w->xa.name != NULL)
 
 /* The libraries stay loaded once a window opened them (`RTLD_NODELETE`): Mesa does not unload
  * cleanly — each unload and reload left 10 MiB of address space behind and cost a second of LLVM
@@ -492,11 +512,12 @@ static int gg_bind(gg_window *w) {
 /* GL entry points through glXGetProcAddressARB, which answers for core and extension functions
  * alike once a context exists. */
 #define GG_PROC(name)                                                                             \
-    (*(void **) (&w->api.name) = w->api.glXGetProcAddressARB((const unsigned char *) #name),      \
+    (*(void **) (&w->api.name) = w->xa.glXGetProcAddressARB((const unsigned char *) #name),      \
      w->api.name != NULL)
 
 static int gg_bind_gl(gg_window *w) {
-    (void) GG_PROC(glXSwapIntervalEXT); /* optional */
+    *(void **) (&w->xa.glXSwapIntervalEXT) = /* optional */
+        w->xa.glXGetProcAddressARB((const unsigned char *) "glXSwapIntervalEXT");
     return GG_PROC(glClearColor) && GG_PROC(glClear) && GG_PROC(glColorMask) &&
            GG_PROC(glViewport) && GG_PROC(glEnable) && GG_PROC(glReadBuffer) &&
            GG_PROC(glPixelStorei) && GG_PROC(glReadPixels) && GG_PROC(glCreateShader) &&
@@ -544,13 +565,13 @@ static gx_fbconfig gg_pick_config(gg_window *w, int screen) {
                                 GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8, GLX_BLUE_SIZE, 8,
                                 GLX_DEPTH_SIZE, 24, GLX_DOUBLEBUFFER, 1, 0};
     int n = 0, i, best = -1, best_opaque = 0, best_samples = -1;
-    gx_fbconfig *all = w->api.glXChooseFBConfig(w->display, screen, attrs, &n);
+    gx_fbconfig *all = w->xa.glXChooseFBConfig(w->display, screen, attrs, &n);
     gx_fbconfig pick = NULL;
     if (!all) return NULL;
     for (i = 0; i < n; i++) {
         int alpha = 0, samples = 0, opaque;
-        w->api.glXGetFBConfigAttrib(w->display, all[i], GLX_ALPHA_SIZE, &alpha);
-        w->api.glXGetFBConfigAttrib(w->display, all[i], GLX_SAMPLES, &samples);
+        w->xa.glXGetFBConfigAttrib(w->display, all[i], GLX_ALPHA_SIZE, &alpha);
+        w->xa.glXGetFBConfigAttrib(w->display, all[i], GLX_SAMPLES, &samples);
         opaque = alpha == 0;
         if (best < 0 || (opaque && !best_opaque) ||
             (opaque == best_opaque && samples > best_samples)) {
@@ -560,7 +581,7 @@ static gx_fbconfig gg_pick_config(gg_window *w, int screen) {
         }
     }
     if (best >= 0) pick = all[best];
-    w->api.XFree(all);
+    w->xa.XFree(all);
     return pick;
 }
 
@@ -568,21 +589,172 @@ static gx_fbconfig gg_pick_config(gg_window *w, int screen) {
 static void gg_teardown(gg_window *w) {
     if (w->display) {
         if (w->context) {
-            w->api.glXMakeCurrent(w->display, 0, NULL);
-            w->api.glXDestroyContext(w->display, w->context);
+            w->xa.glXMakeCurrent(w->display, 0, NULL);
+            w->xa.glXDestroyContext(w->display, w->context);
         }
-        if (w->window) w->api.XDestroyWindow(w->display, w->window);
-        if (w->colormap) w->api.XFreeColormap(w->display, w->colormap);
-        w->api.XCloseDisplay(w->display);
+        if (w->window) w->xa.XDestroyWindow(w->display, w->window);
+        if (w->colormap) w->xa.XFreeColormap(w->display, w->colormap);
+        w->xa.XCloseDisplay(w->display);
     }
     if (gg_current == w) gg_current = NULL;
-    if (w->ic) w->api.XDestroyIC(w->ic);
-    if (w->im) w->api.XCloseIM(w->im);
+    if (w->ic) w->xa.XDestroyIC(w->ic);
+    if (w->im) w->xa.XCloseIM(w->im);
     w->ic = w->im = NULL;
     if (w->libgl) dlclose(w->libgl);
     if (w->libx11) dlclose(w->libx11);
     w->closed = 1;
 }
+
+#else /* GG_BROWSER: the page's canvas and WebGL2 context, through its `loft_gl` imports */
+
+#define GG_IMPORT(name) __attribute__((import_module("loft_gl"), import_name(#name)))
+GG_IMPORT(gg_js_open) int gg_js_open(int width, int height, int fullscreen);
+GG_IMPORT(gg_js_size) int gg_js_size(int which);
+GG_IMPORT(gg_present) void gg_js_present(void);
+GG_IMPORT(gg_js_event) int gg_js_event(int *out, char *text, int cap);
+/* One import per GL entry point, of the GL signature: doc/loft-gl-wasm.js maps each onto WebGL2. */
+GG_IMPORT(gg_glClearColor) void gg_glClearColor(float, float, float, float);
+GG_IMPORT(gg_glClear) void gg_glClear(unsigned);
+GG_IMPORT(gg_glColorMask) void gg_glColorMask(unsigned char, unsigned char, unsigned char, unsigned char);
+GG_IMPORT(gg_glViewport) void gg_glViewport(int, int, int, int);
+GG_IMPORT(gg_glEnable) void gg_glEnable(unsigned);
+GG_IMPORT(gg_glReadBuffer) void gg_glReadBuffer(unsigned);
+GG_IMPORT(gg_glPixelStorei) void gg_glPixelStorei(unsigned, int);
+GG_IMPORT(gg_glReadPixels) void gg_glReadPixels(int, int, int, int, unsigned, unsigned, void *);
+GG_IMPORT(gg_glCreateShader) unsigned gg_glCreateShader(unsigned);
+GG_IMPORT(gg_glShaderSource) void gg_glShaderSource(unsigned, int, const char *const *, const int *);
+GG_IMPORT(gg_glCompileShader) void gg_glCompileShader(unsigned);
+GG_IMPORT(gg_glGetShaderiv) void gg_glGetShaderiv(unsigned, unsigned, int *);
+GG_IMPORT(gg_glGetShaderInfoLog) void gg_glGetShaderInfoLog(unsigned, int, int *, char *);
+GG_IMPORT(gg_glDeleteShader) void gg_glDeleteShader(unsigned);
+GG_IMPORT(gg_glCreateProgram) unsigned gg_glCreateProgram(void);
+GG_IMPORT(gg_glAttachShader) void gg_glAttachShader(unsigned, unsigned);
+GG_IMPORT(gg_glLinkProgram) void gg_glLinkProgram(unsigned);
+GG_IMPORT(gg_glGetProgramiv) void gg_glGetProgramiv(unsigned, unsigned, int *);
+GG_IMPORT(gg_glGetProgramInfoLog) void gg_glGetProgramInfoLog(unsigned, int, int *, char *);
+GG_IMPORT(gg_glDeleteProgram) void gg_glDeleteProgram(unsigned);
+GG_IMPORT(gg_glUseProgram) void gg_glUseProgram(unsigned);
+GG_IMPORT(gg_glGetUniformLocation) int gg_glGetUniformLocation(unsigned, const char *);
+GG_IMPORT(gg_glUniform1f) void gg_glUniform1f(int, float);
+GG_IMPORT(gg_glUniform2f) void gg_glUniform2f(int, float, float);
+GG_IMPORT(gg_glUniform3f) void gg_glUniform3f(int, float, float, float);
+GG_IMPORT(gg_glUniform4f) void gg_glUniform4f(int, float, float, float, float);
+GG_IMPORT(gg_glUniform1i) void gg_glUniform1i(int, int);
+GG_IMPORT(gg_glUniformMatrix4fv) void gg_glUniformMatrix4fv(int, int, unsigned char, const float *);
+GG_IMPORT(gg_glGenVertexArrays) void gg_glGenVertexArrays(int, unsigned *);
+GG_IMPORT(gg_glBindVertexArray) void gg_glBindVertexArray(unsigned);
+GG_IMPORT(gg_glDeleteVertexArrays) void gg_glDeleteVertexArrays(int, const unsigned *);
+GG_IMPORT(gg_glGenBuffers) void gg_glGenBuffers(int, unsigned *);
+GG_IMPORT(gg_glBindBuffer) void gg_glBindBuffer(unsigned, unsigned);
+GG_IMPORT(gg_glBufferData) void gg_glBufferData(unsigned, intptr_t, const void *, unsigned);
+GG_IMPORT(gg_glDeleteBuffers) void gg_glDeleteBuffers(int, const unsigned *);
+GG_IMPORT(gg_glVertexAttribPointer) void gg_glVertexAttribPointer(unsigned, int, unsigned, unsigned char, int, const void *);
+GG_IMPORT(gg_glEnableVertexAttribArray) void gg_glEnableVertexAttribArray(unsigned);
+GG_IMPORT(gg_glDrawArrays) void gg_glDrawArrays(unsigned, int, int);
+GG_IMPORT(gg_glDisable) void gg_glDisable(unsigned);
+GG_IMPORT(gg_glBlendFunc) void gg_glBlendFunc(unsigned, unsigned);
+GG_IMPORT(gg_glCullFace) void gg_glCullFace(unsigned);
+GG_IMPORT(gg_glDepthMask) void gg_glDepthMask(unsigned char);
+GG_IMPORT(gg_glScissor) void gg_glScissor(int, int, int, int);
+GG_IMPORT(gg_glFinish) void gg_glFinish(void);
+GG_IMPORT(gg_glLineWidth) void gg_glLineWidth(float);
+GG_IMPORT(gg_glPointSize) void gg_glPointSize(float);
+GG_IMPORT(gg_glGenTextures) void gg_glGenTextures(int, unsigned *);
+GG_IMPORT(gg_glBindTexture) void gg_glBindTexture(unsigned, unsigned);
+GG_IMPORT(gg_glTexImage2D) void gg_glTexImage2D(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+GG_IMPORT(gg_glTexSubImage2D) void gg_glTexSubImage2D(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+GG_IMPORT(gg_glTexParameteri) void gg_glTexParameteri(unsigned, unsigned, int);
+GG_IMPORT(gg_glDeleteTextures) void gg_glDeleteTextures(int, const unsigned *);
+GG_IMPORT(gg_glGenerateMipmap) void gg_glGenerateMipmap(unsigned);
+GG_IMPORT(gg_glActiveTexture) void gg_glActiveTexture(unsigned);
+GG_IMPORT(gg_glGenFramebuffers) void gg_glGenFramebuffers(int, unsigned *);
+GG_IMPORT(gg_glBindFramebuffer) void gg_glBindFramebuffer(unsigned, unsigned);
+GG_IMPORT(gg_glFramebufferTexture2D) void gg_glFramebufferTexture2D(unsigned, unsigned, unsigned, unsigned, int);
+GG_IMPORT(gg_glDeleteFramebuffers) void gg_glDeleteFramebuffers(int, const unsigned *);
+GG_IMPORT(gg_glDrawBuffer) void gg_glDrawBuffer(unsigned);
+GG_IMPORT(gg_glDrawElements) void gg_glDrawElements(unsigned, int, unsigned, const void *);
+GG_IMPORT(gg_glDrawArraysInstanced) void gg_glDrawArraysInstanced(unsigned, int, int, int);
+GG_IMPORT(gg_glDrawElementsInstanced) void gg_glDrawElementsInstanced(unsigned, int, unsigned, const void *, int);
+GG_IMPORT(gg_glVertexAttribDivisor) void gg_glVertexAttribDivisor(unsigned, unsigned);
+
+/* A page is one thread, and its context is current from the first window on. */
+static int gg_use(gg_window *w, const char *what) {
+    (void) what;
+    return w && !w->closed;
+}
+
+static int gg_bind_gl(gg_window *w) {
+    w->api.glClearColor = gg_glClearColor;
+    w->api.glClear = gg_glClear;
+    w->api.glColorMask = gg_glColorMask;
+    w->api.glViewport = gg_glViewport;
+    w->api.glEnable = gg_glEnable;
+    w->api.glReadBuffer = gg_glReadBuffer;
+    w->api.glPixelStorei = gg_glPixelStorei;
+    w->api.glReadPixels = gg_glReadPixels;
+    w->api.glCreateShader = gg_glCreateShader;
+    w->api.glShaderSource = gg_glShaderSource;
+    w->api.glCompileShader = gg_glCompileShader;
+    w->api.glGetShaderiv = gg_glGetShaderiv;
+    w->api.glGetShaderInfoLog = gg_glGetShaderInfoLog;
+    w->api.glDeleteShader = gg_glDeleteShader;
+    w->api.glCreateProgram = gg_glCreateProgram;
+    w->api.glAttachShader = gg_glAttachShader;
+    w->api.glLinkProgram = gg_glLinkProgram;
+    w->api.glGetProgramiv = gg_glGetProgramiv;
+    w->api.glGetProgramInfoLog = gg_glGetProgramInfoLog;
+    w->api.glDeleteProgram = gg_glDeleteProgram;
+    w->api.glUseProgram = gg_glUseProgram;
+    w->api.glGetUniformLocation = gg_glGetUniformLocation;
+    w->api.glUniform1f = gg_glUniform1f;
+    w->api.glUniform2f = gg_glUniform2f;
+    w->api.glUniform3f = gg_glUniform3f;
+    w->api.glUniform4f = gg_glUniform4f;
+    w->api.glUniform1i = gg_glUniform1i;
+    w->api.glUniformMatrix4fv = gg_glUniformMatrix4fv;
+    w->api.glGenVertexArrays = gg_glGenVertexArrays;
+    w->api.glBindVertexArray = gg_glBindVertexArray;
+    w->api.glDeleteVertexArrays = gg_glDeleteVertexArrays;
+    w->api.glGenBuffers = gg_glGenBuffers;
+    w->api.glBindBuffer = gg_glBindBuffer;
+    w->api.glBufferData = gg_glBufferData;
+    w->api.glDeleteBuffers = gg_glDeleteBuffers;
+    w->api.glVertexAttribPointer = gg_glVertexAttribPointer;
+    w->api.glEnableVertexAttribArray = gg_glEnableVertexAttribArray;
+    w->api.glDrawArrays = gg_glDrawArrays;
+    w->api.glDisable = gg_glDisable;
+    w->api.glBlendFunc = gg_glBlendFunc;
+    w->api.glCullFace = gg_glCullFace;
+    w->api.glDepthMask = gg_glDepthMask;
+    w->api.glScissor = gg_glScissor;
+    w->api.glFinish = gg_glFinish;
+    w->api.glLineWidth = gg_glLineWidth;
+    w->api.glPointSize = gg_glPointSize;
+    w->api.glGenTextures = gg_glGenTextures;
+    w->api.glBindTexture = gg_glBindTexture;
+    w->api.glTexImage2D = gg_glTexImage2D;
+    w->api.glTexSubImage2D = gg_glTexSubImage2D;
+    w->api.glTexParameteri = gg_glTexParameteri;
+    w->api.glDeleteTextures = gg_glDeleteTextures;
+    w->api.glGenerateMipmap = gg_glGenerateMipmap;
+    w->api.glActiveTexture = gg_glActiveTexture;
+    w->api.glGenFramebuffers = gg_glGenFramebuffers;
+    w->api.glBindFramebuffer = gg_glBindFramebuffer;
+    w->api.glFramebufferTexture2D = gg_glFramebufferTexture2D;
+    w->api.glDeleteFramebuffers = gg_glDeleteFramebuffers;
+    w->api.glDrawBuffer = gg_glDrawBuffer;
+    w->api.glDrawElements = gg_glDrawElements;
+    w->api.glDrawArraysInstanced = gg_glDrawArraysInstanced;
+    w->api.glDrawElementsInstanced = gg_glDrawElementsInstanced;
+    w->api.glVertexAttribDivisor = gg_glVertexAttribDivisor;
+    return 1;
+}
+
+/* The page's context outlives a window: only the record is closed. */
+static void gg_teardown(gg_window *w) {
+    w->closed = 1;
+}
+#endif
 
 /* The record goes once the window is closed and no shader or mesh holds it. */
 static void gg_forget(gg_window *w) {
@@ -615,6 +787,20 @@ static void gg_push(gg_window *w, int64_t tag, int64_t a, int64_t b, int64_t c, 
     w->event_count++;
 }
 
+static void gg_text_push(gg_window *w, const char *bytes, int n) {
+    if (w->text_len + n > w->text_cap) {
+        int64_t cap = (w->text_cap ? w->text_cap * 2 : 64) + n;
+        char *grown = (char *) realloc(w->text, (size_t) cap);
+        if (!grown) return;
+        w->text = grown;
+        w->text_cap = cap;
+    }
+    gg_push(w, GG_EV_TEXT, w->text_len, n, 0, 0);
+    memcpy(w->text + w->text_len, bytes, (size_t) n);
+    w->text_len += n;
+}
+
+#if defined(GG_X11)
 /* 0.9's key codes (src/graphics.loft KEY_*): ASCII lower-cased for a character, its own codes for
  * the named keys, -1 for a key it has none for. */
 static int64_t gg_key_code(gx_xid sym) {
@@ -648,18 +834,6 @@ static int64_t gg_mods(unsigned state) {
            ((state & GX_MOD1_MASK) ? GG_MOD_ALT : 0) | ((state & GX_MOD4_MASK) ? GG_MOD_SUPER : 0);
 }
 
-static void gg_text_push(gg_window *w, const char *bytes, int n) {
-    if (w->text_len + n > w->text_cap) {
-        int64_t cap = (w->text_cap ? w->text_cap * 2 : 64) + n;
-        char *grown = (char *) realloc(w->text, (size_t) cap);
-        if (!grown) return;
-        w->text = grown;
-        w->text_cap = cap;
-    }
-    gg_push(w, GG_EV_TEXT, w->text_len, n, 0, 0);
-    memcpy(w->text + w->text_len, bytes, (size_t) n);
-    w->text_len += n;
-}
 
 /* A key press: KeyDown (a repeat when the key is already down) and, when it types anything, a
  * Text with what it typed (Enter types "\r", Backspace "\b", as 0.9 reported them); a release:
@@ -672,9 +846,9 @@ static void gg_key(gg_window *w, gx_input_event *e, int press) {
     int64_t code;
     unsigned state = e->state;
     if (press && w->ic)
-        n = w->api.Xutf8LookupString(w->ic, e, buf, (int) sizeof buf - 1, &sym, &status);
+        n = w->xa.Xutf8LookupString(w->ic, e, buf, (int) sizeof buf - 1, &sym, &status);
     else
-        n = w->api.XLookupString(e, buf, (int) sizeof buf - 1, &sym, NULL);
+        n = w->xa.XLookupString(e, buf, (int) sizeof buf - 1, &sym, NULL);
     if (n < 0) n = 0;
     code = gg_key_code(sym);
     if (press) {
@@ -711,7 +885,7 @@ static void gg_present(gg_window *w) {
     w->api.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     w->api.glClear(GL_COLOR_BUFFER_BIT);
     w->api.glColorMask(1, 1, 1, 1);
-    w->api.glXSwapBuffers(w->display, w->window);
+    w->xa.glXSwapBuffers(w->display, w->window);
     if (w->target) w->api.glBindFramebuffer(GL_FRAMEBUFFER, w->target);
 }
 
@@ -731,76 +905,76 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
     if (!w) return 0;
     w->thread = pthread_self();
     if (!gg_bind(w)) goto fail;
-    w->display = w->api.XOpenDisplay(NULL);
+    w->display = w->xa.XOpenDisplay(NULL);
     if (!w->display) goto fail;
-    screen = w->api.XDefaultScreen(w->display);
-    root = w->api.XRootWindow(w->display, screen);
+    screen = w->xa.XDefaultScreen(w->display);
+    root = w->xa.XRootWindow(w->display, screen);
     if (fullscreen) {
-        width = w->api.XDisplayWidth(w->display, screen);
-        height = w->api.XDisplayHeight(w->display, screen);
+        width = w->xa.XDisplayWidth(w->display, screen);
+        height = w->xa.XDisplayHeight(w->display, screen);
     }
     if (width <= 0 || height <= 0) goto fail;
     config = gg_pick_config(w, screen);
     if (!config) goto fail;
-    visual = w->api.glXGetVisualFromFBConfig(w->display, config);
+    visual = w->xa.glXGetVisualFromFBConfig(w->display, config);
     if (!visual) goto fail;
-    w->colormap = w->api.XCreateColormap(w->display, root, visual->visual, GX_ALLOC_NONE);
+    w->colormap = w->xa.XCreateColormap(w->display, root, visual->visual, GX_ALLOC_NONE);
     memset(&attrs, 0, sizeof attrs);
     attrs.colormap = w->colormap;
     attrs.event_mask = GX_STRUCTURE_NOTIFY_MASK | GX_EXPOSURE_MASK | GX_KEY_PRESS_MASK |
                        GX_KEY_RELEASE_MASK | GX_BUTTON_PRESS_MASK | GX_BUTTON_RELEASE_MASK |
                        GX_POINTER_MOTION_MASK | GX_FOCUS_CHANGE_MASK;
-    w->window = w->api.XCreateWindow(w->display, root, 0, 0, (unsigned) width, (unsigned) height,
+    w->window = w->xa.XCreateWindow(w->display, root, 0, 0, (unsigned) width, (unsigned) height,
                                      0, visual->depth, GX_INPUT_OUTPUT, visual->visual,
                                      GX_CW_BORDER_PIXEL | GX_CW_COLORMAP | GX_CW_EVENT_MASK,
                                      &attrs);
-    w->api.XFree(visual);
+    w->xa.XFree(visual);
     if (!w->window) goto fail;
-    w->api.XStoreName(w->display, w->window, title);
-    w->wm_delete = w->api.XInternAtom(w->display, "WM_DELETE_WINDOW", 0);
-    w->api.XSetWMProtocols(w->display, w->window, &w->wm_delete, 1);
+    w->xa.XStoreName(w->display, w->window, title);
+    w->wm_delete = w->xa.XInternAtom(w->display, "WM_DELETE_WINDOW", 0);
+    w->xa.XSetWMProtocols(w->display, w->window, &w->wm_delete, 1);
     /* Auto-repeat as press after press, no release between: a key held down is then one
      * KeyDown, its repeats, and one KeyUp, as 0.9 reported it. */
-    w->api.XkbSetDetectableAutoRepeat(w->display, 1, NULL);
-    w->im = w->api.XOpenIM(w->display, NULL, NULL, NULL);
+    w->xa.XkbSetDetectableAutoRepeat(w->display, 1, NULL);
+    w->im = w->xa.XOpenIM(w->display, NULL, NULL, NULL);
     if (w->im)
-        w->ic = w->api.XCreateIC(w->im, "inputStyle", GX_XIM_PREEDIT_NOTHING | GX_XIM_STATUS_NOTHING,
+        w->ic = w->xa.XCreateIC(w->im, "inputStyle", GX_XIM_PREEDIT_NOTHING | GX_XIM_STATUS_NOTHING,
                                  "clientWindow", w->window, "focusWindow", w->window, NULL);
     if (fullscreen) {
-        gx_xid state = w->api.XInternAtom(w->display, "_NET_WM_STATE", 0);
-        gx_xid full = w->api.XInternAtom(w->display, "_NET_WM_STATE_FULLSCREEN", 0);
-        w->api.XChangeProperty(w->display, w->window, state, GX_ATOM_ATOM, 32,
+        gx_xid state = w->xa.XInternAtom(w->display, "_NET_WM_STATE", 0);
+        gx_xid full = w->xa.XInternAtom(w->display, "_NET_WM_STATE_FULLSCREEN", 0);
+        w->xa.XChangeProperty(w->display, w->window, state, GX_ATOM_ATOM, 32,
                                GX_PROP_MODE_REPLACE, (const unsigned char *) &full, 1);
     }
 
-    *(void **) (&w->api.glXCreateContextAttribsARB) =
-        w->api.glXGetProcAddressARB((const unsigned char *) "glXCreateContextAttribsARB");
-    if (!w->api.glXCreateContextAttribsARB) goto fail;
+    *(void **) (&w->xa.glXCreateContextAttribsARB) =
+        w->xa.glXGetProcAddressARB((const unsigned char *) "glXCreateContextAttribsARB");
+    if (!w->xa.glXCreateContextAttribsARB) goto fail;
     gg_x_failed = 0;
-    previous = w->api.XSetErrorHandler(gg_on_x_error);
+    previous = w->xa.XSetErrorHandler(gg_on_x_error);
     trapped = 1;
-    w->context = w->api.glXCreateContextAttribsARB(w->display, config, NULL, 1, context_attrs);
-    w->api.XSync(w->display, 0);
+    w->context = w->xa.glXCreateContextAttribsARB(w->display, config, NULL, 1, context_attrs);
+    w->xa.XSync(w->display, 0);
     if (gg_x_failed || !w->context) goto fail;
 
-    w->api.XMapWindow(w->display, w->window);
+    w->xa.XMapWindow(w->display, w->window);
     for (;;) { /* until the server says the window is mapped */
         gx_event ev;
-        w->api.XNextEvent(w->display, &ev);
+        w->xa.XNextEvent(w->display, &ev);
         if (ev.type == GX_MAP_NOTIFY && ev.any.window == w->window) break;
         if (ev.type == GX_CONFIGURE_NOTIFY && ev.configure.window == w->window) {
             width = ev.configure.width;
             height = ev.configure.height;
         }
     }
-    if (!w->api.glXMakeCurrent(w->display, w->window, w->context)) goto fail;
-    w->api.XSync(w->display, 0);
+    if (!w->xa.glXMakeCurrent(w->display, w->window, w->context)) goto fail;
+    w->xa.XSync(w->display, 0);
     if (gg_x_failed) goto fail;
     gg_current = w;
-    w->api.XSetErrorHandler(previous);
+    w->xa.XSetErrorHandler(previous);
     trapped = 0;
     if (!gg_bind_gl(w)) goto fail;
-    if (w->api.glXSwapIntervalEXT) w->api.glXSwapIntervalEXT(w->display, w->window, 1);
+    if (w->xa.glXSwapIntervalEXT) w->xa.glXSwapIntervalEXT(w->display, w->window, 1);
     w->width = (int) width;
     w->height = (int) height;
 
@@ -817,12 +991,12 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
 fail:
     if (trapped) { /* tear the half-made context down while its errors are still recorded */
         if (w->context) {
-            w->api.glXMakeCurrent(w->display, 0, NULL);
-            w->api.glXDestroyContext(w->display, w->context);
+            w->xa.glXMakeCurrent(w->display, 0, NULL);
+            w->xa.glXDestroyContext(w->display, w->context);
             w->context = NULL;
         }
-        w->api.XSync(w->display, 0);
-        w->api.XSetErrorHandler(previous);
+        w->xa.XSync(w->display, 0);
+        w->xa.XSetErrorHandler(previous);
     }
     gg_free(w);
     return 0;
@@ -836,10 +1010,10 @@ int64_t gg_poll(int64_t h) {
     if (!gg_use(w, "Window.poll")) return 0;
     width = w->width;
     height = w->height;
-    while (w->api.XPending(w->display) > 0) {
+    while (w->xa.XPending(w->display) > 0) {
         gx_event ev;
-        w->api.XNextEvent(w->display, &ev);
-        if (w->ic && w->api.XFilterEvent(&ev, 0)) continue; /* the input method took it */
+        w->xa.XNextEvent(w->display, &ev);
+        if (w->ic && w->xa.XFilterEvent(&ev, 0)) continue; /* the input method took it */
         switch (ev.type) {
         case GX_KEY_PRESS:
         case GX_KEY_RELEASE:
@@ -879,6 +1053,65 @@ int64_t gg_poll(int64_t h) {
     return !w->should_close;
 }
 
+#else /* GG_BROWSER */
+
+/* Present the frame and give the page its turn: the browser draws it, and its events arrive. */
+static void gg_present(gg_window *w) {
+    (void) w;
+    gg_js_present();
+}
+
+/* Size the page's canvas (or the whole page, for `fullscreen`) and take its WebGL2 context. */
+int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullscreen) {
+    gg_window *w;
+    (void) title;
+    if (!fullscreen && (width <= 0 || height <= 0)) return 0;
+    if (!gg_js_open((int) width, (int) height, (int) fullscreen)) return 0;
+    w = (gg_window *) calloc(1, sizeof(gg_window));
+    if (!w) return 0;
+    gg_bind_gl(w);
+    w->width = gg_js_size(0);
+    w->height = gg_js_size(1);
+    /* 0.9's first state: depth test on, the frame opaque black */
+    w->api.glEnable(GL_DEPTH_TEST);
+    w->api.glViewport(0, 0, w->width, w->height);
+    w->api.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    w->api.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    return (int64_t) (intptr_t) w;
+}
+
+/* Take the page's queued input — already in 0.9's codes (doc/loft-gl-wasm.js) — into the
+ * window's queue and its input state.  A page never asks to close. */
+int64_t gg_poll(int64_t h) {
+    gg_window *w = gg_of(h);
+    int ev[5];
+    char text[64];
+    int tag;
+    if (!gg_use(w, "Window.poll")) return 0;
+    while ((tag = gg_js_event(ev, text, (int) sizeof text)) != 0) {
+        if (tag == GG_EV_KEY_DOWN || tag == GG_EV_KEY_UP) {
+            if (ev[0] >= 0 && ev[0] < 256) w->keys[ev[0]] = tag == GG_EV_KEY_DOWN;
+            gg_push(w, tag, ev[0], ev[1], tag == GG_EV_KEY_DOWN ? ev[2] : 0, 0);
+        } else if (tag == GG_EV_TEXT) {
+            gg_text_push(w, text, ev[0]);
+        } else if (tag == GG_EV_MOUSE_DOWN || tag == GG_EV_MOUSE_UP) {
+            w->mouse_x = ev[1];
+            w->mouse_y = ev[2];
+            if (tag == GG_EV_MOUSE_DOWN) w->buttons |= ev[0];
+            else w->buttons &= ~ev[0];
+            gg_push(w, tag, ev[0], ev[1], ev[2], 0);
+        } else if (tag == GG_EV_MOUSE_MOVE) {
+            w->mouse_x = ev[0];
+            w->mouse_y = ev[1];
+            gg_push(w, tag, ev[0], ev[1], 0, 0);
+        } else if (tag == GG_EV_WHEEL) {
+            gg_push(w, tag, ev[0], ev[1], ev[2], 0);
+        }
+    }
+    return !w->should_close;
+}
+#endif
+
 void gg_swap(int64_t h) {
     gg_window *w = gg_of(h);
     if (gg_use(w, "Window.swap")) gg_present(w);
@@ -896,7 +1129,10 @@ void gg_clear(int64_t h, int64_t color) {
 
 void gg_close(int64_t h) {
     gg_window *w = gg_of(h);
-    if (!w || w->closed || !gg_on_thread(w, "Window.close")) return;
+    if (!w || w->closed) return;
+#if defined(GG_X11)
+    if (!gg_on_thread(w, "Window.close")) return;
+#endif
     gg_free(w);
 }
 
@@ -986,6 +1222,12 @@ static gg_res *gg_new_res(gg_window *w, int kind) {
     return r;
 }
 
+/* A driver's log without its trailing newlines, so the message ends where it says it ends. */
+static void gg_trim(char *log) {
+    size_t n = strlen(log);
+    while (n > 0 && (log[n - 1] == '\n' || log[n - 1] == '\r' || log[n - 1] == ' ')) log[--n] = 0;
+}
+
 static unsigned gg_compile(gg_window *w, unsigned type, const char *source, const char *what) {
     unsigned id = w->api.glCreateShader(type);
     int ok = 0;
@@ -996,6 +1238,7 @@ static unsigned gg_compile(gg_window *w, unsigned type, const char *source, cons
         char log[2048];
         log[0] = 0;
         w->api.glGetShaderInfoLog(id, (int) sizeof log, NULL, log);
+        gg_trim(log);
         fprintf(stderr, "graphics: the %s shader does not compile:\n%s\n", what, log);
         w->api.glDeleteShader(id);
         return 0;
@@ -1028,6 +1271,7 @@ int64_t gg_shader(int64_t win, const char *vertex, const char *fragment) {
         char log[2048];
         log[0] = 0;
         w->api.glGetProgramInfoLog(program, (int) sizeof log, NULL, log);
+        gg_trim(log);
         fprintf(stderr, "graphics: the shader program does not link:\n%s\n", log);
         w->api.glDeleteProgram(program);
         return 0;
@@ -1229,8 +1473,12 @@ void gg_release(int64_t res) {
     gg_window *w;
     if (!r) return;
     w = r->w;
+#if defined(GG_BROWSER)
+    if (1) { /* the page's context outlives the window: delete in it whenever */
+#else
     if (!w->closed) {
         if (!gg_use(w, "a GL object's drop")) return;
+#endif
         if (r->kind == GG_SHADER) {
             w->api.glDeleteProgram(r->id);
         } else if (r->kind == GG_MESH) {

@@ -1,0 +1,221 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// graphics 0.10 in a browser page (@PLN208 G-browser): the scenes the desktop guards check by
+// hand, drawn through the page's WebGL2, each line PASS or FAIL; then frames presented and the
+// input the harness dispatches read back as events.  browser/check.sh builds the page and runs
+// it in headless Chrome.
+use graphics::*;
+
+const SQUARE_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+uniform mat4 model;
+void main() {{ gl_Position = model * vec4(pos, 1.0); }}
+`;
+
+const SQUARE_F: text = `
+#version 330 core
+uniform vec3 color;
+uniform float k;
+uniform int mode;
+out vec4 frag;
+void main() {{ frag = mode == 2 ? vec4(color * k, 1.0) : vec4(1.0, 0.0, 0.0, 1.0); }}
+`;
+
+const FLAT_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(location = 5) in float dx;
+uniform float shifted;
+void main() {{ gl_Position = vec4(pos.x + shifted * dx, pos.y, 0.0, 1.0); }}
+`;
+
+const FLAT_F: text = `
+#version 330 core
+uniform vec4 color;
+out vec4 frag;
+void main() {{ frag = color; }}
+`;
+
+const SHOW_V: text = `
+#version 330 core
+layout(location = 0) in vec2 pos;
+layout(location = 1) in vec2 uv;
+out vec2 v_uv;
+void main() {{ gl_Position = vec4(pos, 0.0, 1.0); v_uv = uv; }}
+`;
+
+const SHOW_F: text = `
+#version 330 core
+uniform sampler2D image;
+in vec2 v_uv;
+out vec4 frag;
+void main() {{ frag = texture(image, v_uv); }}
+`;
+
+const RED = 0xFFFF0000;
+const GREEN = 0xFF00FF00;
+const BLUE = 0xFF0000FF;
+const WHITE = 0xFFFFFFFF;
+const BLACK = 0xFF000000;
+
+fn at(c: const Canvas, x: integer, y: integer) -> integer {
+  (c.data[y * c.width + x] ?? -1) | 0xFF000000
+}
+
+fn report(name: text, ok: boolean, detail: text) {
+  verdict = if ok { "PASS" } else { "FAIL" };
+  println("{verdict} {name} {detail}");
+}
+
+fn points(xy: vector<float>) -> vector<single> {
+  out: vector<single> = [];
+  for i in 0..len(xy) / 2 { out += [xy[2 * i] as single, xy[2 * i + 1] as single, 0.0 as single]; }
+  out
+}
+
+fn square() -> vector<single> {
+  points([-0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5, 0.5])
+}
+
+fn main() {
+  wo = open_window(64, 48, "browser-check");
+  if !wo {
+    println("FAIL open no window");
+    println("BROWSER DONE");
+    return;
+  }
+  w = wo ?? return;
+  report("size", w.width() == 64 && w.height() == 48, "{w.width()}x{w.height()}");
+
+  w.clear(rgba(255, 128, 0, 255));
+  c = w.capture();
+  report("clear", at(c, 0, 0) == rgba(255, 128, 0, 255) && at(c, 63, 47) == rgba(255, 128, 0, 255), "{at(c, 0, 0):x}");
+
+  sq = w.shader(SQUARE_V, SQUARE_F) ?? return report("shader", false, "does not compile");
+  m = w.upload(square(), 3);
+  sq.set_mat4("model", [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -0.5, 0.0, 0.0, 1.0]);
+  sq.set_vec3("color", 0.4, 0.8, 1.2);
+  sq.set_float("k", 0.5);
+  sq.set_int("mode", 2);
+  w.clear(rgba(10, 20, 30, 255));
+  m.draw(sq);
+  c = w.capture();
+  report("uniforms", at(c, 16, 24) == rgba(51, 102, 153, 255) && at(c, 48, 24) == rgba(10, 20, 30, 255), "{at(c, 16, 24):x} {at(c, 48, 24):x}");
+  report("edges", at(c, 31, 24) == rgba(51, 102, 153, 255) && at(c, 32, 24) == rgba(10, 20, 30, 255)
+    && at(c, 16, 12) == rgba(51, 102, 153, 255) && at(c, 16, 11) == rgba(10, 20, 30, 255), "");
+
+  flat = w.shader(FLAT_V, FLAT_F) ?? return report("flat shader", false, "does not compile");
+  full = w.upload(points([-1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, 1.0]), 3);
+  w.clear(BLUE);
+  w.enable(GL_BLEND);
+  w.blend(BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA);
+  flat.set_vec4("color", 1.0, 0.0, 0.0, 0.6);
+  full.draw(flat);
+  w.disable(GL_BLEND);
+  c = w.capture();
+  report("blend", at(c, 16, 24) == rgba(153, 0, 102, 255), "{at(c, 16, 24):x}");
+
+  w.clear(BLUE);
+  w.enable(GL_SCISSOR_TEST);
+  w.scissor(0, 0, 32, 48);
+  flat.set_vec4("color", 0.0, 1.0, 0.0, 1.0);
+  full.draw(flat);
+  w.disable(GL_SCISSOR_TEST);
+  c = w.capture();
+  report("scissor", at(c, 31, 24) == GREEN && at(c, 32, 24) == BLUE, "");
+
+  show = w.shader(SHOW_V, SHOW_F) ?? return report("show shader", false, "does not compile");
+  img = canvas(2, 2, 0);
+  img.set_pixel(0, 0, RED);
+  img.set_pixel(1, 0, GREEN);
+  img.set_pixel(0, 1, BLUE);
+  img.set_pixel(1, 1, WHITE);
+  t = w.texture_from(img);
+  t.filter(true);
+  t.bind(0);
+  show.set_int("image", 0);
+  w.clear(BLACK);
+  quad = w.quad();
+  quad.draw(show);
+  c = w.capture();
+  report("texture", at(c, 16, 36) == RED && at(c, 48, 36) == GREEN && at(c, 16, 12) == BLUE && at(c, 48, 12) == WHITE,
+    "{at(c, 16, 36):x} {at(c, 48, 36):x} {at(c, 16, 12):x} {at(c, 48, 12):x}");
+
+  colour = w.texture(32, 32);
+  depth = w.depth_texture(32, 32);
+  target = w.framebuffer();
+  target.attach(colour);
+  target.attach(depth);
+  w.render_to(target);
+  w.viewport(0, 0, 32, 32);
+  w.clear(RED);
+  half = w.upload(points([-1.0, -1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 0.0, 1.0, -1.0, 1.0]), 3);
+  half.draw(flat);
+  w.render_to_window();
+  w.viewport(0, 0, 64, 48);
+  w.clear(BLUE);
+  colour.filter(true);
+  colour.bind(0);
+  quad.draw(show);
+  c = w.capture();
+  report("framebuffer", at(c, 31, 24) == GREEN && at(c, 32, 24) == RED, "{at(c, 31, 24):x} {at(c, 32, 24):x}");
+
+  left = w.upload(points([-1.0, -1.0, 0.0, -1.0, 0.0, 1.0, -1.0, 1.0]), 3);
+  left.indices([0, 1, 2]);
+  w.clear(BLACK);
+  left.draw_indexed(flat, DRAW_TRIANGLES);
+  c = w.capture();
+  report("indices", at(c, 28, 40) == GREEN && at(c, 4, 4) == BLACK, "");
+
+  strip = w.upload(points([-1.0, -1.0, -0.5, -1.0, -0.5, 1.0, -1.0, -1.0, -0.5, 1.0, -1.0, 1.0]), 3);
+  ib = w.instances([0.0 as single, 1.0 as single]);
+  strip.instance_attrib(ib, 5, 1, 1, 0);
+  flat.set_float("shifted", 1.0);
+  w.clear(BLACK);
+  strip.draw_instanced(flat, 2);
+  flat.set_float("shifted", 0.0);
+  c = w.capture();
+  report("instances", at(c, 8, 24) == GREEN && at(c, 24, 24) == BLACK && at(c, 40, 24) == GREEN && at(c, 56, 24) == BLACK, "");
+
+  p = w.painter() ?? return report("painter", false, "does not compile");
+  w.clear(BLACK);
+  p.rect(8.0, 4.0, 16.0, 10.0, 1.0, 0.0, 0.0, 1.0);
+  c = w.capture();
+  report("painter", at(c, 8, 4) == RED && at(c, 23, 13) == RED && at(c, 24, 4) == BLACK, "");
+
+  broken = w.shader("#version 330 core\nvoid main() {{ nonsense }}\n", FLAT_F);
+  report("broken shader", !broken, "");
+
+  for _ in 0..3 { w.swap(); }
+  report("frames", w.poll(), "presented three");
+
+  // Input: the harness dispatches its events once it sees this line.
+  println("READY FOR INPUT");
+  seen = "";
+  done = false;
+  frames = 0;
+  while !done && frames < 600 && w.poll() {
+    for ev in w.events() {
+      match ev {
+        KeyDown { key, mods, repeat } => seen += "KeyDown {key} {mods} {repeat};",
+        KeyUp { key, mods } => {
+          seen += "KeyUp {key} {mods};";
+          if key == KEY_ESCAPE { done = true; }
+        },
+        Text { content } => seen += "Text {content.len()};",
+        MouseDown { button, x, y } => seen += "MouseDown {button} {x as integer} {y as integer};",
+        MouseUp { button, x, y } => seen += "MouseUp {button} {x as integer} {y as integer};",
+        Wheel { delta, x, y } => seen += "Wheel {delta} {x as integer} {y as integer};",
+        _ => {}
+      }
+    }
+    w.swap();
+    frames += 1;
+  }
+  println("EVENTS {seen}");
+  report("input", seen == "MouseDown 1 10 20;MouseUp 1 10 20;MouseDown 2 10 20;MouseUp 2 10 20;Wheel 1 10 20;KeyDown 97 0 false;Text 1;KeyUp 97 0;KeyDown 132 0 false;KeyDown 98 1 false;Text 1;KeyUp 98 1;KeyUp 132 1;KeyDown 13 0 false;Text 1;KeyUp 13 0;KeyDown 27 0 false;Text 1;KeyUp 27 0;", "");
+  report("held", w.mouse_x() as integer == 10 && w.mouse_buttons() == 0 && !w.key_down(KEY_SHIFT), "");
+  println("BROWSER DONE");
+}
