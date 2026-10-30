@@ -293,6 +293,188 @@ void tl_draw(int64_t surf, int64_t set, int32_t tile, int32_t x, int32_t y, int3
     if (d && s) tl_blit(d, s, tile, x, y, flags & 0xF07);
 }
 
+/* ── Ground: a tile bent to a surface and lit across it ── */
+
+/* floor(a / b) for b > 0. */
+static int32_t tl_floor_div(int32_t a, int32_t b) {
+    int32_t q = a / b;
+    return (a % b != 0 && a < 0) ? q - 1 : q;
+}
+
+/* The 4x4 ordered-dither thresholds, 0..15: where a pixel lies between two shades, it takes the
+ * darker one when its sixteenths of a shade exceed the threshold at its place in the tile. */
+static const uint8_t TL_BAYER[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+
+/* A value interpolated between `a` and `b` across w steps at each step's centre and rounded half
+ * up, floor((a * (2w - 2i - 1) + b * (2i + 1) + w) / 2w) for i = i0, i0 + 1, …: q, with r its
+ * remainder over 2w, stepped exactly with additions — two divisions to start, none after. */
+typedef struct {
+    int32_t q, r, qs, rs, d;
+} tl_lerp;
+
+static void tl_lerp_start(tl_lerp *l, int32_t a, int32_t b, int32_t w, int32_t i0) {
+    int32_t num = a * (2 * w - 2 * i0 - 1) + b * (2 * i0 + 1) + w, step = 2 * (b - a);
+    l->d = 2 * w;
+    l->q = tl_floor_div(num, l->d);
+    l->r = num - l->q * l->d;
+    l->qs = tl_floor_div(step, l->d);
+    l->rs = step - l->qs * l->d;
+}
+
+static void tl_lerp_step(tl_lerp *l) {
+    l->q += l->qs;
+    l->r += l->rs;
+    if (l->r >= l->d) {
+        l->r -= l->d;
+        l->q++;
+    }
+}
+
+void tl_draw_ground(int64_t surf, int64_t set, int32_t tile, int32_t x, int32_t y,
+                    int32_t lift_tl, int32_t lift_tr, int32_t lift_bl, int32_t lift_br,
+                    int32_t dark_tl, int32_t dark_tr, int32_t dark_bl, int32_t dark_br, int32_t flags);
+
+/* Tile `tile` laid on a surface whose corners are lifted `lift_*` pixels (up is positive) above
+ * the tile's place at (x, y), and darkened `dark_*` sixteenths of a shade.  A column of the tile
+ * stays a column: column u (0 .. width - 1) runs from its top edge, lifted by the two top
+ * corners' lifts interpolated at the column's centre (u + 1/2) / width and rounded half up, to
+ * its bottom edge, lifted alike by the two bottom corners; its rows are the tile's rows
+ * stretched or squeezed between the two, each pixel taking the tile row under its centre.  So
+ * two tiles whose shared corners have the same lifts meet without a gap or an overlap.  The
+ * darkness is interpolated the same way, along the top and bottom edges at the column, then
+ * down it at each tile row's centre; it is clamped to the darkest shade at the corners, and
+ * split between the two nearest shades by a 4x4 ordered dither fixed to the tile's own pixels —
+ * a gradual light that does not crawl as the view moves.  Orientation as for tl_draw (the shade
+ * bits of `flags` are not used); transparent pixels and whatever falls off the surface are
+ * skipped.  Integer arithmetic only, so every target draws the same pixels.  A tile that does
+ * not bend, in one whole shade, is tl_draw's own loop; otherwise each column is set up with
+ * additions, and each pixel costs a plain draw's work, plus one add and a shift for its shade
+ * where the light changes down the column. */
+void tl_draw_ground(int64_t surf, int64_t set, int32_t tile, int32_t x, int32_t y,
+                    int32_t lift_tl, int32_t lift_tr, int32_t lift_bl, int32_t lift_br,
+                    int32_t dark_tl, int32_t dark_tr, int32_t dark_bl, int32_t dark_br, int32_t flags) {
+    tl_surf *d = (tl_surf *) tl_get(&tl_surfs, surf);
+    tl_set *s = (tl_set *) tl_get(&tl_sets, set);
+    int32_t fh = flags & 1, fv = (flags >> 1) & 1, fd = (flags >> 2) & 1;
+    int32_t ow, oh, u, darkest = (TL_SHADES - 1) * 16;
+    tl_lerp top_lift, bottom_lift, top_dark, bottom_dark;
+    const uint8_t *src;
+    if (!d || !s || tile < 0 || tile >= s->count) return;
+    /* Clamped at the corners, every darkness interpolated between them stays in range too; and
+     * the darkest whole shade has no fraction to dither, so a shade never passes TL_SHADES - 1. */
+    dark_tl = dark_tl < 0 ? 0 : (dark_tl > darkest ? darkest : dark_tl);
+    dark_tr = dark_tr < 0 ? 0 : (dark_tr > darkest ? darkest : dark_tr);
+    dark_bl = dark_bl < 0 ? 0 : (dark_bl > darkest ? darkest : dark_bl);
+    dark_br = dark_br < 0 ? 0 : (dark_br > darkest ? darkest : dark_br);
+    /* Nothing bends and one whole shade: the plain draw, the same pixels. */
+    if ((lift_tl | lift_tr | lift_bl | lift_br) == 0 && dark_tl == dark_tr && dark_tl == dark_bl &&
+        dark_tl == dark_br && (dark_tl & 15) == 0) {
+        tl_blit(d, s, tile, x, y, (flags & 7) | ((dark_tl >> 4) << 8));
+        return;
+    }
+    ow = fd ? s->th : s->tw;
+    oh = fd ? s->tw : s->th;
+    src = s->px + (size_t) tile * (size_t) s->tw * (size_t) s->th;
+    tl_lerp_start(&top_lift, lift_tl, lift_tr, ow, 0);
+    tl_lerp_start(&bottom_lift, lift_bl, lift_br, ow, 0);
+    tl_lerp_start(&top_dark, dark_tl, dark_tr, ow, 0);
+    tl_lerp_start(&bottom_dark, dark_bl, dark_br, ow, 0);
+    for (u = 0; u < ow; u++, tl_lerp_step(&top_lift), tl_lerp_step(&bottom_lift), tl_lerp_step(&top_dark),
+                           tl_lerp_step(&bottom_dark)) {
+        int32_t px = x + u, rows = 2 * oh;
+        int32_t top, n, k, k1, q, r, uu, vstride, bias[4];
+        tl_lerp dark;
+        const uint8_t *p;
+        const uint16_t *pal;
+        uint16_t *out;
+        if (px < 0 || px >= d->w) continue;
+        top = y - top_lift.q;
+        n = oh - bottom_lift.q + top_lift.q;
+        if (n <= 0) continue;
+        k = top < 0 ? -top : 0;
+        k1 = d->h - top < n ? d->h - top : n;
+        if (k >= k1) continue;
+        /* The tile's column under this one: row v of it at p + v * vstride. */
+        uu = fh ? ow - 1 - u : u;
+        if (fd) {
+            p = src + (size_t) uu * (size_t) s->tw;
+            vstride = 1;
+        } else {
+            p = src + uu;
+            vstride = s->tw;
+        }
+        if (fv) {
+            p += (oh - 1) * vstride;
+            vstride = -vstride;
+        }
+        /* The tile row under pixel k's centre, floor((2k + 1) * oh / (2n)): q, with r its
+         * remainder over 2n (an unclipped, unstretched column starts at row 0, remainder oh). */
+        if (k == 0 && n == oh) {
+            q = 0;
+            r = oh;
+        } else {
+            q = ((2 * k + 1) * oh) / (2 * n);
+            r = ((2 * k + 1) * oh) % (2 * n);
+        }
+        p += q * vstride;
+        out = d->px + (size_t) (top + k) * (size_t) d->w + (size_t) px;
+        if (top_dark.q == bottom_dark.q && (top_dark.q & 15) == 0) {
+            /* One whole shade down the column: one palette, no dither. */
+            pal = s->pal[top_dark.q >> 4];
+            for (;;) {
+                uint8_t i = *p;
+                if (i) *out = pal[i];
+                if (++k >= k1) break;
+                out += d->w;
+                r += rows;
+                while (r >= 2 * n) {
+                    r -= 2 * n;
+                    p += vstride;
+                }
+            }
+            continue;
+        }
+        /* Tile row v's shade at darkness dq: the whole shade dq >> 4, one darker when the
+         * fraction dq & 15 exceeds the dither threshold t — which is (dq + 15 - t) >> 4,
+         * exactly, for a fraction and a threshold in 0 .. 15: one add and a shift. */
+        bias[0] = 15 - TL_BAYER[0][u & 3];
+        bias[1] = 15 - TL_BAYER[1][u & 3];
+        bias[2] = 15 - TL_BAYER[2][u & 3];
+        bias[3] = 15 - TL_BAYER[3][u & 3];
+        tl_lerp_start(&dark, top_dark.q, bottom_dark.q, oh, q);
+        if (n == oh) {
+            /* Neither stretched nor squeezed: pixel k shows tile row k. */
+            for (;;) {
+                uint8_t i = *p;
+                if (i) *out = s->pal[(dark.q + bias[k & 3]) >> 4][i];
+                if (++k >= k1) break;
+                out += d->w;
+                p += vstride;
+                tl_lerp_step(&dark);
+            }
+            continue;
+        }
+        pal = s->pal[(dark.q + bias[q & 3]) >> 4];
+        for (;;) {
+            uint8_t i = *p;
+            if (i) *out = pal[i];
+            if (++k >= k1) break;
+            out += d->w;
+            r += rows;
+            if (r >= 2 * n) {
+                /* At most one tile row on while the column is stretched, more when squeezed. */
+                do {
+                    r -= 2 * n;
+                    q++;
+                    p += vstride;
+                    tl_lerp_step(&dark);
+                } while (r >= 2 * n);
+                pal = s->pal[(dark.q + bias[q & 3]) >> 4];
+            }
+        }
+    }
+}
+
 /* ── Maps ── */
 
 int64_t tl_map_new(const int32_t *cells, int64_t n, int32_t cols, int32_t rows);
@@ -340,11 +522,6 @@ int64_t tl_map_get(int64_t map, int32_t x, int32_t y) {
     tl_map *m = (tl_map *) tl_get(&tl_maps, map);
     if (!m || x < 0 || y < 0 || x >= m->cols || y >= m->rows) return 0;
     return m->cells[y * m->cols + x];
-}
-
-static int32_t tl_floor_div(int32_t a, int32_t b) {
-    int32_t q = a / b;
-    return (a % b != 0 && a < 0) ? q - 1 : q;
 }
 
 /* Every cell of `map` that shows on `surf` when the map's pixel (cam_x, cam_y) is the surface's
