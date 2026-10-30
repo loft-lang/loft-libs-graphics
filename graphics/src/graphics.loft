@@ -895,229 +895,15 @@ pub fn save_png(self: const Canvas, path: text) -> boolean {
   img.save_png(path)
 }
 
-// Capture the current GL back-buffer to an RGB PNG.  Call after a frame's
-// draw calls and BEFORE gl_swap_buffers (reads GL_BACK).  Works on a
-// headless / Wayland desktop where the window itself can't be grabbed.
-pub fn gl_screenshot(width: integer, height: integer, path: text) -> boolean;
-#native "loft_gl_screenshot"
+// --- The codes the window's calls take ---
 
-// --- OpenGL (GL5) ---
-// Native OpenGL functions for window management and rendering.
-// Names match the symbols registered via loft_register_v1 in the cdylib.
-
-// Create a window with an OpenGL 3.3 context. Returns true on success.
-pub fn gl_create_window(width: integer, height: integer, title: text) -> boolean;
-#native "loft_gl_create_window"
-
-// Open a borderless fullscreen window at the primary monitor's native
-// resolution. Returns true on success. Read the actual viewport size
-// afterwards with `gl_window_width` / `gl_window_height` if you need
-// to set up an aspect-aware camera.
-pub fn gl_create_fullscreen_window(title: text) -> boolean;
-#native "loft_gl_create_fullscreen_window"
-
-// Toggle fullscreen on the existing window (runtime flip, cheaper
-// than recreating the GL context — textures / VAOs / shaders
-// survive).  Pass `true` for borderless fullscreen, `false` for
-// windowed.  Browsers (WASM) require a user gesture to enter
-// fullscreen; calling outside one is non-fatal.
-pub fn gl_set_fullscreen(on: boolean);
-#native "loft_gl_set_fullscreen"
-
-// Current window inner size in physical pixels.  Query after creating a
-// (especially fullscreen) window so projection / 2D ortho / overlays use
-// the real resolution rather than a windowed hint.
-pub fn gl_window_width() -> integer;
-#native "loft_gl_window_width"
-// And its height — the pair is what a projection or a 2-D ortho is built from.
-pub fn gl_window_height() -> integer;
-#native "loft_gl_window_height"
-
-// Poll window events. Returns false when the window should close.
-pub fn gl_poll_events() -> boolean;
-#native "loft_gl_poll_events"
-
-// Swap buffers (present the frame).
-pub fn gl_swap_buffers();
-#native "loft_gl_swap_buffers"
-
-// Clear the screen with an RGBA color (packed as 0xRRGGBBAA).
-pub fn gl_clear(color: integer);
-#native "loft_gl_clear"
-
-// Destroy the window and OpenGL context.
-pub fn gl_destroy_window();
-#native "loft_gl_destroy_window"
-
-// Compile and link a shader program. Returns the program ID (0 on failure).
-pub fn gl_create_shader(vertex_source: text, fragment_source: text) -> integer;
-#native "loft_gl_create_shader"
-
-// Use a shader program for subsequent draw calls.
-pub fn gl_use_shader(program: integer);
-#native "loft_gl_use_shader"
-
-// Draw a VAO with vertex_count vertices as triangles.
-pub fn gl_draw(vao: integer, vertex_count: integer);
-#native "loft_gl_draw"
-
-// Upload a vector<single> as a vertex buffer. Returns VAO handle.
-// stride = floats per vertex (3=pos, 6=pos+normal, 10=pos+normal+color).
-// Native codegen: loft_gl_upload_vertices(data_ptr: *const f32, count: u32, stride: i32) -> i32
-pub fn gl_upload_vertices(data: vector<single>, stride: integer) -> integer;
-#native "loft_gl_upload_vertices"
-
-// ── Instanced rendering ───────────────────────────────────────────────────
-// Draw one base mesh many times in a single call, each instance pulling
-// per-instance attributes from a SECOND buffer. The contract: vertex
-// attributes occupy locations 0-4 (per-vertex, divisor 0, via gl_upload_*);
-// instance attributes occupy locations >=5 (divisor 1). The CALLER owns the
-// instance layout (component count + stride + offset, in floats) and must
-// match the shader's `layout(location=N)` — explicit, so no heuristic.
-
-// Upload per-instance data to a DYNAMIC_DRAW buffer. Returns the VBO handle
-// (pass it to gl_instance_attrib). DYNAMIC because instances change per frame.
-pub fn gl_upload_instance_buffer(data: vector<single>) -> integer;
-#native "loft_gl_upload_instance_buffer"
-
-// Bind instance VBO `ivbo`'s field to attribute `location` on `vao`, advancing
-// once per INSTANCE (VertexAttribDivisor=1). components = floats in the field
-// (2=vec2, 4=vec4); stride_floats = floats per instance record; offset_floats =
-// this field's start within the record. Use locations >=5 to clear the vertex attrs.
-pub fn gl_instance_attrib(vao: integer, ivbo: integer, location: integer, components: integer, stride_floats: integer, offset_floats: integer);
-#native "loft_gl_instance_attrib"
-
-// Draw vertex_count vertices of `vao` as triangles, instance_count times.
-pub fn gl_draw_instanced(vao: integer, vertex_count: integer, instance_count: integer);
-#native "loft_gl_draw_instanced"
-
-// ── Dynamic buffer update + index buffers ─────────────────────────────────
-
-// Orphan + re-upload an existing VBO (returned by gl_upload_vertices /
-// gl_upload_instance_buffer) with new data, DYNAMIC_DRAW — per-frame updates
-// without recreating the buffer.
-pub fn gl_update_buffer(vbo: integer, data: vector<single>);
-#native "loft_gl_update_buffer"
-
-// Upload triangle indices as an element (index) buffer bound to `vao`, so
-// gl_draw_elements(vao, index_count, mode) draws indexed. Returns the EBO handle.
-pub fn gl_upload_indices(vao: integer, data: vector<integer>) -> integer;
-#native "loft_gl_upload_indices"
-
-// ── Per-group VBO set — a reusable multi-VBO renderer ─────────────────────
-//
-// A `GroupVboSet` keeps one independently-uploadable VBO per "group" (keyed by
-// an integer group key), so a consumer that partitions its world into render
-// groups (e.g. gridmesh's `all_groups` / `collect_dirty_groups`) can RE-UPLOAD
-// ONLY the groups whose geometry changed (`group_vbos_upsert` on the dirty
-// groups) while every other group keeps its cached VBO — turning a per-edit
-// O(N) full re-upload into O(dirty).  Generic: keyed by an integer, holds the
-// baked `vector<single>` the consumer produced; it knows nothing about the
-// consumer's mesh type.  Each group also stores its world-space XZ bounds so a
-// frustum-cull draw can be layered on later (the projector / moros payoff).
-//
-// One consumer is the audience projector (per-group crystal + ground VBOs); the
-// moros terrain renderer is the next.  GL calls cannot run headless, so this is
-// validated by those consumers, not a unit test.
-struct GroupVbo {
-  const gk:    integer,   // group key (NOT 'key' — reserved in hash-value structs)
-  const vao:   integer,
-  const count: integer,   // vertices = floats / stride
-  const min_x: single, const min_z: single, const max_x: single, const max_z: single,   // world bounds (future cull)
-}
-
-// The vertex buffers of a grouped mesh: one `GroupVbo` per group key in `slots`, all
-// sharing one vertex layout (`stride` floats per vertex) and one `draw_mode`.
-pub struct GroupVboSet {
-  pub slots: hash<GroupVbo[gk]>,   // not const: reassigned (`set.slots = []`) + grown via `+=`
-  const stride:    integer,   // floats per vertex (e.g. 14 crystal, 10 ground)
-  const draw_mode: integer,   // DRAW_TRIANGLES / DRAW_LINES / …
-}
-
-// Create an empty set for a fixed vertex stride + draw mode.
-pub fn group_vbos_new(stride: integer, draw_mode: integer) -> GroupVboSet {
-  GroupVboSet{ slots: [], stride: stride, draw_mode: draw_mode }
-}
-
-// Upload (or RE-upload) one group's baked vertices: delete the group's old VAO
-// if present, upload the new data, and record the handle + vertex count + world
-// bounds.  Call this only for the DIRTY groups each edit; untouched groups keep
-// their cached VBOs.
-pub fn group_vbos_upsert(set: GroupVboSet, gk: integer, verts: vector<single>,
-                         min_x: single, min_z: single, max_x: single, max_z: single) {
-  old = set.slots[gk];
-  if old != null { gl_delete_vao(old.vao); set.slots[gk] = null; }
-  vao = gl_upload_vertices(verts, set.stride);
-  set.slots += [GroupVbo{ gk: gk, vao: vao, count: (len(verts) / set.stride) ?? 0,
-                          min_x: min_x, min_z: min_z, max_x: max_x, max_z: max_z }];
-}
-
-// (An emptied group is handled by `group_vbos_upsert` with zero vertices: it
-// stores a count-0 slot that `group_vbos_draw_all` skips.  A dedicated
-// `group_vbos_remove` that frees a single empty group's VAO via a keyed remove
-// (`set.slots[gk] = null`) is now unblocked — the @P320 false "never modified"
-// rejection of a `&`-param whose only mutation is a keyed remove was fixed
-// 2026-05-23 — but is not yet needed, so it stays unwritten.)
-
-// Draw every group's cached VBO with the set's draw mode.  (Per-group frustum
-// culling — skip groups whose world bounds fall outside the view — is a future
-// addition; the bounds are already stored.)
-pub fn group_vbos_draw_all(set: const GroupVboSet) {
-  for gv in set.slots {
-    if gv.count > 0 { gl_draw_mode(gv.vao, gv.count, set.draw_mode); }
-  }
-}
-
-// Free every group's VAO and clear the set (call on teardown / world reset).
-pub fn group_vbos_destroy(set: GroupVboSet) {
-  for gvd in set.slots { gl_delete_vao(gvd.vao); }
-  set.slots = [];
-}
-
-// Set a mat4 uniform on a shader program. mat is a Mat4.m vector (16 floats).
-// Native codegen: loft_gl_set_mat4(program: i32, name_ptr, name_len, mat_ptr: *const f64, count: u32)
-pub fn gl_set_uniform_mat4(program: integer, name: text, mat: const vector<float>);
-#native "loft_gl_set_mat4"
-
-// --- Uniforms ---
-
-// Set a float uniform.
-pub fn gl_set_uniform_float(program: integer, name: text, val: float);
-#native "loft_gl_set_uniform_float"
-
-// Set an integer uniform (also used for sampler2D texture unit bindings).
-pub fn gl_set_uniform_int(program: integer, name: text, val: integer);
-#native "loft_gl_set_uniform_int"
-
-// Set a vec2 uniform (e.g. screen size, texel size, a 2D offset).
-pub fn gl_set_uniform_vec2(program: integer, name: text, x: float, y: float);
-#native "loft_gl_set_uniform_vec2"
-
-// Set a vec3 uniform (e.g. light position, color).
-pub fn gl_set_uniform_vec3(program: integer, name: text, x: float, y: float, z: float);
-#native "loft_gl_set_uniform_vec3"
-
-// Set a vec4 uniform (e.g. an RGBA color, a rect x/y/w/h).
-pub fn gl_set_uniform_vec4(program: integer, name: text, x: float, y: float, z: float, w: float);
-#native "loft_gl_set_uniform_vec4"
-
-// --- GL state ---
-
-// Capability constants for gl_enable/gl_disable:
+// Capabilities for `Window.enable` / `Window.disable`.
 pub const GL_DEPTH_TEST = 1;
 pub const GL_BLEND = 2;
 pub const GL_CULL_FACE = 3;
 pub const GL_SCISSOR_TEST = 4;
 
-// Enable a GL capability (GL_DEPTH_TEST, GL_BLEND, GL_CULL_FACE, GL_SCISSOR_TEST).
-pub fn gl_enable(cap: integer);
-#native "loft_gl_enable"
-
-// Disable a GL capability.
-pub fn gl_disable(cap: integer);
-#native "loft_gl_disable"
-
-// Blend factor constants for gl_blend_func:
+// Blend factors for `Window.blend`.
 pub const BLEND_ZERO = 0;
 pub const BLEND_ONE = 1;
 pub const BLEND_SRC_ALPHA = 2;
@@ -1125,104 +911,13 @@ pub const BLEND_ONE_MINUS_SRC_ALPHA = 3;
 pub const BLEND_DST_ALPHA = 4;
 pub const BLEND_ONE_MINUS_DST_ALPHA = 5;
 
-// Set blend function (e.g. gl_blend_func(BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA)).
-pub fn gl_blend_func(src: integer, dst: integer);
-#native "loft_gl_blend_func"
-
-// Set which face to cull (0=back, 1=front).
-pub fn gl_cull_face(face: integer);
-#native "loft_gl_cull_face"
-
-// Enable/disable depth buffer writing.
-pub fn gl_depth_mask(write: boolean);
-#native "loft_gl_depth_mask"
-
-// Block until every GL command issued so far has completed.
-//
-// The call that makes a read-back trustworthy: `gl_screenshot` and any other
-// framebuffer read otherwise race the driver, so the same program can produce a
-// complete frame or an empty one from run to run.  Costs a stall by definition —
-// use it in a test or a screenshot path, never in a frame loop.
-pub fn gl_finish();
-#native "loft_gl_finish"
-
-// Set the viewport rectangle (used for FBO render passes).
-pub fn gl_viewport(x: integer, y: integer, w: integer, h: integer);
-#native "loft_gl_viewport"
-
-// Set the scissor box — clips rendering to this rect (origin bottom-left, like
-// the viewport). Takes effect only while gl_enable(GL_SCISSOR_TEST) is set; use
-// it for partial-damage redraw (re-render just a changed region).
-pub fn gl_scissor(x: integer, y: integer, w: integer, h: integer);
-#native "loft_gl_scissor"
-
-// --- Framebuffer objects ---
-
-// Create a framebuffer object. Returns FBO handle.
-pub fn gl_create_framebuffer() -> integer;
-#native "loft_gl_create_framebuffer"
-
-// Bind a framebuffer (0 = default screen framebuffer).
-pub fn gl_bind_framebuffer(fbo: integer);
-#native "loft_gl_bind_framebuffer"
-
-// Attach a texture to an FBO (attachment: 0=color, 1=depth).
-pub fn gl_framebuffer_texture(fbo: integer, attachment: integer, tex: integer);
-#native "loft_gl_framebuffer_texture"
-
-// Create a depth-only texture for shadow mapping.
-pub fn gl_create_depth_texture(width: integer, height: integer) -> integer;
-#native "loft_gl_create_depth_texture"
-
-// Create an empty RGBA texture for render-to-texture.
-pub fn gl_create_color_texture(width: integer, height: integer) -> integer;
-#native "loft_gl_create_color_texture"
-
-// Set a texture's filtering: nearest = crisp pixel-art, else linear/smooth.
-pub fn gl_texture_filter(tex: integer, nearest: boolean);
-#native "loft_gl_texture_filter"
-
-// Generate mipmaps + trilinear minification for `tex` (after its pixels are
-// uploaded) — keeps minified sprites / atlas pages clean.
-pub fn gl_generate_mipmap(tex: integer);
-#native "loft_gl_generate_mipmap"
-
-// Upload a sub-region of RGBA pixels (Canvas data, 0xAARRGGBB) into an existing
-// texture at (x,y) sized w*h — incremental atlas packing without re-uploading.
-pub fn gl_texture_subimage(tex: integer, x: integer, y: integer, w: integer, h: integer, data: vector<integer>);
-#native "loft_gl_texture_subimage"
-
-// Draw a fullscreen quad (for post-processing). Uses built-in VAO with UV coords.
-// Vertex shader receives: layout(location=0) vec2 aPos, layout(location=1) vec2 aUV.
-pub fn gl_draw_fullscreen_quad();
-#native "loft_gl_draw_fullscreen_quad"
-
-// --- Draw modes ---
-
-// Draw mode constants for gl_draw_mode and gl_draw_elements:
+// Draw modes for `GpuMesh.draw_mode` and `draw_indexed`.
 pub const DRAW_TRIANGLES = 0;
 pub const DRAW_LINES = 1;
 pub const DRAW_POINTS = 2;
 
-// Draw a VAO with explicit mode (DRAW_TRIANGLES, DRAW_LINES, DRAW_POINTS).
-pub fn gl_draw_mode(vao: integer, vertex_count: integer, mode: integer);
-#native "loft_gl_draw_mode"
-
-// Draw using an index buffer (EBO). mode: DRAW_TRIANGLES, DRAW_LINES, DRAW_POINTS.
-pub fn gl_draw_elements(vao: integer, index_count: integer, mode: integer);
-#native "loft_gl_draw_elements"
-
-// Set line width for DRAW_LINES rendering.
-pub fn gl_line_width(width: float);
-#native "loft_gl_line_width"
-
-// Set point size for DRAW_POINTS rendering.
-pub fn gl_point_size(size: float);
-#native "loft_gl_point_size"
-
-// --- Input ---
-
-// Key code constants for gl_key_pressed:
+// Key codes, as `Event`s carry them and `Window.key_down` takes them: ASCII lower-cased for a
+// character key, codes of their own for the named keys.
 pub const KEY_W = 119;
 pub const KEY_A = 97;
 pub const KEY_S = 115;
@@ -1238,8 +933,7 @@ pub const KEY_RIGHT = 131;
 pub const KEY_SHIFT = 132;
 pub const KEY_CTRL = 133;
 
-// Initiative 03 Phase 1: extra keys for the editor hotkey set.
-// Digits route through ASCII (`gl_key_pressed(KEY_1)` etc).
+// Digits are their ASCII codes.
 pub const KEY_0 = 48;
 pub const KEY_1 = 49;
 pub const KEY_2 = 50;
@@ -1251,8 +945,7 @@ pub const KEY_7 = 55;
 pub const KEY_8 = 56;
 pub const KEY_9 = 57;
 
-// Common editor hotkey letters (lowercase ASCII; `gl_key_pressed` is
-// case-insensitive — the native key_index lowercases).
+// Letters are their lower-case ASCII codes, whatever Shift does.
 pub const KEY_O = 111;  // occlusion toggle
 pub const KEY_R = 114;  // raise-layer
 pub const KEY_F = 102;  // lower-layer
@@ -1266,9 +959,7 @@ pub const KEY_RBRACKET = 93;   // ]
 // Tab for camera-mode toggle.
 pub const KEY_TAB = 9;
 
-// F-key range for save / load / fullscreen-toggle.  Values match
-// `lib/graphics/native/src/lib.rs::key_index` mapping of
-// `NamedKey::F1..F12` → 135..146.
+// F1 to F12.
 pub const KEY_F1  = 135;
 pub const KEY_F2  = 136;
 pub const KEY_F3  = 137;
@@ -1281,29 +972,6 @@ pub const KEY_F9  = 143;
 pub const KEY_F10 = 144;
 pub const KEY_F11 = 145;
 pub const KEY_F12 = 146;
-
-// Returns true if the key is currently pressed (use KEY_* constants).
-pub fn gl_key_pressed(key_code: integer) -> boolean;
-#native "loft_gl_key_pressed"
-
-// Mouse position X (pixels from left edge of window).
-pub fn gl_mouse_x() -> float;
-#native "loft_gl_mouse_x"
-
-// Mouse position Y (pixels from top edge of window).
-pub fn gl_mouse_y() -> float;
-#native "loft_gl_mouse_y"
-
-// Mouse button bitmask: 1=left, 2=right, 4=middle.
-pub fn gl_mouse_button() -> integer;
-#native "loft_gl_mouse_button"
-
-// Scroll-wheel delta accumulated since the last call (positive = up).
-// Reset on read.  Use per-frame to drive the editor's `InputState.in_wheel`
-// or any other scroll-driven UI.  Pixel-delta trackpad scrolling is
-// quantised at 20 px/line.
-pub fn gl_mouse_wheel() -> integer;
-#native "loft_gl_mouse_wheel"
 
 // --- Input as values: one `Event` per host input, in arrival order ---
 //
@@ -1327,25 +995,809 @@ pub enum Event {
   Resize { pub width: integer, pub height: integer }
 }
 
-// --- Input events (Gap 01): an ordered, drained-per-frame event queue ---
+// --- Windows as values: the OS window and its GL context, closed when it dies ---
 //
-// The polling API above loses text, key-repeat, per-event modifiers, and event
-// ORDER.  After gl_poll_events(), drain the queue: call gl_next_event()
-// repeatedly (it returns an EV_* tag, or EV_NONE when empty) and read the
-// current event's fields with the gl_event_* accessors below.  Delivers text /
-// IME, key repeat, per-event modifiers, the named keys the polling API drops,
-// and multitouch — in arrival order.  Example:
-//   while gl_poll_events() {
-//     t = gl_next_event();
-//     while t != EV_NONE {
-//       if t == EV_TEXT { type_text(gl_event_text()); }
-//       else if t == EV_KEY_DOWN { key(gl_event_key(), gl_event_mods()); }
-//       t = gl_next_event();
-//     }
-//     // ... render ...
-//   }
+//   w = open_window(800, 600, "game") ?? return;
+//   while w.poll() {
+//     for ev in w.events() { match ev { Resize { width, height } => relayout(width, height), _ => {} } }
+//     w.clear(rgba(0, 0, 0, 255));
+//     w.swap();
+//   }                              // the window closes here, when `w` dies
+//
+// A window answers null where none can open: no display, no GL 3.3, or a host without a window
+// yet (only Linux has one).  It is used from the thread that opened it; a call from another is
+// refused with a message.  It cannot be copied — move it, or pass it as an argument.
 
-// Event type tags returned by gl_next_event().
+// The C part (c/graphics_gl.c): X11 and GLX, opened at run time.  A window is a handle, 0 for none.
+fn gg_open(width: integer, height: integer, title: text, fullscreen: integer) -> integer;
+#c "gg_open" "int64_t(int64_t, int64_t, const char*, int64_t)"
+fn gg_poll(h: integer) -> integer;
+#c "gg_poll" "int64_t(int64_t)"
+fn gg_swap(h: integer);
+#c "gg_swap" "void(int64_t)"
+fn gg_clear(h: integer, color: integer);
+#c "gg_clear" "void(int64_t, int64_t)"
+fn gg_close(h: integer);
+#c "gg_close" "void(int64_t)"
+fn gg_width(h: integer) -> integer;
+#c "gg_width" "int64_t(int64_t)"
+fn gg_height(h: integer) -> integer;
+#c "gg_height" "int64_t(int64_t)"
+fn gg_event_count(h: integer) -> integer;
+#c "gg_event_count" "int64_t(int64_t)"
+fn gg_events(h: integer, out: vector<integer>);
+#c "gg_events" "void(int64_t, int64_t*, int64_t)"
+fn gg_read_pixels(h: integer, out: vector<integer>);
+#c "gg_read_pixels" "void(int64_t, int64_t*, int64_t)"
+fn gg_text_size(h: integer) -> integer;
+#c "gg_text_size" "int64_t(int64_t)"
+fn gg_text_copy(h: integer, out: vector<u8>);
+#c "gg_text_copy" "void(int64_t, uint8_t*, int64_t)"
+fn gg_key_down(h: integer, key: integer) -> integer;
+#c "gg_key_down" "int64_t(int64_t, int64_t)"
+fn gg_mouse(h: integer, which: integer) -> integer;
+#c "gg_mouse" "int64_t(int64_t, int64_t)"
+
+// An open window.  `close` ends it early; otherwise it closes when its owner dies.
+pub struct Window {
+  handle: integer,
+}
+
+fn OpDrop(self: Window) {
+  if self.handle != 0 { gg_close(self.handle); }
+}
+
+// Open a window of `width` x `height` pixels titled `title`, with an OpenGL 3.3 core context
+// current on this thread.  Null when no window can open here.
+pub fn open_window(width: integer, height: integer, title: text) -> Window? {
+  h = gg_open(width, height, title, 0);
+  if h == 0 { return null; }
+  Window { handle: h }
+}
+
+// Open a borderless window covering the screen; read its size with `width()` and `height()`.
+pub fn open_fullscreen(title: text) -> Window? {
+  h = gg_open(0, 0, title, 1);
+  if h == 0 { return null; }
+  Window { handle: h }
+}
+
+// Take the window's pending input and apply a resize; false once the window was asked to close
+// (or was closed).  Call once per frame, then read `events()`.
+pub fn poll(self: const Window) -> boolean {
+  self.handle != 0 && gg_poll(self.handle) != 0
+}
+
+// What arrived since the previous `events()`, oldest first.
+pub fn events(self: const Window) -> vector<Event> {
+  out: vector<Event> = [];
+  n = gg_event_count(self.handle);
+  if n == 0 { return out; }
+  nbytes = gg_text_size(self.handle);
+  typed: vector<u8> = [0 as u8; nbytes];
+  gg_text_copy(self.handle, typed);
+  words: vector<integer> = [0; 5 * n];
+  gg_events(self.handle, words);
+  for i in 0..n {
+    tag = words[5 * i] ?? 0;
+    a = words[5 * i + 1] ?? 0;
+    b = words[5 * i + 2] ?? 0;
+    c = words[5 * i + 3] ?? 0;
+    if tag == EV_KEY_DOWN {
+      out += [KeyDown { key: a, mods: b, repeat: c != 0 }];
+    } else if tag == EV_KEY_UP {
+      out += [KeyUp { key: a, mods: b }];
+    } else if tag == EV_TEXT {
+      out += [Text { content: text_from_bytes(typed[a..a + b]) }];
+    } else if tag == EV_MOUSE_DOWN {
+      out += [MouseDown { button: a, x: b as float, y: c as float }];
+    } else if tag == EV_MOUSE_UP {
+      out += [MouseUp { button: a, x: b as float, y: c as float }];
+    } else if tag == EV_MOUSE_MOVE {
+      out += [MouseMove { x: a as float, y: b as float }];
+    } else if tag == EV_WHEEL {
+      out += [Wheel { delta: a, x: b as float, y: c as float }];
+    } else if tag == EV_RESIZE {
+      out += [Resize { width: a, height: b }];
+    }
+  }
+  out
+}
+
+
+// Whether key `key` (a KEY_* code) is held down, as of the last `poll`.
+pub fn key_down(self: const Window, key: integer) -> boolean {
+  gg_key_down(self.handle, key) != 0
+}
+
+// The pointer's position in pixels from the window's top-left corner, as of the last `poll`.
+pub fn mouse_x(self: const Window) -> float {
+  gg_mouse(self.handle, 0) as float
+}
+
+// And its vertical position.
+pub fn mouse_y(self: const Window) -> float {
+  gg_mouse(self.handle, 1) as float
+}
+
+// The mouse buttons held down: 1 left, 2 right, 4 middle, or'ed together.
+pub fn mouse_buttons(self: const Window) -> integer {
+  gg_mouse(self.handle, 2)
+}
+
+// Clear the frame to `color` (packed 0xAARRGGBB, as `rgba` packs it) and the depth buffer.
+pub fn clear(self: const Window, color: integer) {
+  gg_clear(self.handle, color);
+}
+
+// Present the frame.  Its alpha is forced opaque first, so a compositor never shows through it.
+pub fn swap(self: const Window) {
+  gg_swap(self.handle);
+}
+
+// The drawable's size in pixels; it follows a resize at `poll`.
+pub fn width(self: const Window) -> integer {
+  gg_width(self.handle)
+}
+
+// And its height.
+pub fn height(self: const Window) -> integer {
+  gg_height(self.handle)
+}
+
+// The frame drawn so far, as a canvas — read it after the draws and before `swap`.
+pub fn capture(self: const Window) -> Canvas {
+  cw = gg_width(self.handle);
+  ch = gg_height(self.handle);
+  px = filled(cw * ch, 0);
+  gg_read_pixels(self.handle, px);
+  Canvas { width: cw, height: ch, data: px }
+}
+
+// Close the window now.  Its death later does nothing more.
+pub fn close(self: Window) {
+  if self.handle != 0 {
+    gg_close(self.handle);
+    self.handle = 0;
+  }
+}
+
+// --- Shaders and GPU meshes: a window's GL objects, deleted when they die ---
+//
+//   s = w.shader(VERTEX, FRAGMENT) ?? return;
+//   m = w.upload(triangle, 6);                   // position + normal per vertex
+//   s.set_mat4("mvp", camera);
+//   m.draw(s);
+//
+// Each belongs to the window that made it.  Dying after that window closed does nothing — closing
+// the window freed it — so the order in which they and the window die never matters.
+
+fn gg_shader(win: integer, vertex: text, fragment: text) -> integer;
+#c "gg_shader" "int64_t(int64_t, const char*, const char*)"
+fn gg_uniform_f(sh: integer, name: text, v: const vector<float>);
+#c "gg_uniform_f" "void(int64_t, const char*, const double*, int64_t)"
+fn gg_uniform_i(sh: integer, name: text, v: integer);
+#c "gg_uniform_i" "void(int64_t, const char*, int64_t)"
+fn gg_mesh(win: integer, data: const vector<single>, stride: integer) -> integer;
+#c "gg_mesh" "int64_t(int64_t, const float*, int64_t, int64_t)"
+fn gg_draw(mesh: integer, shader: integer);
+#c "gg_draw" "void(int64_t, int64_t)"
+fn gg_draw_over(mesh: integer, shader: integer);
+#c "gg_draw_over" "void(int64_t, int64_t)"
+fn gg_release(res: integer);
+#c "gg_release" "void(int64_t)"
+
+// A linked GLSL program.
+pub struct Shader {
+  handle: integer,
+}
+
+fn OpDrop(self: Shader) {
+  if self.handle != 0 { gg_release(self.handle); }
+}
+
+// Compile and link a GLSL 3.30 program for this window.  Null when either stage does not compile
+// or the program does not link; the driver's log says why, on stderr.
+pub fn shader(self: const Window, vertex: text, fragment: text) -> Shader? {
+  h = gg_shader(self.handle, vertex, fragment);
+  if h == 0 { return null; }
+  Shader { handle: h }
+}
+
+// Set uniform `name` of this shader; a name the program does not use is ignored.
+pub fn set_float(self: const Shader, name: text, v: float) {
+  gg_uniform_f(self.handle, name, [v]);
+}
+
+// A `vec2` uniform.
+pub fn set_vec2(self: const Shader, name: text, x: float, y: float) {
+  gg_uniform_f(self.handle, name, [x, y]);
+}
+
+// A `vec3` uniform.
+pub fn set_vec3(self: const Shader, name: text, x: float, y: float, z: float) {
+  gg_uniform_f(self.handle, name, [x, y, z]);
+}
+
+// A `vec4` uniform.
+pub fn set_vec4(self: const Shader, name: text, x: float, y: float, z: float, w: float) {
+  gg_uniform_f(self.handle, name, [x, y, z, w]);
+}
+
+// A `mat4` uniform from 16 floats, column-major; fewer than 16 is ignored.
+pub fn set_mat4(self: const Shader, name: text, m: const vector<float>) {
+  if len(m) >= 16 { gg_uniform_f(self.handle, name, m); }
+}
+
+// An `int` (or sampler) uniform.
+pub fn set_int(self: const Shader, name: text, v: integer) {
+  gg_uniform_i(self.handle, name, v);
+}
+
+// Vertices on the GPU, `stride` floats each: position (location 0); from 6 floats a normal (1);
+// at exactly 8 a texture coordinate (2); from 10 a colour, RGBA (2); from 14 an anchor (3) and a
+// birth time (4).
+pub struct GpuMesh {
+  handle: integer,
+}
+
+fn OpDrop(self: GpuMesh) {
+  if self.handle != 0 { gg_release(self.handle); }
+}
+
+// Upload `data` as a mesh of `len(data) / stride` vertices.
+pub fn upload(self: const Window, data: const vector<single>, stride: integer) -> GpuMesh {
+  GpuMesh { handle: gg_mesh(self.handle, data, stride) }
+}
+
+// Draw every vertex of this mesh as triangles with `shader`.
+pub fn draw(self: const GpuMesh, shader: const Shader) {
+  gg_draw(self.handle, shader.handle);
+}
+
+fn gg_mesh_update(mesh: integer, data: const vector<single>);
+#c "gg_mesh_update" "void(int64_t, const float*, int64_t)"
+fn gg_mesh_indices(mesh: integer, idx: const vector<integer>);
+#c "gg_mesh_indices" "void(int64_t, const int64_t*, int64_t)"
+fn gg_draw_as(mesh: integer, shader: integer, mode: integer, indexed: integer, instances: integer);
+#c "gg_draw_as" "void(int64_t, int64_t, int64_t, int64_t, int64_t)"
+fn gg_instances(win: integer, data: const vector<single>) -> integer;
+#c "gg_instances" "int64_t(int64_t, const float*, int64_t)"
+fn gg_buffer_update(buf: integer, data: const vector<single>);
+#c "gg_buffer_update" "void(int64_t, const float*, int64_t)"
+fn gg_instance_attrib(
+  mesh: integer,
+  buf: integer,
+  location: integer,
+  components: integer,
+  stride: integer,
+  offset: integer
+);
+#c "gg_instance_attrib" "void(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)"
+
+// Draw every vertex of this mesh as `mode`: `DRAW_TRIANGLES`, `DRAW_LINES` or `DRAW_POINTS`.
+pub fn draw_mode(self: const GpuMesh, shader: const Shader, mode: integer) {
+  gg_draw_as(self.handle, shader.handle, mode, 0, 0);
+}
+
+// Replace the vertices, in the same layout; the count follows `len(data) / stride`.  For data that
+// changes every frame.
+pub fn update(self: const GpuMesh, data: const vector<single>) {
+  gg_mesh_update(self.handle, data);
+}
+
+// Give the mesh an index list (a second call replaces the first); `draw_indexed` then draws the
+// vertices it names, in its order.
+pub fn indices(self: const GpuMesh, list: const vector<integer>) {
+  gg_mesh_indices(self.handle, list);
+}
+
+// Draw the vertices the index list names, as `mode`.
+pub fn draw_indexed(self: const GpuMesh, shader: const Shader, mode: integer) {
+  gg_draw_as(self.handle, shader.handle, mode, 1, 0);
+}
+
+// Draw the mesh's triangles `count` times; attributes fed by `instance_attrib` advance once per
+// copy.
+pub fn draw_instanced(self: const GpuMesh, shader: const Shader, count: integer) {
+  gg_draw_as(self.handle, shader.handle, 0, 0, count);
+}
+
+// Feed attribute `location` (use 5 and up: the vertex layout takes 0-4) from `instances`, once per
+// copy: `components` floats at `offset` floats into each record of `stride` floats.
+pub fn instance_attrib(
+  self: const GpuMesh,
+  instances: const InstanceBuffer,
+  location: integer,
+  components: integer,
+  stride: integer,
+  offset: integer
+) {
+  gg_instance_attrib(self.handle, instances.handle, location, components, stride, offset);
+}
+
+// Floats read once per drawn copy of a mesh — a position, a colour — through `instance_attrib`.
+pub struct InstanceBuffer {
+  handle: integer,
+}
+
+fn OpDrop(self: InstanceBuffer) {
+  if self.handle != 0 { gg_release(self.handle); }
+}
+
+// Upload per-copy data, for a mesh to read through `instance_attrib`.
+pub fn instances(self: const Window, data: const vector<single>) -> InstanceBuffer {
+  InstanceBuffer { handle: gg_instances(self.handle, data) }
+}
+
+// Replace the data; meshes reading it see the new values at their next draw.
+pub fn update(self: const InstanceBuffer, data: const vector<single>) {
+  gg_buffer_update(self.handle, data);
+}
+
+// --- Render state: what the next draws do with depth, blending, faces and the frame's area ---
+//
+// The codes are 0.9's: `GL_DEPTH_TEST`, `GL_BLEND`, `GL_CULL_FACE`, `GL_SCISSOR_TEST` for
+// `enable`/`disable`, the `BLEND_*` factors for `blend`.  A window opens with the depth test on.
+
+fn gg_capability(win: integer, cap: integer, on: integer);
+#c "gg_capability" "void(int64_t, int64_t, int64_t)"
+fn gg_capability_on(win: integer, cap: integer) -> integer;
+#c "gg_capability_on" "int64_t(int64_t, int64_t)"
+fn gg_blend(win: integer, src: integer, dst: integer);
+#c "gg_blend" "void(int64_t, int64_t, int64_t)"
+fn gg_cull(win: integer, face: integer);
+#c "gg_cull" "void(int64_t, int64_t)"
+fn gg_depth_write(win: integer, on: integer);
+#c "gg_depth_write" "void(int64_t, int64_t)"
+fn gg_viewport(win: integer, x: integer, y: integer, width: integer, height: integer);
+#c "gg_viewport" "void(int64_t, int64_t, int64_t, int64_t, int64_t)"
+fn gg_scissor(win: integer, x: integer, y: integer, width: integer, height: integer);
+#c "gg_scissor" "void(int64_t, int64_t, int64_t, int64_t, int64_t)"
+fn gg_finish(win: integer);
+#c "gg_finish" "void(int64_t)"
+fn gg_line_width(win: integer, width: const vector<float>);
+#c "gg_line_width" "void(int64_t, const double*, int64_t)"
+fn gg_point_size(win: integer, size: const vector<float>);
+#c "gg_point_size" "void(int64_t, const double*, int64_t)"
+
+// Turn a capability on: `GL_DEPTH_TEST`, `GL_BLEND`, `GL_CULL_FACE` or `GL_SCISSOR_TEST`.
+pub fn enable(self: const Window, cap: integer) {
+  gg_capability(self.handle, cap, 1);
+}
+
+// And off.
+pub fn disable(self: const Window, cap: integer) {
+  gg_capability(self.handle, cap, 0);
+}
+
+// Whether `GL_DEPTH_TEST`, `GL_BLEND`, `GL_CULL_FACE` or `GL_SCISSOR_TEST` is on — for a pass that
+// changes one and hands the window back as it found it.  A window opens with depth testing on.
+pub fn enabled(self: const Window, cap: integer) -> boolean {
+  gg_capability_on(self.handle, cap) != 0
+}
+
+// How a blended draw combines with the frame: `w.blend(BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA)`.
+pub fn blend(self: const Window, src: integer, dst: integer) {
+  gg_blend(self.handle, src, dst);
+}
+
+// Which faces `GL_CULL_FACE` drops: 0 the back (counter-clockwise is the front), 1 the front.
+pub fn cull(self: const Window, face: integer) {
+  gg_cull(self.handle, face);
+}
+
+// Whether draws write the depth buffer (they still test it while `GL_DEPTH_TEST` is on).
+pub fn depth_write(self: const Window, on: boolean) {
+  gg_depth_write(self.handle, if on { 1 } else { 0 });
+}
+
+// The rectangle draws map onto, origin bottom-left.  `poll` resets it to the whole window on a
+// resize.
+pub fn viewport(self: const Window, x: integer, y: integer, width: integer, height: integer) {
+  gg_viewport(self.handle, x, y, width, height);
+}
+
+// The rectangle `GL_SCISSOR_TEST` clips to, origin bottom-left.
+pub fn scissor(self: const Window, x: integer, y: integer, width: integer, height: integer) {
+  gg_scissor(self.handle, x, y, width, height);
+}
+
+// Wait until every draw so far has finished.  A stall: for a test or a screenshot, not a frame.
+pub fn finish(self: const Window) {
+  gg_finish(self.handle);
+}
+
+// The width of lines drawn with `DRAW_LINES`.
+pub fn line_width(self: const Window, width: float) {
+  gg_line_width(self.handle, [width]);
+}
+
+// The size of points drawn with `DRAW_POINTS`.
+pub fn point_size(self: const Window, size: float) {
+  gg_point_size(self.handle, [size]);
+}
+
+// --- Textures and framebuffers: images on the GPU, and drawing into them ---
+//
+//   colour = w.texture(256, 256);                // empty RGBA
+//   target = w.framebuffer();
+//   target.attach(colour);
+//   w.render_to(target);  w.viewport(0, 0, 256, 256);  …draws…
+//   w.render_to_window(); w.viewport(0, 0, w.width(), w.height());
+//   colour.bind(0);  s.set_int("image", 0);  w.quad().draw(s);
+//
+// Each belongs to its window and is deleted when it dies, like a shader or a mesh.  A texture
+// attached to a framebuffer stays usable after the framebuffer is gone, and the other way round.
+
+fn gg_texture(win: integer, width: integer, height: integer, depth: integer) -> integer;
+#c "gg_texture" "int64_t(int64_t, int64_t, int64_t, int64_t)"
+fn gg_texture_from(win: integer, px: const vector<integer>, width: integer, height: integer) -> integer;
+#c "gg_texture_from" "int64_t(int64_t, const int64_t*, int64_t, int64_t, int64_t)"
+fn gg_texture_put(
+  tex: integer,
+  x: integer,
+  y: integer,
+  width: integer,
+  height: integer,
+  px: const vector<integer>
+);
+#c "gg_texture_put" "void(int64_t, int64_t, int64_t, int64_t, int64_t, const int64_t*, int64_t)"
+fn gg_texture_filter(tex: integer, nearest: integer);
+#c "gg_texture_filter" "void(int64_t, int64_t)"
+fn gg_texture_mipmaps(tex: integer);
+#c "gg_texture_mipmaps" "void(int64_t)"
+fn gg_texture_bind(tex: integer, unit: integer);
+#c "gg_texture_bind" "void(int64_t, int64_t)"
+fn gg_texture_size(tex: integer, which: integer) -> integer;
+#c "gg_texture_size" "int64_t(int64_t, int64_t)"
+fn gg_framebuffer(win: integer) -> integer;
+#c "gg_framebuffer" "int64_t(int64_t)"
+fn gg_framebuffer_attach(fb: integer, tex: integer);
+#c "gg_framebuffer_attach" "void(int64_t, int64_t)"
+fn gg_render_to(win: integer, fb: integer);
+#c "gg_render_to" "void(int64_t, int64_t)"
+fn gg_quad(win: integer) -> integer;
+#c "gg_quad" "int64_t(int64_t)"
+
+// An image on the GPU: colour (RGBA, 8 bits a channel) or depth (32-bit float).
+pub struct Texture {
+  handle: integer,
+}
+
+fn OpDrop(self: Texture) {
+  if self.handle != 0 { gg_release(self.handle); }
+}
+
+// An empty colour texture, filtered linearly — a render target.
+pub fn texture(self: const Window, width: integer, height: integer) -> Texture {
+  Texture { handle: gg_texture(self.handle, width, height, 0) }
+}
+
+// An empty depth texture, filtered to the nearest texel and clamped at its edges — the depth of a
+// render target, or a shadow map.
+pub fn depth_texture(self: const Window, width: integer, height: integer) -> Texture {
+  Texture { handle: gg_texture(self.handle, width, height, 1) }
+}
+
+// A colour texture holding a canvas's pixels, filtered linearly and clamped at its edges.  The
+// canvas's row 0 is the texture's row 0, which GL places at the bottom (texture coordinate 0).
+pub fn texture_from(self: const Window, image: const Canvas) -> Texture {
+  Texture { handle: gg_texture_from(self.handle, image.data, image.width, image.height) }
+}
+
+// Its width in texels.
+pub fn width(self: const Texture) -> integer {
+  gg_texture_size(self.handle, 0)
+}
+
+// And its height.
+pub fn height(self: const Texture) -> integer {
+  gg_texture_size(self.handle, 1)
+}
+
+// Replace the region at (`x`, `y`) — origin bottom-left — with a canvas's pixels.
+pub fn put(self: const Texture, x: integer, y: integer, image: const Canvas) {
+  gg_texture_put(self.handle, x, y, image.width, image.height, image.data);
+}
+
+// Sample the nearest texel (pixel art), or interpolate between texels (the default).
+pub fn filter(self: const Texture, nearest: boolean) {
+  gg_texture_filter(self.handle, if nearest { 1 } else { 0 });
+}
+
+// Build mipmaps from the current pixels and minify through them; call again after `put`.
+pub fn mipmaps(self: const Texture) {
+  gg_texture_mipmaps(self.handle);
+}
+
+// Bind to texture unit `unit`; a `sampler2D` uniform set to `unit` then reads it.
+pub fn bind(self: const Texture, unit: integer) {
+  gg_texture_bind(self.handle, unit);
+}
+
+// A target for draws other than the window: textures attached as its colour and depth.
+pub struct Framebuffer {
+  handle: integer,
+}
+
+fn OpDrop(self: Framebuffer) {
+  if self.handle != 0 { gg_release(self.handle); }
+}
+
+// An empty framebuffer; attach textures before drawing into it.
+pub fn framebuffer(self: const Window) -> Framebuffer {
+  Framebuffer { handle: gg_framebuffer(self.handle) }
+}
+
+// Attach `t`: a depth texture as the depth buffer, a colour texture as the colour.  With only a
+// depth texture the framebuffer draws no colour (a depth-only pass).
+pub fn attach(self: const Framebuffer, t: const Texture) {
+  gg_framebuffer_attach(self.handle, t.handle);
+}
+
+// Draw into `target` from now on — set the viewport to its size.  Dropping the framebuffer that
+// is the target sends the draws back to the window.
+pub fn render_to(self: const Window, target: const Framebuffer) {
+  gg_render_to(self.handle, target.handle);
+}
+
+// Draw into the window again.
+pub fn render_to_window(self: const Window) {
+  gg_render_to(self.handle, 0);
+}
+
+// Load a PNG file as a colour texture (filtered linearly, clamped at its edges), its top row at
+// texture coordinate 0 as a canvas uploads.  Any PNG colour type loads; 16-bit channels keep their
+// high byte.  A relative path resolves against the program's own directory, as `load_font`'s.
+// Null when the file is missing or is not a PNG this decoder reads.
+pub fn load_texture(self: const Window, path: text) -> Texture? {
+  full = path;
+  if !path.starts_with("/") {
+    dir = source_dir();
+    if dir != "" { full = "{dir}/{path}"; }
+  }
+  img = imaging::png(file(full)) ?? return null;
+  px: vector<integer> = [];
+  for p in img.data { px += [rgba(p.r, p.g, p.b, p.a)]; }
+  self.texture_from(Canvas { width: img.width, height: img.height, data: px })
+}
+
+// `content` drawn with `font` at `size` pixels to the em, in `color`, as a texture: the text with
+// 2 pixels of transparent margin around it — what 0.9's `create_text_texture` made, for
+// `Painter.image`.
+pub fn text_texture(self: const Window, font: const Font, content: text, size: float, color: integer) -> Texture {
+  pad = 2;
+  cv = canvas(font.measure(content, size) as integer + pad * 2 + 1, font.line_height(size) + pad * 2, 0);
+  cv.draw_text(font, content, size, pad, pad, color);
+  self.texture_from(cv)
+}
+
+// Two triangles covering the whole target: a `vec2` position at location 0 and a `vec2` texture
+// coordinate at location 1 — for a post-processing pass, or to show a texture.
+pub fn quad(self: const Window) -> GpuMesh {
+  GpuMesh { handle: gg_quad(self.handle) }
+}
+
+// --- 2D drawing on a window: rectangles, images and sprites at pixel positions ---
+//
+//   p = w.painter() ?? return;              // origin top-left, y down, sized to the window
+//   p.rect(10.0, 10.0, 100.0, 20.0, 1.0, 0.5, 0.0, 1.0);
+//   p.image(icon, 120.0, 10.0, 32.0, 32.0);
+//   for ev in w.events() { match ev { Resize { width, height } => p.resize(width, height), _ => {} } }
+//
+// Each holds its own shaders and quad, released when it dies.  A painter draws in call order over
+// whatever the frame holds: the depth test is off for each of its draws and as it was after, so a
+// later rectangle covers an earlier one and a HUD is never hidden behind a 3-D scene.
+
+// Shaders and a unit quad for drawing at pixel positions.
+pub struct Painter {
+  flat: Shader,
+  // The textured-quad shader and the unit quad, for a program that draws its own textured quad
+  // through them (`uMVP`, `uTex`).
+  pub tex: Shader,
+  pub quad: GpuMesh,
+  proj: vector<float>,
+}
+
+// The orthographic projection of a `width` x `height` target, origin top-left.
+fn pixel_projection(width: integer, height: integer) -> vector<float> {
+  [
+    2.0 / width as float ?? 0.0, 0.0, 0.0, 0.0, 0.0, -2.0 / height as float ?? 0.0, 0.0, 0.0, 0.0,
+    0.0, -1.0, 0.0, -1.0, 1.0, 0.0, 1.0,
+  ]
+}
+
+// The unit quad (0, 0)-(1, 1) as two triangles.
+fn unit_quad() -> vector<single> {
+  [
+    0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f,
+    1.0f, 0.0f,
+  ]
+}
+
+// A painter for this window, sized to it.  Null when its shaders do not compile.
+pub fn painter(self: const Window) -> Painter? {
+  flat = self.shader(FLAT_VERT_2D, FLAT_FRAG_2D) ?? return null;
+  tex = self.shader(TEX_VERT_2D, TEX_FRAG_2D) ?? return null;
+  Painter {
+    flat: flat,
+    tex: tex,
+    quad: self.upload(unit_quad(), 3),
+    proj: pixel_projection(self.width(), self.height()),
+  }
+}
+
+// Draw for a target of `width` x `height` pixels from now on — after a `Resize`.
+pub fn resize(self: Painter, width: integer, height: integer) {
+  self.proj = pixel_projection(width, height);
+}
+
+// A filled rectangle at (x, y) of `w` x `h` pixels, channels 0.0-1.0; the alpha blends where the
+// window has `GL_BLEND` on.
+pub fn rect(
+  self: const Painter,
+  x: float,
+  y: float,
+  w: float,
+  h: float,
+  r: float,
+  g: float,
+  b: float,
+  a: float
+) {
+  self.flat.set_mat4("uMVP", build_mvp_2d(self.proj, x, y, w, h));
+  self.flat.set_vec3("uColor", r, g, b);
+  self.flat.set_float("uAlpha", a);
+  gg_draw_over(self.quad.handle, self.flat.handle);
+}
+
+// A texture stretched over (x, y) of `w` x `h` pixels; fully transparent texels are not drawn.
+pub fn image(self: const Painter, t: const Texture, x: float, y: float, w: float, h: float) {
+  t.bind(0);
+  self.tex.set_int("uTex", 0);
+  self.tex.set_mat4("uMVP", build_mvp_2d(self.proj, x, y, w, h));
+  gg_draw_over(self.quad.handle, self.tex.handle);
+}
+
+// Sprite `index` of `sheet` over (x, y) of `w` x `h` pixels.
+pub fn sprite(
+  self: const Painter,
+  sheet: const Sprites,
+  x: float,
+  y: float,
+  w: float,
+  h: float,
+  index: integer
+) {
+  sheet.draw_cell(build_mvp_2d(self.proj, x, y, w, h), index, true);
+}
+
+// A canvas atlas on the GPU, cut into a grid of `cols` x `rows` sprites; sprite 0 is the top left,
+// counting along the rows.
+pub struct Sprites {
+  pub texture: Texture,
+  shader: Shader,
+  quad: GpuMesh,
+  pub const cols: integer,
+  pub const rows: integer,
+}
+
+// Upload `atlas` as a sprite sheet of `cols` x `rows` cells.  Null when its shader does not
+// compile.
+pub fn sprites(self: const Window, atlas: const Canvas, cols: integer, rows: integer) -> Sprites? {
+  sh = self.shader(SPRITE_VERT, SPRITE_FRAG) ?? return null;
+  Sprites {
+    texture: self.texture_from(atlas),
+    shader: sh,
+    quad: self.upload(unit_quad(), 3),
+    cols: cols,
+    rows: rows,
+  }
+}
+
+// Draw sprite `index` through `mvp`, which maps the unit quad onto the target (16 floats,
+// column-major).
+pub fn draw(self: const Sprites, mvp: const vector<float>, index: integer) {
+  self.draw_cell(mvp, index, false);
+}
+
+// `draw`, or with `over` the 2-D draw `Painter.sprite` makes: in call order, whatever the depth.
+fn draw_cell(self: const Sprites, mvp: const vector<float>, index: integer, over: boolean) {
+  if self.cols <= 0 || self.rows <= 0 { return; }
+  // the divisors are positive (checked above), so no `??` default is ever taken
+  col = (index % self.cols) ?? 0;
+  row = (index / self.cols) ?? 0;
+  cols = self.cols as float;
+  rows = self.rows as float;
+  self.texture.bind(0);
+  self.shader.set_int("uTex", 0);
+  self.shader.set_float("uU0", (col as float / cols) ?? 0.0);
+  self.shader.set_float("uV0", (row as float / rows) ?? 0.0);
+  self.shader.set_float("uU1", ((col + 1) as float / cols) ?? 0.0);
+  self.shader.set_float("uV1", ((row + 1) as float / rows) ?? 0.0);
+  self.shader.set_mat4("uMVP", mvp);
+  if over { gg_draw_over(self.quad.handle, self.shader.handle); } else { self.quad.draw(self.shader); }
+}
+
+// A mesh in groups, each re-uploaded on its own: after an edit only the groups whose geometry
+// changed go to the GPU again (`upsert`), every other keeps its buffer.  All groups share one
+// vertex layout (`stride` floats) and one draw mode.  Each group records its world XZ bounds.
+pub struct GroupMeshes {
+  slots: hash<GroupSlot[gk]>,
+  meshes: vector<GpuMesh>,
+  pub const stride: integer,
+  pub const mode: integer,
+}
+
+// Where group `gk` lives in `meshes`, and its bounds.
+struct GroupSlot {
+  const gk: integer,
+  at: integer,
+  min_x: single,
+  min_z: single,
+  max_x: single,
+  max_z: single,
+}
+
+// An empty set for vertices of `stride` floats, drawn as `mode` (`DRAW_TRIANGLES`, …).
+pub fn group_meshes(stride: integer, mode: integer) -> GroupMeshes {
+  GroupMeshes { slots: [], meshes: [], stride: stride, mode: mode }
+}
+
+// Upload group `gk`'s vertices — a new group, or new geometry for one already there (its buffer is
+// reused).  No vertices empties the group.
+pub fn upsert(
+  self: GroupMeshes,
+  w: const Window,
+  gk: integer,
+  verts: const vector<single>,
+  min_x: single,
+  min_z: single,
+  max_x: single,
+  max_z: single
+) {
+  old = self.slots[gk];
+  if old != null {
+    old.min_x = min_x;
+    old.min_z = min_z;
+    old.max_x = max_x;
+    old.max_z = max_z;
+    mesh = self.meshes[old.at] ?? return; // `at` names a mesh: slots and meshes grow together
+    mesh.update(verts);
+    return;
+  }
+  self.slots += [
+    GroupSlot {
+      gk: gk,
+      at: len(self.meshes),
+      min_x: min_x,
+      min_z: min_z,
+      max_x: max_x,
+      max_z: max_z,
+    },
+  ];
+  self.meshes += [w.upload(verts, self.stride)];
+}
+
+// Whether group `gk` has been uploaded.
+pub fn has(self: const GroupMeshes, gk: integer) -> boolean {
+  self.slots[gk] != null
+}
+
+// How many groups the set holds.
+pub fn count(self: const GroupMeshes) -> integer {
+  len(self.meshes)
+}
+
+// Draw every group with `shader`.
+pub fn draw_all(self: const GroupMeshes, shader: const Shader) {
+  for m in self.meshes { m.draw_mode(shader, self.mode); }
+}
+
+// --- Event tags, modifiers and the named keys ---
+
+// The tag of each `Event` variant, as the shim queues it (`Window.events()` decodes them).
 pub const EV_NONE = 0;
 pub const EV_KEY_DOWN = 1;
 pub const EV_KEY_UP = 2;
@@ -1359,13 +1811,13 @@ pub const EV_TOUCH_MOVE = 9;
 pub const EV_TOUCH_END = 10;
 pub const EV_RESIZE = 11;
 
-// Modifier bitmask for gl_event_mods().
+// Modifier bits, or'ed in an event's `mods`.
 pub const MOD_SHIFT = 1;
 pub const MOD_CTRL = 2;
 pub const MOD_ALT = 4;
 pub const MOD_SUPER = 8;
 
-// Named keys the event queue reports (extend the KEY_* set above).
+// More named keys.
 pub const KEY_ENTER = 13;
 pub const KEY_BACKSPACE = 8;
 pub const KEY_DELETE = 147;
@@ -1374,122 +1826,6 @@ pub const KEY_HOME = 149;
 pub const KEY_END = 150;
 pub const KEY_PAGEUP = 151;
 pub const KEY_PAGEDOWN = 152;
-
-// Pop the next queued input event and latch it; returns its EV_* tag, or
-// EV_NONE when the queue is drained.  Call after gl_poll_events().
-pub fn gl_next_event() -> integer;
-#native "loft_gl_next_event"
-
-// Named/keycode of the latched key event (the KEY_* constants).
-pub fn gl_event_key() -> integer;
-#native "loft_gl_event_key"
-
-// Modifier bitmask of the latched event (MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_SUPER).
-pub fn gl_event_mods() -> integer;
-#native "loft_gl_event_mods"
-
-// True if the latched key-down is an auto-repeat.
-pub fn gl_event_repeat() -> boolean;
-#native "loft_gl_event_repeat"
-
-// UTF-8 text of the latched EV_TEXT event ("" otherwise).
-pub fn gl_event_text() -> text;
-#native "loft_gl_event_text"
-
-// X position (pixels) of the latched mouse/touch event; width for EV_RESIZE.
-pub fn gl_event_x() -> float;
-#native "loft_gl_event_x"
-
-// Y position (pixels) of the latched mouse/touch event; height for EV_RESIZE.
-pub fn gl_event_y() -> float;
-#native "loft_gl_event_y"
-
-// Button of the latched mouse event (1=left, 2=right, 4=middle).
-pub fn gl_event_button() -> integer;
-#native "loft_gl_event_button"
-
-// Wheel delta of the latched EV_WHEEL event (positive = up).
-pub fn gl_event_wheel() -> integer;
-#native "loft_gl_event_wheel"
-
-// Stable finger id of the latched EV_TOUCH_* event.
-pub fn gl_event_touch_id() -> integer;
-#native "loft_gl_event_touch_id"
-
-// --- Text rendering (GL3) ---
-
-// Native font loader — reads `path` straight from the filesystem (relative to
-// the process cwd).  Use the `gl_load_font` wrapper below, which resolves the
-// path program-relative first.
-fn gl_load_font_raw(path: text) -> integer;
-#native "loft_gl_load_font"
-
-// Load a font from a file path. Returns a font handle (>= 0) or null on error.
-//
-// #255: a RELATIVE path resolves against the program's OWN directory
-// (`source_dir()` — the source dir under `--interpret`, the executable's dir
-// under `--native`), so a bundled font travels with the program and loads
-// regardless of the launch directory (the symptom #255 hit: a font addressed
-// relative to the source missed under `--native`, which runs from a temp dir,
-// and text rendered invisible).  An ABSOLUTE path is used verbatim.  This
-// matches loft's program-relative file-I/O default (`file()` / `read_file`).
-pub fn gl_load_font(path: text) -> integer {
-  if path.starts_with("/") { return gl_load_font_raw(path); }
-  dir = source_dir();
-  if dir == "" { return gl_load_font_raw(path); }
-  return gl_load_font_raw("{dir}/{path}");
-}
-
-// Measure text width in pixels at the given font size.
-pub fn gl_measure_text(font: integer, content: text, size: float) -> float;
-#native "loft_gl_measure_text"
-
-// Return the line height in pixels for a font at the given size.
-pub fn gl_text_height(font: integer, size: float) -> integer;
-#native "loft_text_height"
-
-// @P340: return the font ASCENT in pixels (baseline -> top of glyphs) from the
-// font's real metrics.  gl_draw_text(x, y) anchors by the TOP, placing the
-// baseline at y + gl_font_ascent(font, size); to baseline-align mixed sizes,
-// draw each at y = baseline - gl_font_ascent(font, size_i).
-pub fn gl_font_ascent(font: integer, size: float) -> float;
-#native "loft_gl_font_ascent"
-
-// Rasterize text into a pre-allocated integer buffer of alpha values (0-255).
-fn rasterize_text_into(font: integer, content: text, size: float, buf: vector<integer>) -> integer;
-#native "loft_rasterize_text_into"
-
-// Rasterise text into the canvas at (x, y), anchored by the TOP-left.
-//
-// ⚠ NEEDS THE NATIVE RASTERISER, so this is one of the canvas routines that
-// does NOT work headless: without it the call is a no-op and the canvas keeps
-// whatever was under the text.  `text2d` exists for exactly that case — it
-// carries a baked face and draws through `set_pixel`, so text always appears.
-pub fn draw_text(self: Canvas, font: integer, content: text, size: float,
-                 dt_x: integer, dt_y: integer, color: integer) {
-  dt_tw = gl_measure_text(font, content, size) as integer + 1;
-  dt_th = gl_text_height(font, size);
-  if dt_tw <= 0 or dt_th <= 0 { return; }
-  dt_buf = filled(dt_tw * dt_th, 0);
-  dt_bw = rasterize_text_into(font, content, size, dt_buf);
-  if dt_bw <= 0 { return; }
-  dt_cr = color_r(color);
-  dt_cg = color_g(color);
-  dt_cb = color_b(color);
-  for dt_by in 0..dt_th {
-    for dt_bx in 0..dt_bw {
-      dt_idx = dt_by * dt_bw + dt_bx;
-      if dt_idx >= dt_buf.len() { break; }
-      // `dt_idx` is computed (not a `for` index), so loft can't prove the read
-      // fit — discharge at the source. The `>=` guard above keeps it in bounds,
-      // so `?? 0` never actually fires.
-      dt_a = dt_buf[dt_idx] ?? 0;
-      if dt_a > 0 {
-        self.blend_pixel(dt_x + dt_bx, dt_y + dt_by, rgba(dt_cr, dt_cg, dt_cb, dt_a));
-      }
-    }
-  }
-}
 
 // --- Fonts: a TrueType face as a value the caller holds ---
 //
@@ -1504,13 +1840,13 @@ pub fn draw_text(self: Canvas, font: integer, content: text, size: float,
 struct CmapRange {
   first: integer,
   last: integer,
-  glyph: integer
+  glyph: integer,
 }
 
 // One kerning pair, keyed by `(left glyph << 16) | right glyph`, its value in font units.
 struct KernPair {
   key: integer,
-  value: integer
+  value: integer,
 }
 
 // A TrueType face.  Obtain one from `load_font`; its fields are the font's own numbers, in font
@@ -1524,16 +1860,22 @@ pub struct Font {
   cmap: vector<CmapRange>,
   kern: hash<KernPair[key]>,
   // The whole file, kept for the glyph outlines a rasterizer reads.
-  data: vector<u8>
+  data: vector<u8>,
 }
 
-fn tt_u8(b: const vector<u8>, at: integer) -> integer { (b[at] ?? 0) as integer }
-fn tt_u16(b: const vector<u8>, at: integer) -> integer { tt_u8(b, at) * 256 + tt_u8(b, at + 1) }
+fn tt_u8(b: const vector<u8>, at: integer) -> integer {
+  (b[at] ?? 0) as integer
+}
+fn tt_u16(b: const vector<u8>, at: integer) -> integer {
+  tt_u8(b, at)*256 + tt_u8(b, at + 1)
+}
 fn tt_i16(b: const vector<u8>, at: integer) -> integer {
   v = tt_u16(b, at);
   if v >= 32768 { v - 65536 } else { v }
 }
-fn tt_u32(b: const vector<u8>, at: integer) -> integer { tt_u16(b, at) * 65536 + tt_u16(b, at + 2) }
+fn tt_u32(b: const vector<u8>, at: integer) -> integer {
+  tt_u16(b, at)*65536 + tt_u16(b, at + 2)
+}
 
 // The offset of table `tag` in the file, or -1 when the font has none.
 fn tt_table(b: const vector<u8>, tag: text) -> integer {
@@ -1553,7 +1895,9 @@ fn tt_cmap_ranges(b: const vector<u8>, sub: integer) -> vector<CmapRange> {
   if format == 12 {
     for i in 0..tt_u32(b, sub + 12) {
       g = sub + 16 + 12 * i;
-      out += [CmapRange { first: tt_u32(b, g), last: tt_u32(b, g + 4), glyph: tt_u32(b, g + 8) }];
+      out += [
+        CmapRange { first: tt_u32(b, g), last: tt_u32(b, g + 4), glyph: tt_u32(b, g + 8) },
+      ];
     }
   } else if format == 4 {
     seg_x2 = tt_u16(b, sub + 6);
@@ -1572,15 +1916,23 @@ fn tt_cmap_ranges(b: const vector<u8>, sub: integer) -> vector<CmapRange> {
         g0 = (first + delta) % 65536;
         wrap_at = first + (65536 - g0);
         if wrap_at <= last {
-          out += [CmapRange { first: first, last: wrap_at - 1, glyph: g0 }];
-          out += [CmapRange { first: wrap_at, last: last, glyph: 0 }];
-        } else {
-          out += [CmapRange { first: first, last: last, glyph: g0 }];
-        }
+          out += [
+            CmapRange { first: first, last: wrap_at - 1, glyph: g0 },
+          ];
+          out += [
+            CmapRange { first: wrap_at, last: last, glyph: 0 },
+          ];
+        } else { out += [
+          CmapRange { first: first, last: last, glyph: g0 },
+        ]; }
       } else {
         for c in first..last + 1 {
           g = tt_u16(b, offsets + 2 * i + ro + 2 * (c - first));
-          if g != 0 { out += [CmapRange { first: c, last: c, glyph: (g + delta) % 65536 }]; }
+          if g != 0 {
+            out += [
+              CmapRange { first: c, last: c, glyph: (g + delta) % 65536 },
+            ];
+          }
         }
       }
     }
@@ -1605,8 +1957,12 @@ pub fn load_font(path: text) -> Font? {
   if head < 0 || hhea < 0 || hmtx < 0 || cmap < 0 { return null; }
   upem = tt_u16(b, head + 18);
   if upem == 0 { return null; }
-  f = Font { units_per_em: upem, ascender: tt_i16(b, hhea + 4), descender: tt_i16(b, hhea + 6),
-             line_gap: tt_i16(b, hhea + 8) };
+  f = Font {
+    units_per_em: upem,
+    ascender: tt_i16(b, hhea + 4),
+    descender: tt_i16(b, hhea + 6),
+    line_gap: tt_i16(b, hhea + 8),
+  };
   os2 = tt_table(b, "OS/2");
   if os2 >= 0 && (tt_u16(b, os2 + 62) & 128) != 0 {
     f.ascender = tt_i16(b, os2 + 68);
@@ -1625,7 +1981,9 @@ pub fn load_font(path: text) -> Font? {
     unicode = platform == 0 || (platform == 3 && (encoding == 1 || encoding == 10));
     format = tt_u16(b, sub);
     rank = if !unicode { 0 } else if format == 12 { 2 } else if format == 4 { 1 } else { 0 };
-    if rank > best_rank { best = sub; best_rank = rank; }
+    if rank > best_rank {
+      best = sub; best_rank = rank;
+    }
   }
   if best >= 0 { f.cmap = tt_cmap_ranges(b, best); }
   kern = tt_table(b, "kern");
@@ -1638,7 +1996,9 @@ pub fn load_font(path: text) -> Font? {
       if coverage / 256 == 0 && (coverage & 7) == 1 {
         for p in 0..tt_u16(b, at + 6) {
           e = at + 14 + 6 * p;
-          f.kern += [KernPair { key: tt_u16(b, e) * 65536 + tt_u16(b, e + 2), value: tt_i16(b, e + 4) }];
+          f.kern += [
+            KernPair { key: tt_u16(b, e)*65536 + tt_u16(b, e + 2), value: tt_i16(b, e + 4) },
+          ];
         }
       }
       at += length;
@@ -1704,41 +2064,706 @@ pub fn line_height(self: const Font, size: float) -> integer {
   (h.ceil() ?? 0.0) as integer
 }
 
-// --- Textures (GL5.5) ---
+// --- Glyph outlines and coverage: text rasterized in loft ---
+//
+// A glyph's quadratic outline is read from `glyf` (simple and composite glyphs, the walk
+// ttf-parser 0.21 makes), split into straight edges, and its coverage accumulated per pixel — the
+// algorithm and the 32-bit float arithmetic of fontdue 0.9.3, which 0.9 rasterized with, so the
+// same glyph at the same size answers the same bytes.  Every number below is a `single` on
+// purpose: that is what makes it the same.
 
-// Load an image file (PNG, JPG) and upload it as a GL texture.
-// Returns the texture ID (0 on failure).
-pub fn gl_load_texture(path: text) -> integer;
-#native "loft_gl_load_texture"
+// One edge of an outline in font units, and the stepping state fontdue derives from it.
+struct OlLine {
+  x0: single,
+  y0: single,
+  x1: single,
+  y1: single,
+  nsx: integer, // 1: the start x is stepped down before it is truncated (a "ceil" nudge)
+  nsy: integer,
+  nex: integer,
+  ney: integer,
+  adjx: single,
+  adjy: single,
+  tdx: single,
+  tdy: single,
+  dx: single,
+  dy: single,
+}
 
-// Upload Canvas pixel data as a GL texture. Returns the texture ID.
-// Converts 0xAARRGGBB packed integers to RGBA bytes for OpenGL.
-pub fn gl_upload_canvas(data: const vector<integer>, width: integer, height: integer) -> integer;
-#native "loft_gl_upload_canvas"
+// Edges collected from an outline: vertical ones apart, as fontdue keeps them.
+struct Outliner {
+  v: vector<OlLine>,
+  m: vector<OlLine>,
+  xmin: single,
+  xmax: single,
+  ymin: single,
+  ymax: single,
+  sx: single, // the contour's start point
+  sy: single,
+  px: single, // the previous point
+  py: single,
+  area: single,
+  max_area: single,
+}
 
-// Bind a texture to a texture unit (0-based) for rendering.
-pub fn gl_bind_texture(texture_id: integer, unit: integer);
-#native "loft_gl_bind_texture"
+// The pen ttf-parser drives over a glyph's points: implied on-curve midpoints, a transform for a
+// composite's component.
+struct TtPen {
+  ta: single,
+  tb: single,
+  tc: single,
+  td: single,
+  te: single,
+  tf: single,
+  plain: boolean,
+  on: boolean, // a first on-curve point is known
+  fx: single,
+  fy: single,
+  first_off: boolean,
+  ox: single,
+  oy: single,
+  last_off: boolean,
+  lx: single,
+  ly: single,
+}
 
-// Delete a texture.
-pub fn gl_delete_texture(texture_id: integer);
-#native "loft_gl_delete_texture"
+// The coverage of one glyph at one size: `width` x `height` bytes 0-255 from its top-left, placed
+// `xmin` right of the pen and its bottom `ymin` above the baseline.
+pub struct Glyph {
+  pub xmin: integer,
+  pub ymin: integer,
+  pub width: integer,
+  pub height: integer,
+  pub advance: single,
+  pub coverage: vector<integer>,
+}
 
-// --- GPU resource cleanup ---
+fn ol_line(x0: single, y0: single, x1: single, y1: single) -> OlLine {
+  dx = x1 - x0;
+  dy = y1 - y0;
+  OlLine {
+    x0: x0,
+    y0: y0,
+    x1: x1,
+    y1: y1,
+    nsx: if x1 >= x0 { 0 } else { 1 },
+    nsy: if y1 >= y0 { 0 } else { 1 },
+    nex: if x1 > x0 { 1 } else { 0 },
+    ney: if y1 > y0 { 1 } else { 0 },
+    adjx: if x1 >= x0 { 1.0f } else { 0.0f },
+    adjy: if y1 >= y0 { 1.0f } else { 0.0f },
+    tdx: if dx == 0.0f { 0.0f } else { (1.0f / dx) ?? 0.0f },
+    tdy: (1.0f / dy) ?? 0.0f,
+    dx: dx,
+    dy: dy,
+  }
+}
 
-// Delete a shader program.
-pub fn gl_delete_shader(program: integer);
-#native "loft_gl_delete_shader"
+fn ol_new(upem: integer) -> Outliner {
+  Outliner {
+    v: [],
+    m: [],
+    xmin: 3.4028235e38f,
+    xmax: -3.4028235e38f,
+    ymin: 3.4028235e38f,
+    ymax: -3.4028235e38f,
+    sx: 0.0f,
+    sy: 0.0f,
+    px: 0.0f,
+    py: 0.0f,
+    area: 0.0f,
+    max_area: 3.0f * 2.0f * ((upem as single / 40.0f) ?? 0.0f),
+  }
+}
 
-// Delete a vertex array object.
-pub fn gl_delete_vao(vao: integer);
-#native "loft_gl_delete_vao"
+fn ol_push(self: Outliner, x0: single, y0: single, x1: single, y1: single) {
+  if y0 == y1 { return; }
+  self.area += (y1 - y0)*(x1 + x0);
+  if x0 == x1 { self.v += [ol_line(x0, y0, x1, y1)]; } else { self.m += [ol_line(x0, y0, x1, y1)]; }
+  for k in 0..2 {
+    x = if k == 0 { x0 } else { x1 };
+    y = if k == 0 { y0 } else { y1 };
+    if x < self.xmin { self.xmin = x; }
+    if x > self.xmax { self.xmax = x; }
+    if y < self.ymin { self.ymin = y; }
+    if y > self.ymax { self.ymax = y; }
+  }
+}
 
-// Delete a framebuffer object.
-pub fn gl_delete_framebuffer(fbo: integer);
-#native "loft_gl_delete_framebuffer"
+fn ol_move(self: Outliner, x: single, y: single) {
+  self.sx = x;
+  self.sy = y;
+  self.px = x;
+  self.py = y;
+}
 
-// ── G1/G2: Sprite Sheet API ─────────────────────────────────────────
+fn ol_lineto(self: Outliner, x: single, y: single) {
+  self.ol_push(self.px, self.py, x, y);
+  self.px = x;
+  self.py = y;
+}
+
+// A quadratic from the previous point through (cx, cy) to (x, y), split where the triangle under a
+// segment is larger than `max_area` — the second half first, as fontdue's stack pops it.
+fn ol_quad(self: Outliner, cx: single, cy: single, x: single, y: single) {
+  ax = self.px;
+  ay = self.py;
+  sa: vector<single> = [0.0f];
+  sc: vector<single> = [1.0f];
+  while len(sa) > 0 {
+    at = sa[len(sa) - 1];
+    ct = sc[len(sc) - 1];
+    sa = sa[0..len(sa) - 1];
+    sc = sc[0..len(sc) - 1];
+    bt = (at + ct)*0.5f;
+    bx = ol_qpoint(ax, cx, x, bt);
+    by = ol_qpoint(ay, cy, y, bt);
+    pax = ol_qpoint(ax, cx, x, at);
+    pay = ol_qpoint(ay, cy, y, at);
+    pcx = ol_qpoint(ax, cx, x, ct);
+    pcy = ol_qpoint(ay, cy, y, ct);
+    area = (bx - pax)*(pcy - pay) - (pcx - pax)*(by - pay);
+    if area.abs() > self.max_area {
+      sa += [at];
+      sc += [bt];
+      sa += [bt];
+      sc += [ct];
+    } else { self.ol_push(pax, pay, pcx, pcy); }
+  }
+  self.px = x;
+  self.py = y;
+}
+
+// One coordinate of the quadratic a-b-c at `t`: (1-t)^2 a + 2(1-t)t b + t^2 c, in that order.
+fn ol_qpoint(a: single, b: single, c: single, t: single) -> single {
+  tm = 1.0f - t;
+  tm * tm * a + 2.0f * tm * t * b + t * t * c
+}
+
+fn ol_close(self: Outliner) {
+  if self.sx != self.px || self.sy != self.py { self.ol_push(self.px, self.py, self.sx, self.sy); }
+  self.px = self.sx;
+  self.py = self.sy;
+}
+
+fn tt_apply_x(self: const TtPen, x: single, y: single) -> single {
+  if self.plain { x } else { self.ta * x + self.tc * y + self.te }
+}
+
+fn tt_apply_y(self: const TtPen, x: single, y: single) -> single {
+  if self.plain { y } else { self.tb * x + self.td * y + self.tf }
+}
+
+fn tt_move(self: const TtPen, o: Outliner, x: single, y: single) {
+  o.ol_move(self.tt_apply_x(x, y), self.tt_apply_y(x, y));
+}
+
+fn tt_line(self: const TtPen, o: Outliner, x: single, y: single) {
+  o.ol_lineto(self.tt_apply_x(x, y), self.tt_apply_y(x, y));
+}
+
+fn tt_quad(self: const TtPen, o: Outliner, cx: single, cy: single, x: single, y: single) {
+  o.ol_quad(
+    self.tt_apply_x(cx, cy),
+    self.tt_apply_y(cx, cy),
+    self.tt_apply_x(x, y),
+    self.tt_apply_y(x, y)
+  );
+}
+
+// One point of a contour (ttf-parser's `Builder::push_point`).
+fn tt_point(self: TtPen, o: Outliner, x: single, y: single, on_curve: boolean, last: boolean) {
+  if !self.on {
+    if on_curve {
+      self.on = true;
+      self.fx = x;
+      self.fy = y;
+      self.tt_move(o, x, y);
+    } else if self.first_off {
+      mx = self.ox + 0.5f * (x - self.ox);
+      my = self.oy + 0.5f * (y - self.oy);
+      self.on = true;
+      self.fx = mx;
+      self.fy = my;
+      self.last_off = true;
+      self.lx = x;
+      self.ly = y;
+      self.tt_move(o, mx, my);
+    } else {
+      self.first_off = true;
+      self.ox = x;
+      self.oy = y;
+    }
+  } else if self.last_off && on_curve {
+    self.last_off = false;
+    self.tt_quad(o, self.lx, self.ly, x, y);
+  } else if self.last_off {
+    px = self.lx;
+    py = self.ly;
+    self.lx = x;
+    self.ly = y;
+    self.tt_quad(o, px, py, px + 0.5f * (x - px), py + 0.5f * (y - py));
+  } else if on_curve { self.tt_line(o, x, y); } else {
+    self.last_off = true;
+    self.lx = x;
+    self.ly = y;
+  }
+  if last { self.tt_finish(o); }
+}
+
+fn tt_finish(self: TtPen, o: Outliner) {
+  if self.first_off && self.last_off {
+    self.last_off = false;
+    self.tt_quad(
+      o,
+      self.lx,
+      self.ly,
+      self.lx + 0.5f * (self.ox - self.lx),
+      self.ly + 0.5f * (self.oy - self.ly)
+    );
+  }
+  if self.on && self.first_off { self.tt_quad(o, self.ox, self.oy, self.fx, self.fy); } else if self.on && self.last_off {
+    self.tt_quad(o, self.lx, self.ly, self.fx, self.fy);
+  } else if self.on { self.tt_line(o, self.fx, self.fy); }
+  self.on = false;
+  self.first_off = false;
+  self.last_off = false;
+  o.ol_close();
+}
+
+// Where glyph `g` lives in `glyf`, and its end: equal when it has no outline.
+fn tt_glyph_range(self: const Font, g: integer) -> vector<integer> {
+  head = tt_table(self.data, "head");
+  loca = tt_table(self.data, "loca");
+  glyf = tt_table(self.data, "glyf");
+  if head < 0 || loca < 0 || glyf < 0 { return [0, 0]; }
+  if tt_i16(self.data, head + 50) == 0 {
+    [glyf + 2 * tt_u16(self.data, loca + 2 * g), glyf + 2 * tt_u16(self.data, loca + 2 * g + 2)]
+  } else { [glyf + tt_u32(self.data, loca + 4 * g), glyf + tt_u32(self.data, loca + 4 * g + 4)] }
+}
+
+fn tt_f2dot14(b: const vector<u8>, at: integer) -> single {
+  (tt_i16(b, at) as single / 16384.0f) ?? 0.0f
+}
+
+// Walk glyph `g`'s outline into `o` through a pen transformed by `pen` (ttf-parser's
+// `outline_impl`: composites recurse up to 32 deep).
+fn tt_outline(self: const Font, g: integer, pen: TtPen, o: Outliner, depth: integer) {
+  if depth >= 32 { return; }
+  range = self.tt_glyph_range(g);
+  start = range[0];
+  if range[1] <= start { return; }
+  b = self.data;
+  contours = tt_i16(b, start);
+  at = start + 10;
+  if contours > 0 {
+    ends: vector<integer> = [];
+    for i in 0..contours { ends += [tt_u16(b, at + 2 * i)]; }
+    total = (ends[contours - 1] ?? 0)+1;
+    if total == 1 { return; }
+    at += 2 * contours;
+    at += 2 + tt_u16(b, at);
+    flags: vector<integer> = [];
+    while len(flags) < total {
+      flag = tt_u8(b, at);
+      at += 1;
+      flags += [flag];
+      if (flag & 8) != 0 {
+        rep = tt_u8(b, at);
+        at += 1;
+        for _ in 0..rep { flags += [flag]; }
+      }
+    }
+    xs: vector<integer> = [];
+    x = 0;
+    for fl in flags {
+      if (fl & 2) != 0 {
+        d = tt_u8(b, at);
+        at += 1;
+        x += if (fl & 16) != 0 { d } else { -d };
+      } else if (fl & 16) == 0 {
+        x += tt_i16(b, at);
+        at += 2;
+      }
+      x = ((x + 32768) & 65535) - 32768;
+      xs += [x];
+    }
+    y = 0;
+    contour = 0;
+    left = ends[0] ?? 0;
+    for i in 0..total {
+      fl = flags[i] ?? 0;
+      if (fl & 4) != 0 {
+        d = tt_u8(b, at);
+        at += 1;
+        y += if (fl & 32) != 0 { d } else { -d };
+      } else if (fl & 32) == 0 {
+        y += tt_i16(b, at);
+        at += 2;
+      }
+      y = ((y + 32768) & 65535) - 32768;
+      // ttf-parser's endpoint walk: a contour ends when its count of points runs out
+      last = false;
+      if left == 0 {
+        last = true;
+        contour += 1;
+        if contour < contours {
+          prev = ends[contour - 1] ?? 0;
+          end = ends[contour] ?? 0;
+          left = if end > prev { end - prev - 1 } else { 0 };
+        }
+      } else { left -= 1; }
+      pen.tt_point(o, (xs[i] ?? 0) as single, y as single, (fl & 1) != 0, last);
+    }
+  } else if contours < 0 {
+    more = true;
+    while more {
+      fl = tt_u16(b, at);
+      comp = tt_u16(b, at + 2);
+      at += 4;
+      e = 0.0f;
+      f = 0.0f;
+      if (fl & 2) != 0 {
+        if (fl & 1) != 0 {
+          e = tt_i16(b, at) as single;
+          f = tt_i16(b, at + 2) as single;
+          at += 4;
+        } else {
+          e = (((tt_u8(b, at)+128) & 255) - 128) as single;
+          f = (((tt_u8(b, at + 1)+128) & 255) - 128) as single;
+          at += 2;
+        }
+      }
+      a = 1.0f;
+      bb = 0.0f;
+      c = 0.0f;
+      d = 1.0f;
+      if (fl & 128) != 0 {
+        a = tt_f2dot14(b, at);
+        bb = tt_f2dot14(b, at + 2);
+        c = tt_f2dot14(b, at + 4);
+        d = tt_f2dot14(b, at + 6);
+        at += 8;
+      } else if (fl & 64) != 0 {
+        a = tt_f2dot14(b, at);
+        d = tt_f2dot14(b, at + 2);
+        at += 4;
+      } else if (fl & 8) != 0 {
+        a = tt_f2dot14(b, at);
+        d = a;
+        at += 2;
+      }
+      // the component's pen: this pen's transform combined with the component's
+      sub = TtPen {
+        ta: pen.ta * a + pen.tc * bb,
+        tb: pen.tb * a + pen.td * bb,
+        tc: pen.ta * c + pen.tc * d,
+        td: pen.tb * c + pen.td * d,
+        te: pen.ta * e + pen.tc * f + pen.te,
+        tf: pen.tb * e + pen.td * f + pen.tf,
+        plain: false,
+        on: false,
+        fx: 0.0f,
+        fy: 0.0f,
+        first_off: false,
+        ox: 0.0f,
+        oy: 0.0f,
+        last_off: false,
+        lx: 0.0f,
+        ly: 0.0f,
+      };
+      sub.plain = sub.ta == 1.0f && sub.tb == 0.0f && sub.tc == 0.0f && sub.td == 1.0f && sub.te == 0.0f && sub.tf == 0.0f;
+      self.tt_outline(comp, sub, o, depth + 1);
+      more = (fl & 32) != 0;
+    }
+  }
+}
+
+// fontdue's `Line::reposition`: into the glyph's box, y downwards, reversed for a clockwise
+// outline.
+fn ol_reposition(l: const OlLine, o: const Outliner, reverse: boolean) -> OlLine {
+  x0 = if reverse { l.x1 } else { l.x0 };
+  y0 = if reverse { l.y1 } else { l.y0 };
+  x1 = if reverse { l.x0 } else { l.x1 };
+  y1 = if reverse { l.y0 } else { l.y1 };
+  ol_line(x0 - o.xmin, (y0 - o.ymax).abs(), x1 - o.xmin, (y1 - o.ymax).abs())
+}
+
+fn ol_trunc(v: single) -> single {
+  (v as integer) as single
+}
+
+fn ol_fract(v: single) -> single {
+  v - ol_trunc(v)
+}
+
+// `trunc`, after fontdue's nudge: a ceil nudge steps the value to the float below it first, so a
+// whole number lands one lower.
+fn ol_nudged(v: single, nudge: integer) -> single {
+  t = ol_trunc(v);
+  if nudge == 1 && t == v { t - 1.0f } else { t }
+}
+
+fn ol_sign(v: single) -> single {
+  if v < 0.0f { -1.0f } else { 1.0f }
+}
+
+fn ol_add(a: vector<single>, index: integer, height: single, mid_x: single) {
+  m = height * mid_x;
+  // the indices lie inside the buffer (fontdue sizes it w * h + 3 for the step past the end)
+  a[index] = (a[index] ?? 0.0f)+(height - m);
+  a[index + 1] = (a[index + 1] ?? 0.0f)+m;
+}
+
+// The coverage of glyph `g` at `size` pixels to the em — fontdue's `rasterize_indexed`.
+fn raster_glyph(self: const Font, g: integer, size: float) -> Glyph {
+  o = ol_new(self.units_per_em);
+  pen = TtPen {
+    ta: 1.0f,
+    tb: 0.0f,
+    tc: 0.0f,
+    td: 1.0f,
+    te: 0.0f,
+    tf: 0.0f,
+    plain: true,
+    on: false,
+    fx: 0.0f,
+    fy: 0.0f,
+    first_off: false,
+    ox: 0.0f,
+    oy: 0.0f,
+    last_off: false,
+    lx: 0.0f,
+    ly: 0.0f,
+  };
+  self.tt_outline(g, pen, o, 0);
+  scale = (size as single / self.units_per_em as single) ?? 0.0f;
+  advance = scale * self.advance_of(g) as single;
+  if len(o.v) == 0 && len(o.m) == 0 {
+    return Glyph { xmin: 0, ymin: 0, width: 0, height: 0, advance: advance, coverage: [] };
+  }
+  reverse = o.area > 0.0f;
+  bx = o.xmin * scale;
+  by = o.ymin * scale;
+  bw = (o.xmax - o.xmin)*scale;
+  bh = (o.ymax - o.ymin)*scale;
+  offx = ol_fract(bx + 0.0f);
+  offy = ol_fract(1.0f - ol_fract(bh) - ol_fract(by));
+  if offx < 0.0f { offx += 1.0f; }
+  if offy < 0.0f { offy += 1.0f; }
+  w = (bw + offx).ceil() as integer;
+  h = (bh + offy).ceil() as integer;
+  gl = Glyph {
+    xmin: bx.floor() as integer,
+    ymin: by.floor() as integer,
+    width: w,
+    height: h,
+    advance: advance,
+    coverage: [],
+  };
+  if size <= 0.0 { return gl; }
+  acc: vector<single> = [];
+  for _ in 0..w * h + 3 { acc += [0.0f]; }
+  wf = w as single;
+  for raw in o.v {
+    l = ol_reposition(raw, o, reverse);
+    x0 = l.x0 * scale + offx;
+    y0 = l.y0 * scale + offy;
+    y1 = l.y1 * scale + offy;
+    start_x = ol_nudged(x0, l.nsx);
+    start_y = ol_nudged(y0, l.nsy);
+    end_x = ol_nudged(l.x1 * scale + offx, l.nex);
+    end_y = ol_nudged(y1, l.ney);
+    target_y = start_y + l.adjy;
+    sy = ol_sign(y1 - y0);
+    y_prev = y0;
+    index = (start_x + start_y * wf) as integer;
+    step = if sy < 0.0f { -w } else { w };
+    dist = (start_y - end_y).abs() as integer;
+    mid_x = ol_fract(x0);
+    while dist > 0 {
+      dist -= 1;
+      ol_add(acc, index, y_prev - target_y, mid_x);
+      index += step;
+      y_prev = target_y;
+      target_y += sy;
+    }
+    ol_add(acc, (end_x + end_y * wf) as integer, y_prev - y1, mid_x);
+  }
+  inv = (1.0f / scale) ?? 0.0f;
+  for raw in o.m {
+    l = ol_reposition(raw, o, reverse);
+    x0 = l.x0 * scale + offx;
+    y0 = l.y0 * scale + offy;
+    x1 = l.x1 * scale + offx;
+    y1 = l.y1 * scale + offy;
+    start_x = ol_nudged(x0, l.nsx);
+    start_y = ol_nudged(y0, l.nsy);
+    end_x = ol_nudged(x1, l.nex);
+    end_y = ol_nudged(y1, l.ney);
+    tdx = l.tdx * inv;
+    tdy = l.tdy * inv;
+    dx = l.dx * scale;
+    dy = l.dy * scale;
+    target_x = start_x + l.adjx;
+    target_y = start_y + l.adjy;
+    sx = ol_sign(tdx);
+    sy = ol_sign(tdy);
+    tmx = tdx * (target_x - x0);
+    tmy = tdy * (target_y - y0);
+    tdx = tdx.abs();
+    tdy = tdy.abs();
+    x_prev = x0;
+    y_prev = y0;
+    index = (start_x + start_y * wf) as integer;
+    step_x = if sx < 0.0f { -1 } else { 1 };
+    step_y = if sy < 0.0f { -w } else { w };
+    dist = ((start_x - end_x).abs()+(start_y - end_y).abs()) as integer;
+    while dist > 0 {
+      dist -= 1;
+      prev_index = index;
+      y_next = 0.0f;
+      x_next = 0.0f;
+      if tmx < tmy {
+        y_next = tmx * dy + y0;
+        x_next = target_x;
+        tmx += tdx;
+        target_x += sx;
+        index += step_x;
+      } else {
+        y_next = target_y;
+        x_next = tmy * dx + x0;
+        tmy += tdy;
+        target_y += sy;
+        index += step_y;
+      }
+      ol_add(acc, prev_index, y_prev - y_next, ol_fract(((x_prev + x_next) / 2.0f) ?? 0.0f));
+      x_prev = x_next;
+      y_prev = y_next;
+    }
+    ol_add(
+      acc,
+      (end_x + end_y * wf) as integer,
+      y_prev - y1,
+      ol_fract(((x_prev + x1) / 2.0f) ?? 0.0f)
+    );
+  }
+  // fontdue's SSE prefix sum: four at a time — a lane adds its left neighbour, then the one two to
+  // its left, then the running total of the group before — so the sums round as it rounds them.
+  n = w * h;
+  carry = 0.0f;
+  i = 0;
+  while i < n {
+    a0 = acc[i] ?? 0.0f;
+    a1 = acc[i + 1] ?? 0.0f;
+    a2 = acc[i + 2] ?? 0.0f;
+    a3 = acc[i + 3] ?? 0.0f;
+    s1 = a1 + a0;
+    s2 = a2 + a1;
+    s3 = a3 + a2;
+    t2 = s2 + a0;
+    t3 = s3 + s1;
+    lanes = [a0 + carry, s1 + carry, t2 + carry, t3 + carry];
+    for k in 0..4 {
+      if i + k < n {
+        c = (lanes[k] * 255.9f).abs();
+        gl.coverage += [if c >= 255.0f { 255 } else { c as integer }];
+      }
+    }
+    carry = lanes[3];
+    i += 4;
+  }
+  gl
+}
+
+// The coverage of character `c` at `size` pixels to the em.
+pub fn rasterize(self: const Font, c: character, size: float) -> Glyph {
+  self.raster_glyph(self.glyph_of(c), size)
+}
+
+// `content` as one coverage bitmap, `width` x `height` from its top-left: glyphs on one baseline
+// (`ascent` down), each kerned against the one before it — the layout 0.9 drew text with.
+pub fn rasterize_text(self: const Font, content: text, size: float) -> Glyph {
+  scale = (size as single / self.units_per_em as single) ?? 0.0f;
+  glyphs: vector<Glyph> = [];
+  kerns: vector<single> = [];
+  pen = 0.0f;
+  prev = -1;
+  for ch in content {
+    g = self.glyph_of(ch);
+    kern = if prev >= 0 { self.kern_of(prev, g) as single * scale } else { 0.0f };
+    pen += kern;
+    gl = self.raster_glyph(g, size);
+    pen += gl.advance;
+    kerns += [kern];
+    glyphs += [gl];
+    prev = g;
+  }
+  total = pen.ceil() as integer;
+  out = Glyph { xmin: 0, ymin: 0, width: 0, height: 0, advance: pen, coverage: [] };
+  max_h = 0;
+  for each in glyphs {
+    if each.height > max_h { max_h = each.height; }
+  }
+  if total <= 0 || max_h == 0 { return out; }
+  lines = (self.ascender - self.descender + self.line_gap) as single * scale;
+  line_h = lines.ceil() as integer;
+  baseline = (self.ascender as single * scale).round() as integer;
+  if lines <= 0.0f {
+    line_h = (size as single * 1.2f).ceil() as integer;
+    baseline = (size as single * 0.8f).round() as integer;
+  }
+  px: vector<integer> = filled(total * line_h, 0);
+  x_pen = 0.0f;
+  for k in 0..len(glyphs) {
+    gl = glyphs[k];
+    x_pen += kerns[k];
+    x_cursor = if x_pen > 0.0f { x_pen as integer } else { 0 };
+    y_off = baseline - gl.height - gl.ymin;
+    if y_off < 0 { y_off = 0; }
+    for gy in 0..gl.height {
+      for gx in 0..gl.width {
+        dx = x_cursor + gx;
+        dy = y_off + gy;
+        if dx < total && dy < line_h {
+          src = gl.coverage[gy * gl.width + gx] ?? 0;
+          at = dy * total + dx;
+          if src > (px[at] ?? 0) { px[at] = src; }
+        }
+      }
+    }
+    x_pen += gl.advance;
+  }
+  out.width = total;
+  out.height = line_h;
+  out.coverage = px;
+  out
+}
+
+// Draw `content` with `font` at `size` pixels to the em, its top-left at (x, y), blending `color`
+// by each pixel's coverage.
+pub fn draw_text(
+  self: Canvas,
+  font: const Font,
+  content: text,
+  size: float,
+  x: integer,
+  y: integer,
+  color: integer
+) {
+  t = font.rasterize_text(content, size);
+  cr = color_r(color);
+  cg = color_g(color);
+  cb = color_b(color);
+  for by in 0..t.height {
+    for bx in 0..t.width {
+      a = t.coverage[by * t.width + bx] ?? 0;
+      if a > 0 { self.blend_pixel(x + bx, y + by, rgba(cr, cg, cb, a)); }
+    }
+  }
+}
+
+// --- The shader sources `Painter` and `Sprites` compile ---
 
 // Vertex shader for textured 2D quads. Uses the unit quad positions (0-1)
 // to interpolate UVs between uU0,uV0 and uU1,uV1.
@@ -1770,68 +2795,8 @@ void main() {{
 }}
 `;
 
-/// A sprite sheet backed by a Canvas atlas uploaded as a GL texture.
-/// Sprites are arranged in a grid of `ss_cols` x `ss_rows` cells.
-pub struct SpriteSheet {
-  pub const ss_tex: integer,  // GL texture handle
-  const ss_shader: integer,   // textured quad shader
-  const ss_vao: integer,      // unit quad VAO (shared)
-  const ss_cols: integer,
-  const ss_rows: integer,
-  const ss_cell_w: integer,
-  const ss_cell_h: integer,
-}
-
-/// Create a sprite sheet from a Canvas atlas.
-/// The canvas is divided into a grid of `cols` x `rows` cells.
-/// Sprite index 0 is top-left, incrementing left-to-right then top-to-bottom.
-pub fn create_sprite_sheet(atlas: const Canvas, cols: integer, rows: integer, vao: integer) -> SpriteSheet {
-  ss_shader = gl_create_shader(SPRITE_VERT, SPRITE_FRAG);
-  ss_tex = gl_upload_canvas(atlas.data, atlas.width, atlas.height);
-  SpriteSheet {
-    ss_tex: ss_tex,
-    ss_shader: ss_shader,
-    ss_vao: vao,
-    ss_cols: cols,
-    ss_rows: rows,
-    ss_cell_w: atlas.width / cols ?? 0,
-    ss_cell_h: atlas.height / rows ?? 0,
-  }
-}
-
-/// Draw sprite at `index` (0-based, row-major).
-/// `mvp` is the pre-multiplied projection * model matrix (16 singles).
-/// The caller builds the MVP for the desired screen position and size.
-pub fn draw_sprite(sheet: const SpriteSheet, mvp: const vector<float>, sp_idx: integer) {
-  // `?? 0` on each div is lint suppression — `ss_cols` / `ss_rows`
-  // are construction-time positive (zero would mean an empty atlas
-  // with no sprites to draw).
-  sp_col = (sp_idx % sheet.ss_cols) ?? 0;
-  sp_row = (sp_idx / sheet.ss_cols) ?? 0;
-  sp_u0 = ((sp_col as float) / (sheet.ss_cols as float)) ?? 0.0;
-  sp_v0 = ((sp_row as float) / (sheet.ss_rows as float)) ?? 0.0;
-  sp_u1 = (((sp_col + 1) as float) / (sheet.ss_cols as float)) ?? 0.0;
-  sp_v1 = (((sp_row + 1) as float) / (sheet.ss_rows as float)) ?? 0.0;
-  gl_use_shader(sheet.ss_shader);
-  gl_bind_texture(sheet.ss_tex, 0);
-  gl_set_uniform_int(sheet.ss_shader, "uTex", 0);
-  gl_set_uniform_float(sheet.ss_shader, "uU0", sp_u0);
-  gl_set_uniform_float(sheet.ss_shader, "uV0", sp_v0);
-  gl_set_uniform_float(sheet.ss_shader, "uU1", sp_u1);
-  gl_set_uniform_float(sheet.ss_shader, "uV1", sp_v1);
-  gl_set_uniform_mat4(sheet.ss_shader, "uMVP", mvp);
-  gl_draw(sheet.ss_vao, 6);
-}
-
-// ── G3: Painter2D — ergonomic 2D draw helpers ───────────────────────
-//
-// Painter2D bundles a flat-color shader, a textured-quad shader, a shared
-// unit-quad VAO, and an orthographic projection sized for the window. It
-// lets 2D games draw rectangles, sprites, and textures with (x, y, w, h)
-// screen coordinates without hand-building MVP matrices.
-//
-// Screen-space origin: top-left. Y increases downward (pixel-style).
-// All draw helpers assume the unit quad is at Z=0.
+// `Painter`'s shaders: the unit quad at z = 0, mapped by `uMVP` onto pixel positions (origin
+// top-left, y down).
 
 // Flat-color vertex shader — transforms the unit quad by uMVP.
 FLAT_VERT_2D = `
@@ -1878,60 +2843,26 @@ void main() {{
 }}
 `;
 
-/// A 2D painter bundling shaders, a unit-quad VAO, and an orthographic
-/// projection. Create once per window with `create_painter_2d`, then use
-/// `draw_rect_at`, `draw_sprite_at`, and `draw_texture_at` to render.
-pub struct Painter2D {
-  p2_flat: integer,        // flat color shader
-  pub p2_tex: integer,     // textured quad shader (V-flipped)
-  pub p2_vao: integer,     // shared unit-quad VAO
-  pub p2_proj: vector<float>,           // orthographic projection (16 floats)
-}
-
-/// Create a Painter2D for a window of size `screen_w` x `screen_h`.
-/// Compiles the flat and textured shaders, uploads the unit-quad VAO, and
-/// builds an orthographic projection with the origin at the top-left.
-/// Call once after `gl_create_window`.
-pub fn create_painter_2d(screen_w: float, screen_h: float) -> Painter2D {
-  cpn_flat = gl_create_shader(FLAT_VERT_2D, FLAT_FRAG_2D);
-  cpn_tex = gl_create_shader(TEX_VERT_2D, TEX_FRAG_2D);
-  // Unit quad — two triangles from (0,0) to (1,1), z=0, in f32.
-  cpn_quad = [
-    0.0f, 0.0f, 0.0f,  1.0f, 0.0f, 0.0f,  1.0f, 1.0f, 0.0f,
-    0.0f, 0.0f, 0.0f,  1.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f
-  ];
-  cpn_vao = gl_upload_vertices(cpn_quad, 3);
-  // `?? 0.0` is lint suppression — both screen_w and screen_h are
-  // construction-time positive (caller passes window dimensions).
-  cpn_proj = [
-    2.0 / screen_w ?? 0.0, 0.0, 0.0, 0.0,
-    0.0, -2.0 / screen_h ?? 0.0, 0.0, 0.0,
-    0.0, 0.0, -1.0, 0.0,
-    -1.0, 1.0, 0.0, 1.0
-  ];
-  Painter2D {
-    p2_flat: cpn_flat,
-    p2_tex: cpn_tex,
-    p2_vao: cpn_vao,
-    p2_proj: cpn_proj,
-  }
-}
-
-/// Return the unit-quad VAO owned by the painter, so it can be shared with
-/// `create_sprite_sheet` instead of uploading a second copy.
-pub fn painter_vao(self: const Painter2D) -> integer { self.p2_vao }
-
 // Build an MVP = proj * translate(x, y, 0) * scale(w, h, 1) without going
 // through the generic math::mat4_mul path. The model matrix is sparse, so
 // this collapses to 4 column updates on the 16-float projection.
 fn build_mvp_2d(proj: const vector<float>, x: float, y: float, w: float, h: float) -> vector<float> {
   bmn_mvp = [
     // column 0 = proj.col0 * w
-    proj[0] * w,  proj[1] * w,  proj[2] * w,  proj[3] * w,
+    proj[0] * w,
+    proj[1] * w,
+    proj[2] * w,
+    proj[3] * w,
     // column 1 = proj.col1 * h
-    proj[4] * h,  proj[5] * h,  proj[6] * h,  proj[7] * h,
+    proj[4] * h,
+    proj[5] * h,
+    proj[6] * h,
+    proj[7] * h,
     // column 2 = proj.col2 (z untouched)
-    proj[8],      proj[9],      proj[10],     proj[11],
+    proj[8],
+    proj[9],
+    proj[10],
+    proj[11],
     // column 3 = proj.col0 * x + proj.col1 * y + proj.col3
     proj[0] * x + proj[4] * y + proj[12],
     proj[1] * x + proj[5] * y + proj[13],
@@ -1939,189 +2870,4 @@ fn build_mvp_2d(proj: const vector<float>, x: float, y: float, w: float, h: floa
     proj[3] * x + proj[7] * y + proj[15]
   ];
   bmn_mvp
-}
-
-/// Draw a filled rectangle at screen position (x, y) with size (w, h).
-/// Colour channels are in 0.0..1.0. Uses the painter's flat-color shader.
-pub fn draw_rect_at(painter: const Painter2D, x: float, y: float, w: float, h: float,
-                    r: float, g: float, b: float, a: float) {
-  drn_mvp = build_mvp_2d(painter.p2_proj, x, y, w, h);
-  gl_use_shader(painter.p2_flat);
-  gl_set_uniform_mat4(painter.p2_flat, "uMVP", drn_mvp);
-  gl_set_uniform_vec3(painter.p2_flat, "uColor", r, g, b);
-  gl_set_uniform_float(painter.p2_flat, "uAlpha", a);
-  gl_draw(painter.p2_vao, 6);
-}
-
-/// Draw a sprite from `sheet` at screen position (x, y) with size (w, h).
-/// `sp_idx` is the 0-based sprite index (row-major) in the sheet.
-/// This is a one-liner replacement for `make_mvp` + `draw_sprite`.
-pub fn draw_sprite_at(sheet: const SpriteSheet, painter: const Painter2D,
-                      x: float, y: float, w: float, h: float, sp_idx: integer) {
-  dsn_mvp = build_mvp_2d(painter.p2_proj, x, y, w, h);
-  draw_sprite(sheet, dsn_mvp, sp_idx);
-}
-
-/// Draw an arbitrary GL texture as a screen-space quad at (x, y, w, h).
-/// Uses the painter's textured shader, which flips V to match canvas origin.
-/// Suitable for textures created with `create_text_texture` or `gl_upload_canvas`.
-pub fn draw_texture_at(painter: const Painter2D, tex: integer,
-                       x: float, y: float, w: float, h: float) {
-  dxn_mvp = build_mvp_2d(painter.p2_proj, x, y, w, h);
-  gl_use_shader(painter.p2_tex);
-  gl_bind_texture(tex, 0);
-  gl_set_uniform_int(painter.p2_tex, "uTex", 0);
-  gl_set_uniform_mat4(painter.p2_tex, "uMVP", dxn_mvp);
-  gl_draw(painter.p2_vao, 6);
-}
-
-/// Rasterize `content` with `font` at `size` pixels, upload the glyph bitmap
-/// as a GL texture, and return the texture ID. The texture is sized to fit
-/// the measured text plus a small padding; pair with `draw_texture_at` to
-/// render. Caller owns the texture — call `gl_delete_texture` when done.
-/// Returns 0 if the text cannot be measured.
-pub fn create_text_texture(font: integer, content: text, size: float, color: integer) -> integer {
-  ctn_pad = 2;
-  ctn_tw = gl_measure_text(font, content, size) as integer + ctn_pad * 2 + 1;
-  ctn_th = gl_text_height(font, size) + ctn_pad * 2;
-  if ctn_tw <= 0 or ctn_th <= 0 { return 0; }
-  ctn_cv = canvas(ctn_tw, ctn_th, 0);
-  ctn_cv.draw_text(font, content, size, ctn_pad, ctn_pad, color);
-  gl_upload_canvas(ctn_cv.data, ctn_tw, ctn_th)
-}
-
-// --- G5: Audio ---
-// Load an audio clip (WAV or OGG). Returns handle (>= 0) or null on failure.
-pub fn audio_load(path: text) -> integer;
-#native "loft_audio_load"
-// Play a loaded clip.  Returns a playback handle, or -1 when it will not play.
-//
-// `volume` is 0.0-1.0, `looping` repeats the clip until it is stopped, `pan`
-// places it across the stereo field (-1 left, 0 centre, 1 right), and `start`
-// begins that many seconds in.  Everything past `volume` has a default, so an
-// existing `audio_play(clip, 0.8)` keeps meaning what it meant.
-//
-// `start` skips into the FIRST pass only: a looping clip then repeats whole,
-// which is what a browser's `start(when, offset)` with `loop` does.
-//
-// A handle is never handed out twice.  When a clip finishes its slot is reused,
-// but the handle carries which use it belongs to, so an `audio_stop` on a
-// finished sound stops nothing instead of stopping whatever took its place.
-pub fn audio_play(clip: integer, volume: float, looping: boolean = false,
-                  pan: float = 0.0, start: float = 0.0) -> integer;
-#native "loft_audio_play"
-// Stop a playing clip by its playback handle.
-pub fn audio_stop(sink: integer);
-#native "loft_audio_stop"
-// Stop every playing clip — a pause menu, a scene change, a game over.
-pub fn audio_stop_all();
-#native "loft_audio_stop_all"
-// Set volume of a playing clip (0.0-1.0).
-pub fn audio_set_volume(sink: integer, volume: float);
-#native "loft_audio_set_volume"
-// Move a playing clip across the stereo field: -1 left, 0 centre, 1 right.
-//
-// The law is Web Audio's `StereoPannerNode`, equal-power for a mono clip: a
-// sweep holds its loudness through the middle rather than dipping.  A stereo
-// clip is narrowed toward the near side rather than having the far one muted.
-pub fn audio_set_pan(sink: integer, pan: float);
-#native "loft_audio_set_pan"
-// Jump a playing clip to `seconds` from its start.  Answers whether it moved.
-//
-// A LOOPING clip cannot seek — repeating needs a buffered source, which has no
-// earlier position to go back to — and this answers false rather than leaving
-// the caller believing a jump happened.
-pub fn audio_seek(sink: integer, seconds: float) -> boolean;
-#native "loft_audio_seek"
-// Play raw PCM samples (mono, values -1.0 to 1.0) at the given sample rate.
-// Returns playback handle, or null on failure.
-pub fn audio_play_raw(samples: vector<single>, sample_rate: integer, volume: float) -> integer;
-#native "loft_audio_play_raw"
-
-// --- Procedural audio synthesis (chiptune) ---
-
-SFX_RATE = 22050;
-
-// Square wave sample: phase 0.0-1.0, duty 0.0-1.0.
-fn sfx_sq(sfx_sq_phase: single, sfx_sq_duty: single) -> single {
-  if sfx_sq_phase < sfx_sq_duty { return 1.0f; }
-  return -1.0f;
-}
-// Triangle wave sample: phase 0.0-1.0.
-fn sfx_tri(sfx_tri_p: single) -> single {
-  if sfx_tri_p < 0.5f { return sfx_tri_p * 4.0f - 1.0f; }
-  return 3.0f - sfx_tri_p * 4.0f;
-}
-// Sawtooth wave sample: phase 0.0-1.0.
-fn sfx_saw(sfx_saw_p: single) -> single {
-  return sfx_saw_p * 2.0f - 1.0f;
-}
-// Linear attack-decay envelope: returns 0.0-1.0.
-fn sfx_env(sfx_env_t: single, sfx_env_atk: single, sfx_env_dur: single) -> single {
-  // `?? 0.0f` is lint suppression — the attack branch only fires when
-  // `sfx_env_t < sfx_env_atk`, which transitively implies atk > 0
-  // unless sfx_env_t is negative (caller invariant).
-  if sfx_env_t < sfx_env_atk { return (sfx_env_t / sfx_env_atk) ?? 0.0f; }
-  sfx_env_rem = sfx_env_dur - sfx_env_t;
-  if sfx_env_rem < 0.0f { return 0.0f; }
-  sfx_env_dec = sfx_env_dur - sfx_env_atk;
-  if sfx_env_dec <= 0.0f { return 0.0f; }
-  // `?? 0.0f` is lint suppression — `sfx_env_dec > 0.0f` is enforced
-  // by the early-return guard above.
-  return (sfx_env_rem / sfx_env_dec) ?? 0.0f;
-}
-
-// Short percussive beep — brick hit, UI click.
-pub fn sfx_beep(sb_freq: single, sb_dur: single, sb_vol: single) -> integer {
-  sb_n = (sb_dur * SFX_RATE as single) as integer;
-  sb_buf: vector<single> = [for sb_i in 0..sb_n {
-    sb_t = sb_i as single / SFX_RATE as single;
-    sb_p = (sb_t * sb_freq) % 1.0f;
-    sfx_sq(sb_p, 0.5f) * sfx_env(sb_t, 0.005f, sb_dur) * sb_vol
-  }];
-  return audio_play_raw(sb_buf, SFX_RATE, 1.0);
-}
-
-// Descending tone — life lost, negative event.
-pub fn sfx_descend(sd_f0: single, sd_f1: single, sd_dur: single, sd_vol: single) -> integer {
-  sd_n = (sd_dur * SFX_RATE as single) as integer;
-  sd_ph = 0.0f;
-  sd_buf: vector<single> = [for sd_i in 0..sd_n {
-    sd_t = sd_i as single / SFX_RATE as single;
-    sd_f = sd_f0 + (sd_f1 - sd_f0) * ((sd_t / sd_dur) ?? 0.0f);
-    sd_ph = (sd_ph + sd_f / SFX_RATE as single) % 1.0f;
-    sfx_saw(sd_ph) * sfx_env(sd_t, 0.01f, sd_dur) * sd_vol
-  }];
-  return audio_play_raw(sd_buf, SFX_RATE, 1.0);
-}
-
-// Rising chirp — pickup collected, positive event.
-pub fn sfx_chirp(sc_f0: single, sc_f1: single, sc_dur: single, sc_vol: single) -> integer {
-  sc_n = (sc_dur * SFX_RATE as single) as integer;
-  sc_ph = 0.0f;
-  sc_buf: vector<single> = [for sc_i in 0..sc_n {
-    sc_t = sc_i as single / SFX_RATE as single;
-    sc_f = sc_f0 + (sc_f1 - sc_f0) * ((sc_t / sc_dur) ?? 0.0f);
-    sc_ph = (sc_ph + sc_f / SFX_RATE as single) % 1.0f;
-    sfx_tri(sc_ph) * sfx_env(sc_t, 0.005f, sc_dur) * sc_vol
-  }];
-  return audio_play_raw(sc_buf, SFX_RATE, 1.0);
-}
-
-// White noise burst — percussion, explosion, brick break.
-pub fn sfx_noise(sn_dur: single, sn_vol: single) -> integer {
-  sn_n = (sn_dur * SFX_RATE as single) as integer;
-  sn_seed = 12345;
-  sn_buf: vector<single> = [for sn_i in 0..sn_n {
-    sn_t = sn_i as single / SFX_RATE as single;
-    sn_seed = (sn_seed * 1103515245 + 12345) % 2147483647;
-    sn_rnd = (sn_seed as single / 1073741824.0f) - 1.0f;
-    sn_rnd * sfx_env(sn_t, 0.002f, sn_dur) * sn_vol
-  }];
-  return audio_play_raw(sn_buf, SFX_RATE, 1.0);
-}
-
-// Paddle bounce — low square wave thud with pitch drop.
-pub fn sfx_bounce(sp_freq: single, sp_vol: single) -> integer {
-  return sfx_beep(sp_freq, 0.08f, sp_vol);
 }

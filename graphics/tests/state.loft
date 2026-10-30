@@ -1,0 +1,150 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Render state on the C shim (@PLN208 G5).  A full-window quad on a 64 x 48 window, its colour and
+// depth set by uniforms, answers each state call with pixels computed by hand.  Under Xvfb, start
+// the server with `-noreset` (see window.loft).
+use graphics::*;
+
+fn display() -> boolean {
+  (env_variable("DISPLAY") ?? "") != ""
+}
+
+const VERTEX: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+uniform float z;
+void main() {{ gl_Position = vec4(pos.xy, z, 1.0); }}
+`;
+
+const FRAGMENT: text = `
+#version 330 core
+uniform vec4 color;
+out vec4 frag;
+void main() {{ frag = color; }}
+`;
+
+const BLUE = 0xFF0000FF;
+const GREEN = 0xFF00FF00;
+const RED = 0xFFFF0000;
+
+// Two triangles over the whole window, counter-clockwise (front-facing) or clockwise.
+fn quad(clockwise: boolean) -> vector<single> {
+  ccw = [-1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, 1.0];
+  cw = [-1.0, -1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0];
+  out: vector<single> = [];
+  for i in 0..6 {
+    x = if clockwise { cw[2 * i] } else { ccw[2 * i] };
+    y = if clockwise { cw[2 * i + 1] } else { ccw[2 * i + 1] };
+    out += [x as single, y as single, 0.0 as single];
+  }
+  out
+}
+
+fn pixel(w: const Window, x: integer, y: integer) -> integer {
+  c = w.capture();
+  (c.data[y * 64 + x] ?? -1) | 0xFF000000
+}
+
+fn test_blend() {
+  wo = open_window(64, 48, "g5-blend");
+  if !display() { return; }
+  w = wo ?? return assert(false, "a display is set and no window opened");
+  s = w.shader(VERTEX, FRAGMENT) ?? return assert(false, "shader");
+  q = w.upload(quad(false), 3);
+  w.clear(BLUE);
+  w.enable(GL_BLEND);
+  w.blend(BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA);
+  s.set_vec4("color", 1.0, 0.0, 0.0, 0.6);
+  q.draw(s);
+  got = pixel(w, 16, 24);
+  assert(got == rgba(153, 0, 102, 255), "blended {got:x}");
+  w.disable(GL_BLEND);
+  w.clear(BLUE); // the depth test is on: a second quad at the same depth would not pass it
+  q.draw(s);
+  got = pixel(w, 16, 24);
+  assert(got == RED, "unblended {got:x}");
+}
+
+fn test_scissor_and_viewport() {
+  wo = open_window(64, 48, "g5-rects");
+  if !display() { return; }
+  w = wo ?? return assert(false, "no window");
+  s = w.shader(VERTEX, FRAGMENT) ?? return assert(false, "shader");
+  q = w.upload(quad(false), 3);
+  s.set_vec4("color", 0.0, 1.0, 0.0, 1.0);
+  w.clear(BLUE);
+  w.enable(GL_SCISSOR_TEST);
+  w.scissor(0, 0, 32, 48);
+  q.draw(s);
+  w.disable(GL_SCISSOR_TEST);
+  assert(pixel(w, 31, 24) == GREEN, "scissored: column 31 drawn");
+  assert(pixel(w, 32, 24) == BLUE, "scissored: column 32 not");
+  w.clear(BLUE);
+  w.viewport(32, 0, 32, 48);
+  q.draw(s);
+  w.viewport(0, 0, 64, 48);
+  assert(pixel(w, 31, 24) == BLUE, "viewport: column 31 not drawn");
+  assert(pixel(w, 32, 24) == GREEN, "viewport: column 32 drawn");
+}
+
+fn test_cull() {
+  wo = open_window(64, 48, "g5-cull");
+  if !display() { return; }
+  w = wo ?? return assert(false, "no window");
+  s = w.shader(VERTEX, FRAGMENT) ?? return assert(false, "shader");
+  back = w.upload(quad(true), 3);
+  s.set_vec4("color", 0.0, 1.0, 0.0, 1.0);
+  w.enable(GL_CULL_FACE);
+  w.cull(0);
+  w.clear(BLUE);
+  back.draw(s);
+  assert(pixel(w, 16, 24) == BLUE, "a clockwise quad is culled with the back faces");
+  w.cull(1);
+  back.draw(s);
+  assert(pixel(w, 16, 24) == GREEN, "and drawn when the front faces are culled");
+}
+
+fn test_depth_write() {
+  wo = open_window(64, 48, "g5-depth");
+  if !display() { return; }
+  w = wo ?? return assert(false, "no window");
+  s = w.shader(VERTEX, FRAGMENT) ?? return assert(false, "shader");
+  q = w.upload(quad(false), 3);
+  w.clear(BLUE);
+  w.depth_write(false);
+  s.set_float("z", 0.0);
+  s.set_vec4("color", 0.0, 1.0, 0.0, 1.0);
+  q.draw(s);
+  s.set_float("z", 0.5);
+  s.set_vec4("color", 1.0, 0.0, 0.0, 1.0);
+  q.draw(s);
+  assert(pixel(w, 16, 24) == RED, "the near quad wrote no depth: the far one shows");
+  w.depth_write(true);
+  w.clear(BLUE);
+  s.set_float("z", 0.0);
+  s.set_vec4("color", 0.0, 1.0, 0.0, 1.0);
+  q.draw(s);
+  s.set_float("z", 0.5);
+  s.set_vec4("color", 1.0, 0.0, 0.0, 1.0);
+  q.draw(s);
+  assert(pixel(w, 16, 24) == GREEN, "with depth writes the near quad wins");
+}
+
+// `enabled` answers what the window's switches are: depth testing on at open and the rest off,
+// then whatever `enable` / `disable` set last; a closed window answers false.
+fn test_enabled_answers_the_switches() {
+  wo = open_window(64, 48, "g9-enabled");
+  if !display() { return; }
+  w = wo ?? return assert(false, "no window");
+  assert(w.enabled(GL_DEPTH_TEST), "depth testing is on at open");
+  assert(!w.enabled(GL_BLEND) && !w.enabled(GL_CULL_FACE) && !w.enabled(GL_SCISSOR_TEST), "the rest off");
+  w.enable(GL_BLEND);
+  w.enable(GL_SCISSOR_TEST);
+  w.disable(GL_DEPTH_TEST);
+  assert(w.enabled(GL_BLEND) && w.enabled(GL_SCISSOR_TEST), "on once enabled");
+  assert(!w.enabled(GL_DEPTH_TEST) && !w.enabled(GL_CULL_FACE), "off once disabled, or never on");
+  assert(!w.enabled(0) && !w.enabled(5), "not a capability: false");
+  w.close();
+  assert(!w.enabled(GL_BLEND), "a closed window answers false");
+}

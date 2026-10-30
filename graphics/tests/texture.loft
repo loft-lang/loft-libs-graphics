@@ -1,0 +1,183 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Textures and framebuffers on the C shim (@PLN208 G5), against pixels computed by hand.  Texture
+// coordinate 0 is the texture's bottom row; `capture` answers the window top row first, so on a
+// 64 x 48 window the bottom half is capture rows 24-47.  Under Xvfb, start the server with
+// `-noreset` (see window.loft).
+use graphics::*;
+use imaging::*;
+
+fn display() -> boolean {
+  (env_variable("DISPLAY") ?? "") != ""
+}
+
+// Shows a texture over the whole target.
+const SHOW_V: text = `
+#version 330 core
+layout(location = 0) in vec2 pos;
+layout(location = 1) in vec2 uv;
+out vec2 v_uv;
+void main() {{ gl_Position = vec4(pos, 0.0, 1.0); v_uv = uv; }}
+`;
+
+const SHOW_F: text = `
+#version 330 core
+uniform sampler2D image;
+in vec2 v_uv;
+out vec4 frag;
+void main() {{ frag = texture(image, v_uv); }}
+`;
+
+// One flat colour.
+const FLAT_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+void main() {{ gl_Position = vec4(pos, 1.0); }}
+`;
+
+const FLAT_F: text = `
+#version 330 core
+uniform vec4 color;
+out vec4 frag;
+void main() {{ frag = color; }}
+`;
+
+const RED = 0xFFFF0000;
+const GREEN = 0xFF00FF00;
+const BLUE = 0xFF0000FF;
+const WHITE = 0xFFFFFFFF;
+
+fn at(c: const Canvas, x: integer, y: integer) -> integer {
+  (c.data[y * c.width + x] ?? -1) | 0xFF000000
+}
+
+// The left half of the target, as two triangles of positions.
+fn left_half() -> vector<single> {
+  xy = [-1.0, -1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 0.0, 1.0, -1.0, 1.0];
+  out: vector<single> = [];
+  for i in 0..6 { out += [xy[2 * i] as single, xy[2 * i + 1] as single, 0.0 as single]; }
+  out
+}
+
+fn test_a_canvas_becomes_a_texture() {
+  wo = open_window(64, 48, "g5-texture");
+  if !display() { return; }
+  w = wo ?? return assert(false, "a display is set and no window opened");
+  show = w.shader(SHOW_V, SHOW_F) ?? return assert(false, "shader");
+  img = canvas(2, 2, 0);
+  img.set_pixel(0, 0, RED);
+  img.set_pixel(1, 0, GREEN);
+  img.set_pixel(0, 1, BLUE);
+  img.set_pixel(1, 1, WHITE);
+  t = w.texture_from(img);
+  assert(t.width() == 2 && t.height() == 2, "size {t.width()}x{t.height()}");
+  t.filter(true);
+  t.bind(0);
+  show.set_int("image", 0);
+  w.clear(0xFF000000);
+  w.quad().draw(show);
+  c = w.capture();
+  assert(at(c, 16, 36) == RED, "canvas (0, 0) is the bottom left: {at(c, 16, 36):x}");
+  assert(at(c, 48, 36) == GREEN, "canvas (1, 0) the bottom right: {at(c, 48, 36):x}");
+  assert(at(c, 16, 12) == BLUE, "canvas (0, 1) the top left: {at(c, 16, 12):x}");
+  assert(at(c, 48, 12) == WHITE, "canvas (1, 1) the top right: {at(c, 48, 12):x}");
+}
+
+fn test_draws_into_a_framebuffer() {
+  wo = open_window(64, 48, "g5-framebuffer");
+  if !display() { return; }
+  w = wo ?? return assert(false, "no window");
+  show = w.shader(SHOW_V, SHOW_F) ?? return assert(false, "show shader");
+  flat = w.shader(FLAT_V, FLAT_F) ?? return assert(false, "flat shader");
+  half = w.upload(left_half(), 3);
+  colour = w.texture(32, 32);
+  depth = w.depth_texture(32, 32);
+  target = w.framebuffer();
+  target.attach(colour);
+  target.attach(depth);
+  w.render_to(target);
+  w.viewport(0, 0, 32, 32);
+  w.clear(RED);
+  flat.set_vec4("color", 0.0, 1.0, 0.0, 1.0);
+  half.draw(flat);
+  w.render_to_window();
+  w.viewport(0, 0, 64, 48);
+  w.clear(BLUE);
+  colour.filter(true);
+  colour.bind(0);
+  show.set_int("image", 0);
+  w.quad().draw(show);
+  c = w.capture();
+  assert(at(c, 31, 24) == GREEN, "the left half was drawn green: {at(c, 31, 24):x}");
+  assert(at(c, 32, 24) == RED, "the right half kept the target's clear: {at(c, 32, 24):x}");
+}
+
+fn test_put_replaces_a_region() {
+  wo = open_window(64, 48, "g5-put");
+  if !display() { return; }
+  w = wo ?? return assert(false, "no window");
+  show = w.shader(SHOW_V, SHOW_F) ?? return assert(false, "shader");
+  t = w.texture_from(canvas(4, 1, RED));
+  t.put(1, 0, canvas(2, 1, GREEN));
+  t.filter(true);
+  t.bind(0);
+  show.set_int("image", 0);
+  w.clear(0xFF000000);
+  w.quad().draw(show);
+  c = w.capture();
+  got = [at(c, 8, 24), at(c, 24, 24), at(c, 40, 24), at(c, 56, 24)];
+  assert(got == [RED, GREEN, GREEN, RED], "columns {got}");
+}
+
+// Dropping the framebuffer that is the target sends the draws back to the window; a depth-only
+// framebuffer leaves the window's colour drawing as it was.
+fn test_the_window_is_the_target_again() {
+  wo = open_window(64, 48, "g5-target");
+  if !display() { return; }
+  w = wo ?? return assert(false, "no window");
+  {
+    depth = w.depth_texture(16, 16);
+    only_depth = w.framebuffer();
+    only_depth.attach(depth);
+    w.render_to(only_depth);
+    w.clear(RED);
+  }
+  w.viewport(0, 0, 64, 48);
+  w.clear(GREEN);
+  c = w.capture();
+  assert(at(c, 32, 24) == GREEN, "the window is drawn into again: {at(c, 32, 24):x}");
+}
+
+// A PNG drawn 1:1 is the PNG: its top row on top, every pixel its own (a texel's centre samples
+// exactly, so linear filtering changes nothing).  Fully transparent texels are not drawn.
+fn test_a_png_becomes_a_texture() {
+  wo = open_window(64, 32, "g8-png");
+  if !display() { return; }
+  w = wo ?? return assert(false, "no window");
+  p = w.painter() ?? return assert(false, "painter");
+  t = w.load_texture("gold/gold-text-fixture.png") ?? return assert(false, "the PNG loads");
+  assert(t.width() == 64 && t.height() == 32, "size {t.width()}x{t.height()}");
+  gold = imaging::png(file("gold/gold-text-fixture.png")) ?? return assert(false, "gold decodes");
+  w.clear(0xFF000000);
+  p.image(t, 0.0, 0.0, 64.0, 32.0);
+  c = w.capture();
+  differ = 0;
+  for i in 0..64 * 32 {
+    q = gold.data[i];
+    if ((c.data[i] ?? 0) | 0xFF000000) != rgba(q.r, q.g, q.b, 255) { differ += 1; }
+  }
+  assert(differ == 0, "{differ} pixels differ from the PNG");
+  rgba_png = canvas(2, 1, rgba(10, 200, 30, 255));
+  rgba_png.set_pixel(1, 0, rgba(250, 0, 0, 0));
+  shot = "{source_dir()}/_tmp_gfx_g8_rgba.png";
+  assert(rgba_png.save_png(shot), "saved");
+  t2 = w.load_texture(shot) ?? return assert(false, "the RGBA PNG loads");
+  t2.filter(true);
+  w.clear(0xFF0000FF);
+  p.image(t2, 0.0, 0.0, 64.0, 32.0);
+  c = w.capture();
+  assert(at(c, 16, 16) == rgba(10, 200, 30, 255), "the opaque texel: {at(c, 16, 16):x}");
+  assert(at(c, 48, 16) == 0xFF0000FF, "the transparent texel is not drawn: {at(c, 48, 16):x}");
+  assert(!w.load_texture("no-such.png"), "a missing file is null");
+}

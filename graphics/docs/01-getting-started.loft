@@ -5,8 +5,9 @@
 //
 // `graphics` is the surface everything else in this family draws onto: a `Canvas` of packed
 // RGBA pixels, the primitives that mark it (rectangles, lines, circles, ellipses, béziers,
-// triangles, sprites), PNG output, and — beyond the software canvas — the OpenGL bindings, a
-// `Painter2D` for fixed-function 2-D over GL, sprite sheets, and audio.
+// triangles), PNG output, text from a TrueType `Font`, and — beyond the software canvas — a
+// `Window` with its OpenGL objects (shaders, meshes, textures, framebuffers), a `Painter` for 2-D
+// at pixel positions, and sprite sheets.
 //
 // It is deliberately not the layer above it. `stage` holds the scene TREE you mutate and
 // hands this package a draw list; `text2d` draws text with no font file; `drawing` renders a
@@ -134,9 +135,8 @@ fn the_marks_you_can_make() {
 
 // ## Where to go next
 //
-// - `README.md` — the whole surface: the OpenGL bindings, `Painter2D`, sprite sheets, audio
-//   (one contract across desktop and browser), and the `math` / `mesh` / `scene` / `glb`
-//   modules this package also carries.
+// - `README.md` — the whole surface: `Window` and its GL objects, `Painter`, `Sprites`, `Font`,
+//   the targets each is tested on, and how a 0.9 program moves to these objects.
 // - `tests/worked-examples.loft` — `@GFX-001` … `@GFX-005`, the contracts a signature cannot
 //   state, each a running test rather than a snippet.
 // - `stage` for a scene you mutate, `text2d` for text, `drawing` for an authored `.draw`

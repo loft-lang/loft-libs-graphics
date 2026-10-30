@@ -1,0 +1,84 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Shaders, uniforms and meshes on the C shim (@PLN208 G5).  A square from -0.5 to 0.5, moved left
+// by 0.5 through a `mat4` uniform, covers x in [-1, 0] and y in [-0.5, 0.5]: columns 0-31 and rows
+// 12-35 of a 64 x 48 window.  Its colour is `color * k` = (0.4, 0.8, 1.2) * 0.5 = (0.2, 0.4, 0.6),
+// which is (51, 102, 153); an `int` uniform must be 2 or the square is red.  Under Xvfb, start the
+// server with `-noreset` (see window.loft).
+use graphics::*;
+
+fn display() -> boolean {
+  (env_variable("DISPLAY") ?? "") != ""
+}
+
+const VERTEX = "#version 330 core\nlayout(location = 0) in vec3 pos;\nuniform mat4 model;\nvoid main() {{ gl_Position = model * vec4(pos, 1.0); }}\n";
+
+const FRAGMENT = "#version 330 core\nuniform vec3 color;\nuniform float k;\nuniform int mode;\nout vec4 frag;\nvoid main() {{ frag = mode == 2 ? vec4(color * k, 1.0) : vec4(1.0, 0.0, 0.0, 1.0); }}\n";
+
+// Two triangles, position + normal (stride 6), the normal unused.
+fn square() -> vector<single> {
+  v: vector<single> = [];
+  for c in [-0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5, 0.5] {
+    v += [c as single];
+  }
+  out: vector<single> = [];
+  for i in 0..6 {
+    out += [v[2 * i], v[2 * i + 1], 0.0 as single, 0.0 as single, 0.0 as single, 1.0 as single];
+  }
+  out
+}
+
+// Translate by (-0.5, 0, 0), column-major.
+fn shift_left() -> vector<float> {
+  [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -0.5, 0.0, 0.0, 1.0]
+}
+
+fn test_a_square_takes_its_uniforms() {
+  wo = open_window(64, 48, "g5-shader");
+  if !display() { return; }
+  w = wo ?? return assert(false, "a display is set and no window opened");
+  s = w.shader(VERTEX, FRAGMENT) ?? return assert(false, "the shader compiles");
+  m = w.upload(square(), 6);
+  s.set_mat4("model", shift_left());
+  s.set_vec3("color", 0.4, 0.8, 1.2);
+  s.set_float("k", 0.5);
+  s.set_int("mode", 2);
+  s.set_float("unused", 9.0);
+  w.clear(rgba(10, 20, 30, 255));
+  m.draw(s);
+  c = w.capture();
+  inside = c.data[24 * 64 + 16] ?? -1;
+  right = c.data[24 * 64 + 48] ?? -1;
+  above = c.data[4 * 64 + 16] ?? -1;
+  assert(inside == rgba(51, 102, 153, 255), "inside {inside:x}");
+  assert(right == rgba(10, 20, 30, 255), "right {right:x}");
+  assert(above == rgba(10, 20, 30, 255), "above {above:x}");
+  // the edges: column 31 is in, 32 out; row 12 in, row 11 out
+  assert((c.data[24 * 64 + 31] ?? -1) == rgba(51, 102, 153, 255), "column 31");
+  assert((c.data[24 * 64 + 32] ?? -1) == rgba(10, 20, 30, 255), "column 32");
+  assert((c.data[12 * 64 + 16] ?? -1) == rgba(51, 102, 153, 255), "row 12");
+  assert((c.data[11 * 64 + 16] ?? -1) == rgba(10, 20, 30, 255), "row 11");
+}
+
+// A shader that does not compile answers null; the window stays usable.
+fn test_a_broken_shader_is_null() {
+  wo = open_window(16, 16, "g5-broken");
+  if !display() { return; }
+  w = wo ?? return assert(false, "no window");
+  bad = w.shader("#version 330 core\nvoid main() {{ nonsense }}\n", FRAGMENT);
+  assert(!bad, "a shader that does not compile is null");
+  assert(w.shader(VERTEX, FRAGMENT), "the window still compiles a good one");
+}
+
+// A shader and a mesh that outlive their window: their death after the close does nothing.
+fn test_resources_outliving_their_window() {
+  if !display() { return; }
+  for i in 0..20 {
+    w = open_window(16, 16, "g5-outlive") ?? return assert(false, "window {i}");
+    s = w.shader(VERTEX, FRAGMENT) ?? return assert(false, "shader {i}");
+    m = w.upload(square(), 6);
+    m.draw(s);
+    w.close();
+  }
+}

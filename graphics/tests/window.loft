@@ -1,0 +1,54 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The window on the C shim (@PLN208 G4): it opens where a display is, a clear reads back as its
+// colour, and it closes when it dies or when asked.  Under Xvfb, start the server with
+// `-noreset`: one that loses its last client resets, and refuses the next window while it does.
+use graphics::*;
+
+// Where there is a display the window must open: a null there is the failure this file exists to
+// catch, not a skip.  Without one (a CI runner with no X server) there is nothing to measure.
+fn display() -> boolean {
+  (env_variable("DISPLAY") ?? "") != ""
+}
+
+fn test_clear_reads_back() {
+  wo = open_window(64, 48, "g4");
+  if !display() { return; }
+  w = wo ?? return assert(false, "a display is set and no window opened");
+  assert(w.width() == 64, "width {w.width()}");
+  assert(w.height() == 48, "height {w.height()}");
+  w.clear(rgba(255, 128, 0, 255));
+  c = w.capture();
+  assert(c.width == 64 && c.height == 48, "capture size {c.width}x{c.height}");
+  assert(len(c.data) == 64 * 48, "capture len {len(c.data)}");
+  first = c.data[0] ?? -1;
+  last = c.data[64 * 48 - 1] ?? -1;
+  assert(first == rgba(255, 128, 0, 255), "first {first:x}");
+  assert(last == rgba(255, 128, 0, 255), "last {last:x}");
+  w.swap();
+  assert(w.poll(), "poll after swap");
+  w.close();
+  assert(!w.poll(), "poll after close");
+}
+
+// A window closes when it dies.  Each one holds an X connection, and the server serves at most
+// 256 clients by default (`-maxclients`), so 300 windows that outlived their turn of the loop would
+// be refused long before the last.
+fn test_drop_closes() {
+  if !display() { return; }
+  for i in 0..300 {
+    w = open_window(16, 16, "g4-drop") ?? return assert(false, "window {i} did not open");
+    w.clear(rgba(i % 256, 0, 0, 255));
+  }
+}
+
+// `close` ends a window early; its death afterwards does nothing more, and a closed window
+// answers false to `poll` and zero for its size.
+fn test_close_then_drop() {
+  if !display() { return; }
+  w = open_window(16, 16, "g4-close") ?? return assert(false, "no window");
+  w.close();
+  assert(!w.poll(), "poll after close");
+  w.close();
+}

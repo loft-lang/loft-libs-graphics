@@ -1,0 +1,35 @@
+MouseMove 50 60
+MouseDown 1 50 60
+MouseUp 1 50 60
+MouseDown 2 50 60
+MouseUp 2 50 60
+Wheel 1 50 60
+Wheel -1 50 60
+KeyDown 97 0 false
+Text a
+KeyUp 97 0
+KeyDown 132 0 false
+KeyDown 98 1 false
+Text B
+KeyUp 98 1
+KeyDown 33 1 false
+Text !
+KeyUp 33 1
+KeyUp 132 1
+KeyDown 13 0 false
+Text 
+KeyUp 13 0
+KeyDown 130 0 false
+KeyUp 130 0
+KeyDown 139 0 false
+KeyUp 139 0
+KeyDown 8 0 false
+Text 
+KeyUp 8 0
+KeyDown 32 0 false
+Text  
+KeyUp 32 0
+KeyDown 27 0 false
+Text 
+KeyUp 27 0
+held false mouse 50 60 buttons 0

@@ -1,0 +1,41 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Prints every event the 0.10 `Window` delivers, one per line, until Escape is released — the
+// program desktop/input.sh drives (@PLN208 G6).
+use graphics::*;
+
+fn main() {
+  wo = open_window(200, 150, "g6-input");
+  if !wo {
+    println("no window");
+    return;
+  }
+  w = wo ?? return;
+  println("ready");
+  // until Escape is released, or 30 s: a frame count would end before a slow injector starts
+  deadline = ticks() + 30000000;
+  done = false;
+  while !done && ticks() < deadline && w.poll() {
+    for ev in w.events() {
+      match ev {
+        KeyDown { key, mods, repeat } => println("KeyDown {key} {mods} {repeat}"),
+        KeyUp { key, mods } => {
+          println("KeyUp {key} {mods}");
+          if key == KEY_ESCAPE { done = true; }
+        },
+        Text { content } => println("Text {content}"),
+        MouseDown { button, x, y } => println("MouseDown {button} {x as integer} {y as integer}"),
+        MouseUp { button, x, y } => println("MouseUp {button} {x as integer} {y as integer}"),
+        MouseMove { x, y } => println("MouseMove {x as integer} {y as integer}"),
+        Wheel { delta, x, y } => println("Wheel {delta} {x as integer} {y as integer}"),
+        Resize { width, height } => println("Resize {width} {height}"),
+        _ => {}
+      }
+    }
+    w.swap();
+  }
+  println(
+    "held {w.key_down(KEY_SHIFT)} mouse {w.mouse_x() as integer} {w.mouse_y() as integer} buttons {w.mouse_buttons()}"
+  );
+}
