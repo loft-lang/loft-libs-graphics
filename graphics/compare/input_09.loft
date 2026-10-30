@@ -1,0 +1,44 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The same as input_new.loft through 0.9's latched event queue — the 0.9 half of
+// compare/input.sh (@PLN208 G6).
+use graphics::*;
+
+fn main() {
+  if !gl_create_window(200, 150, "g6-input") {
+    println("no window");
+    return;
+  }
+  println("ready");
+  frames = 0;
+  done = false;
+  while !done && frames < 3000 && gl_poll_events() {
+    t = gl_next_event();
+    while t != EV_NONE {
+      if t == EV_KEY_DOWN {
+        println("KeyDown {gl_event_key()} {gl_event_mods()} {gl_event_repeat()}");
+      } else if t == EV_KEY_UP {
+        println("KeyUp {gl_event_key()} {gl_event_mods()}");
+        if gl_event_key() == KEY_ESCAPE { done = true; }
+      } else if t == EV_TEXT { println("Text {gl_event_text()}"); } else if t == EV_MOUSE_DOWN {
+        println("MouseDown {gl_event_button()} {gl_event_x() as integer} {gl_event_y() as integer}");
+      } else if t == EV_MOUSE_UP {
+        println("MouseUp {gl_event_button()} {gl_event_x() as integer} {gl_event_y() as integer}");
+      } else if t == EV_MOUSE_MOVE {
+        println("MouseMove {gl_event_x() as integer} {gl_event_y() as integer}");
+      } else if t == EV_WHEEL {
+        println("Wheel {gl_event_wheel()} {gl_event_x() as integer} {gl_event_y() as integer}");
+      } else if t == EV_RESIZE {
+        println("Resize {gl_event_x() as integer} {gl_event_y() as integer}");
+      }
+      t = gl_next_event();
+    }
+    gl_swap_buffers();
+    frames += 1;
+  }
+  println(
+    "held {gl_key_pressed(KEY_SHIFT)} mouse {gl_mouse_x() as integer} {gl_mouse_y() as integer} buttons {gl_mouse_button()}"
+  );
+  gl_destroy_window();
+}

@@ -28,6 +28,10 @@ int64_t gg_width(int64_t h);
 int64_t gg_height(int64_t h);
 int64_t gg_event_count(int64_t h);
 void gg_events(int64_t h, int64_t *out, int64_t n);
+int64_t gg_text_size(int64_t h);
+void gg_text_copy(int64_t h, uint8_t *out, int64_t n);
+int64_t gg_key_down(int64_t h, int64_t key);
+int64_t gg_mouse(int64_t h, int64_t which);
 void gg_read_pixels(int64_t h, int64_t *out, int64_t n);
 int64_t gg_shader(int64_t win, const char *vertex, const char *fragment);
 void gg_uniform_f(int64_t sh, const char *name, const double *v, int64_t n);
@@ -66,7 +70,18 @@ void gg_instance_attrib(int64_t mesh, int64_t buf, int64_t location, int64_t com
 
 /* One queued input event: an EV_* tag (src/graphics.loft) and up to four integer fields. */
 #define GG_EVENT_WORDS 5
+#define GG_EV_KEY_DOWN 1
+#define GG_EV_KEY_UP 2
+#define GG_EV_TEXT 3
+#define GG_EV_MOUSE_DOWN 4
+#define GG_EV_MOUSE_UP 5
+#define GG_EV_MOUSE_MOVE 6
+#define GG_EV_WHEEL 7
 #define GG_EV_RESIZE 11
+#define GG_MOD_SHIFT 1
+#define GG_MOD_CTRL 2
+#define GG_MOD_ALT 4
+#define GG_MOD_SUPER 8
 
 #if defined(__linux__) && !defined(__wasm__)
 
@@ -125,11 +140,36 @@ typedef struct {
         long l[5];
     } data;
 } gx_client_event;
+typedef struct {
+    int type;
+    unsigned long serial;
+    int send_event;
+    void *display;
+    gx_xid window, root, subwindow;
+    unsigned long time;
+    int x, y, x_root, y_root;
+    unsigned state, detail; /* keycode or button */
+    int same_screen;
+} gx_input_event; /* XKeyEvent and XButtonEvent share this layout */
+typedef struct {
+    int type;
+    unsigned long serial;
+    int send_event;
+    void *display;
+    gx_xid window, root, subwindow;
+    unsigned long time;
+    int x, y, x_root, y_root;
+    unsigned state;
+    char is_hint;
+    int same_screen;
+} gx_motion_event;
 typedef union {
     int type;
     gx_any_event any;
     gx_configure_event configure;
     gx_client_event client;
+    gx_input_event input;
+    gx_motion_event motion;
     long pad[24];
 } gx_event;
 typedef struct {
@@ -158,6 +198,19 @@ typedef struct {
 #define GX_DESTROY_NOTIFY 17
 #define GX_CLIENT_MESSAGE 33
 #define GX_ATOM_ATOM 4
+#define GX_KEY_PRESS 2
+#define GX_KEY_RELEASE 3
+#define GX_BUTTON_PRESS 4
+#define GX_BUTTON_RELEASE 5
+#define GX_MOTION_NOTIFY 6
+#define GX_SHIFT_MASK (1 << 0)
+#define GX_CONTROL_MASK (1 << 2)
+#define GX_MOD1_MASK (1 << 3)
+#define GX_MOD4_MASK (1 << 6)
+#define GX_XIM_PREEDIT_NOTHING 0x0008L
+#define GX_XIM_STATUS_NOTHING 0x0400L
+#define GX_XLOOKUP_CHARS 2
+#define GX_XLOOKUP_BOTH 4
 #define GX_PROP_MODE_REPLACE 0
 
 /* ── GLX and GL (glx.h, glxext.h, gl.h) ─────────────────────────────────────────────────────── */
@@ -256,6 +309,14 @@ typedef struct {
     int (*XSync)(void *, int);
     int (*XFree)(void *);
     gx_error_handler (*XSetErrorHandler)(gx_error_handler);
+    int (*XLookupString)(gx_input_event *, char *, int, gx_xid *, void *);
+    int (*XkbSetDetectableAutoRepeat)(void *, int, int *);
+    void *(*XOpenIM)(void *, void *, char *, char *);
+    int (*XCloseIM)(void *);
+    void *(*XCreateIC)(void *, ...);
+    void (*XDestroyIC)(void *);
+    int (*Xutf8LookupString)(void *, gx_input_event *, char *, int, gx_xid *, int *);
+    int (*XFilterEvent)(gx_event *, gx_xid);
 
     gx_fbconfig *(*glXChooseFBConfig)(void *, int, const int *, int *);
     int (*glXGetFBConfigAttrib)(void *, gx_fbconfig, int, int *);
@@ -346,6 +407,11 @@ typedef struct {
     int64_t refs; /* the shaders and meshes still holding this window */
     int64_t *events;
     int64_t event_count, event_cap;
+    char *text; /* the UTF-8 of the queued `Text` events, end to end */
+    int64_t text_len, text_cap;
+    unsigned char keys[256]; /* which KEY_* codes are down */
+    int mouse_x, mouse_y, buttons;
+    void *im, *ic; /* the input method and context, when the server has one */
 } gg_window;
 
 /* A shader or a mesh: its GL names and the window whose context made them. */
@@ -410,7 +476,10 @@ static int gg_bind(gg_window *w) {
           GG_SYM(libx11, XSetWMProtocols) && GG_SYM(libx11, XChangeProperty) &&
           GG_SYM(libx11, XMapWindow) && GG_SYM(libx11, XPending) &&
           GG_SYM(libx11, XNextEvent) && GG_SYM(libx11, XSync) && GG_SYM(libx11, XFree) &&
-          GG_SYM(libx11, XSetErrorHandler)))
+          GG_SYM(libx11, XSetErrorHandler) && GG_SYM(libx11, XLookupString) &&
+          GG_SYM(libx11, XkbSetDetectableAutoRepeat) && GG_SYM(libx11, XOpenIM) &&
+          GG_SYM(libx11, XCloseIM) && GG_SYM(libx11, XCreateIC) && GG_SYM(libx11, XDestroyIC) &&
+          GG_SYM(libx11, Xutf8LookupString) && GG_SYM(libx11, XFilterEvent)))
         return 0;
     if (!(GG_SYM(libgl, glXChooseFBConfig) && GG_SYM(libgl, glXGetFBConfigAttrib) &&
           GG_SYM(libgl, glXGetVisualFromFBConfig) && GG_SYM(libgl, glXGetProcAddressARB) &&
@@ -507,6 +576,9 @@ static void gg_teardown(gg_window *w) {
         w->api.XCloseDisplay(w->display);
     }
     if (gg_current == w) gg_current = NULL;
+    if (w->ic) w->api.XDestroyIC(w->ic);
+    if (w->im) w->api.XCloseIM(w->im);
+    w->ic = w->im = NULL;
     if (w->libgl) dlclose(w->libgl);
     if (w->libx11) dlclose(w->libx11);
     w->closed = 1;
@@ -516,6 +588,7 @@ static void gg_teardown(gg_window *w) {
 static void gg_forget(gg_window *w) {
     if (!w->closed || w->refs > 0) return;
     free(w->events);
+    free(w->text);
     free(w);
 }
 
@@ -540,6 +613,95 @@ static void gg_push(gg_window *w, int64_t tag, int64_t a, int64_t b, int64_t c, 
     slot[3] = c;
     slot[4] = d;
     w->event_count++;
+}
+
+/* 0.9's key codes (src/graphics.loft KEY_*): ASCII lower-cased for a character, its own codes for
+ * the named keys, -1 for a key it has none for. */
+static int64_t gg_key_code(gx_xid sym) {
+    if (sym >= 0x20 && sym <= 0x7e) return sym >= 'A' && sym <= 'Z' ? (int64_t) sym + 32 : (int64_t) sym;
+    if (sym >= 0xffbe && sym <= 0xffc9) return 135 + (int64_t) (sym - 0xffbe); /* F1-F12 */
+    if (sym >= 0xffb0 && sym <= 0xffb9) return '0' + (int64_t) (sym - 0xffb0); /* keypad digits */
+    switch (sym) {
+    case 0xff0d: case 0xff8d: return 13; /* Return, KP_Enter */
+    case 0xff1b: return 27;  /* Escape */
+    case 0xff09: return 9;   /* Tab */
+    case 0xff08: return 8;   /* BackSpace */
+    case 0xff52: return 128; /* Up */
+    case 0xff54: return 129; /* Down */
+    case 0xff51: return 130; /* Left */
+    case 0xff53: return 131; /* Right */
+    case 0xffe1: case 0xffe2: return 132; /* Shift */
+    case 0xffe3: case 0xffe4: return 133; /* Control */
+    case 0xffff: return 147; /* Delete */
+    case 0xff63: return 148; /* Insert */
+    case 0xff50: return 149; /* Home */
+    case 0xff57: return 150; /* End */
+    case 0xff55: return 151; /* Page_Up */
+    case 0xff56: return 152; /* Page_Down */
+    default: return -1;
+    }
+}
+
+/* The MOD_* bits of an X modifier state. */
+static int64_t gg_mods(unsigned state) {
+    return ((state & GX_SHIFT_MASK) ? GG_MOD_SHIFT : 0) | ((state & GX_CONTROL_MASK) ? GG_MOD_CTRL : 0) |
+           ((state & GX_MOD1_MASK) ? GG_MOD_ALT : 0) | ((state & GX_MOD4_MASK) ? GG_MOD_SUPER : 0);
+}
+
+static void gg_text_push(gg_window *w, const char *bytes, int n) {
+    if (w->text_len + n > w->text_cap) {
+        int64_t cap = (w->text_cap ? w->text_cap * 2 : 64) + n;
+        char *grown = (char *) realloc(w->text, (size_t) cap);
+        if (!grown) return;
+        w->text = grown;
+        w->text_cap = cap;
+    }
+    gg_push(w, GG_EV_TEXT, w->text_len, n, 0, 0);
+    memcpy(w->text + w->text_len, bytes, (size_t) n);
+    w->text_len += n;
+}
+
+/* A key press: KeyDown (a repeat when the key is already down) and, when it types anything, a
+ * Text with what it typed (Enter types "\r", Backspace "\b", as 0.9 reported them); a release:
+ * KeyUp.  The modifiers are the state before the event, as X and 0.9 report them: pressing Shift
+ * reports no Shift, releasing it reports Shift. */
+static void gg_key(gg_window *w, gx_input_event *e, int press) {
+    char buf[64];
+    gx_xid sym = 0;
+    int n, status = 0;
+    int64_t code;
+    unsigned state = e->state;
+    if (press && w->ic)
+        n = w->api.Xutf8LookupString(w->ic, e, buf, (int) sizeof buf - 1, &sym, &status);
+    else
+        n = w->api.XLookupString(e, buf, (int) sizeof buf - 1, &sym, NULL);
+    if (n < 0) n = 0;
+    code = gg_key_code(sym);
+    if (press) {
+        int repeat = code >= 0 && code < 256 && w->keys[code];
+        if (code >= 0 && code < 256) w->keys[code] = 1;
+        gg_push(w, GG_EV_KEY_DOWN, code, gg_mods(state), repeat, 0);
+        if (n > 0) gg_text_push(w, buf, n);
+    } else {
+        if (code >= 0 && code < 256) w->keys[code] = 0;
+        gg_push(w, GG_EV_KEY_UP, code, gg_mods(state), 0, 0);
+    }
+}
+
+/* X buttons 1-3 are left, middle, right — 1, 4 and 2 here, as 0.9 numbered them; 4 and 5 are
+ * the wheel, a step up and a step down. */
+static void gg_button(gg_window *w, gx_input_event *e, int press) {
+    int bit = e->detail == 1 ? 1 : e->detail == 2 ? 4 : e->detail == 3 ? 2 : 0;
+    w->mouse_x = e->x;
+    w->mouse_y = e->y;
+    if (e->detail == 4 || e->detail == 5) {
+        if (press) gg_push(w, GG_EV_WHEEL, e->detail == 4 ? 1 : -1, e->x, e->y, 0);
+        return;
+    }
+    if (!bit) return;
+    if (press) w->buttons |= bit;
+    else w->buttons &= ~bit;
+    gg_push(w, press ? GG_EV_MOUSE_DOWN : GG_EV_MOUSE_UP, bit, e->x, e->y, 0);
 }
 
 /* Present an opaque frame: whatever alpha the shaders wrote is forced to 1 first, as 0.9 did. */
@@ -597,6 +759,13 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
     w->api.XStoreName(w->display, w->window, title);
     w->wm_delete = w->api.XInternAtom(w->display, "WM_DELETE_WINDOW", 0);
     w->api.XSetWMProtocols(w->display, w->window, &w->wm_delete, 1);
+    /* Auto-repeat as press after press, no release between: a key held down is then one
+     * KeyDown, its repeats, and one KeyUp, as 0.9 reported it. */
+    w->api.XkbSetDetectableAutoRepeat(w->display, 1, NULL);
+    w->im = w->api.XOpenIM(w->display, NULL, NULL, NULL);
+    if (w->im)
+        w->ic = w->api.XCreateIC(w->im, "inputStyle", GX_XIM_PREEDIT_NOTHING | GX_XIM_STATUS_NOTHING,
+                                 "clientWindow", w->window, "focusWindow", w->window, NULL);
     if (fullscreen) {
         gx_xid state = w->api.XInternAtom(w->display, "_NET_WM_STATE", 0);
         gx_xid full = w->api.XInternAtom(w->display, "_NET_WM_STATE_FULLSCREEN", 0);
@@ -670,7 +839,21 @@ int64_t gg_poll(int64_t h) {
     while (w->api.XPending(w->display) > 0) {
         gx_event ev;
         w->api.XNextEvent(w->display, &ev);
+        if (w->ic && w->api.XFilterEvent(&ev, 0)) continue; /* the input method took it */
         switch (ev.type) {
+        case GX_KEY_PRESS:
+        case GX_KEY_RELEASE:
+            gg_key(w, &ev.input, ev.type == GX_KEY_PRESS);
+            break;
+        case GX_BUTTON_PRESS:
+        case GX_BUTTON_RELEASE:
+            gg_button(w, &ev.input, ev.type == GX_BUTTON_PRESS);
+            break;
+        case GX_MOTION_NOTIFY:
+            w->mouse_x = ev.motion.x;
+            w->mouse_y = ev.motion.y;
+            gg_push(w, GG_EV_MOUSE_MOVE, ev.motion.x, ev.motion.y, 0, 0);
+            break;
         case GX_CONFIGURE_NOTIFY:
             if (ev.configure.width > 0 && ev.configure.height > 0) {
                 width = ev.configure.width;
@@ -741,6 +924,31 @@ void gg_events(int64_t h, int64_t *out, int64_t n) {
     if (n < words) words = n - n % GG_EVENT_WORDS;
     memcpy(out, w->events, (size_t) words * 8u);
     w->event_count = 0;
+    w->text_len = 0;
+}
+
+/* The bytes of the queued `Text` events — copy them before `gg_events` empties the queue. */
+int64_t gg_text_size(int64_t h) {
+    gg_window *w = gg_of(h);
+    return w ? w->text_len : 0;
+}
+
+void gg_text_copy(int64_t h, uint8_t *out, int64_t n) {
+    gg_window *w = gg_of(h);
+    if (!w || n < w->text_len) return;
+    memcpy(out, w->text, (size_t) w->text_len);
+}
+
+int64_t gg_key_down(int64_t h, int64_t key) {
+    gg_window *w = gg_of(h);
+    return w && key >= 0 && key < 256 && w->keys[key];
+}
+
+/* 0: x, 1: y, 2: the buttons held (1 left, 2 right, 4 middle). */
+int64_t gg_mouse(int64_t h, int64_t which) {
+    gg_window *w = gg_of(h);
+    if (!w) return 0;
+    return which == 0 ? w->mouse_x : which == 1 ? w->mouse_y : w->buttons;
 }
 
 /* The back buffer as 0xAARRGGBB pixels, top row first: read before `swap`, after the frame's
@@ -1534,6 +1742,26 @@ void gg_instance_attrib(int64_t mesh, int64_t buf, int64_t location, int64_t com
     (void) components;
     (void) stride;
     (void) offset;
+}
+
+int64_t gg_text_size(int64_t h) {
+    (void) h;
+    return 0;
+}
+void gg_text_copy(int64_t h, uint8_t *out, int64_t n) {
+    (void) h;
+    (void) out;
+    (void) n;
+}
+int64_t gg_key_down(int64_t h, int64_t key) {
+    (void) h;
+    (void) key;
+    return 0;
+}
+int64_t gg_mouse(int64_t h, int64_t which) {
+    (void) h;
+    (void) which;
+    return 0;
 }
 
 #endif

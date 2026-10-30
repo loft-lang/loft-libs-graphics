@@ -1397,17 +1397,64 @@ pub fn events(self: const Window) -> vector<Event> {
   out: vector<Event> = [];
   n = gg_event_count(self.handle);
   if n == 0 { return out; }
+  nbytes = gg_text_size(self.handle);
+  typed: vector<u8> = [0 as u8; nbytes];
+  gg_text_copy(self.handle, typed);
   words: vector<integer> = [0; 5 * n];
   gg_events(self.handle, words);
   for i in 0..n {
     tag = words[5 * i] ?? 0;
-    if tag == EV_RESIZE {
-      out += [
-        Resize { width: words[5 * i + 1] ?? 0, height: words[5 * i + 2] ?? 0 },
-      ];
+    a = words[5 * i + 1] ?? 0;
+    b = words[5 * i + 2] ?? 0;
+    c = words[5 * i + 3] ?? 0;
+    if tag == EV_KEY_DOWN {
+      out += [KeyDown { key: a, mods: b, repeat: c != 0 }];
+    } else if tag == EV_KEY_UP {
+      out += [KeyUp { key: a, mods: b }];
+    } else if tag == EV_TEXT {
+      out += [Text { content: text_from_bytes(typed[a..a + b]) }];
+    } else if tag == EV_MOUSE_DOWN {
+      out += [MouseDown { button: a, x: b as float, y: c as float }];
+    } else if tag == EV_MOUSE_UP {
+      out += [MouseUp { button: a, x: b as float, y: c as float }];
+    } else if tag == EV_MOUSE_MOVE {
+      out += [MouseMove { x: a as float, y: b as float }];
+    } else if tag == EV_WHEEL {
+      out += [Wheel { delta: a, x: b as float, y: c as float }];
+    } else if tag == EV_RESIZE {
+      out += [Resize { width: a, height: b }];
     }
   }
   out
+}
+
+fn gg_text_size(h: integer) -> integer;
+#c "gg_text_size" "int64_t(int64_t)"
+fn gg_text_copy(h: integer, out: vector<u8>);
+#c "gg_text_copy" "void(int64_t, uint8_t*, int64_t)"
+fn gg_key_down(h: integer, key: integer) -> integer;
+#c "gg_key_down" "int64_t(int64_t, int64_t)"
+fn gg_mouse(h: integer, which: integer) -> integer;
+#c "gg_mouse" "int64_t(int64_t, int64_t)"
+
+// Whether key `key` (a KEY_* code) is held down, as of the last `poll`.
+pub fn key_down(self: const Window, key: integer) -> boolean {
+  gg_key_down(self.handle, key) != 0
+}
+
+// The pointer's position in pixels from the window's top-left corner, as of the last `poll`.
+pub fn mouse_x(self: const Window) -> float {
+  gg_mouse(self.handle, 0) as float
+}
+
+// And its vertical position.
+pub fn mouse_y(self: const Window) -> float {
+  gg_mouse(self.handle, 1) as float
+}
+
+// The mouse buttons held down: 1 left, 2 right, 4 middle, or'ed together.
+pub fn mouse_buttons(self: const Window) -> integer {
+  gg_mouse(self.handle, 2)
 }
 
 // Clear the frame to `color` (packed 0xAARRGGBB, as `rgba` packs it) and the depth buffer.
