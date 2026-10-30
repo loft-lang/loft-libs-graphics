@@ -1388,12 +1388,12 @@ pub fn open_fullscreen(title: text) -> Window? {
 
 // Take the window's pending input and apply a resize; false once the window was asked to close
 // (or was closed).  Call once per frame, then read `events()`.
-pub fn poll(self: Window) -> boolean {
+pub fn poll(self: const Window) -> boolean {
   self.handle != 0 && gg_poll(self.handle) != 0
 }
 
 // What arrived since the previous `events()`, oldest first.
-pub fn events(self: Window) -> vector<Event> {
+pub fn events(self: const Window) -> vector<Event> {
   out: vector<Event> = [];
   n = gg_event_count(self.handle);
   if n == 0 { return out; }
@@ -1411,27 +1411,27 @@ pub fn events(self: Window) -> vector<Event> {
 }
 
 // Clear the frame to `color` (packed 0xAARRGGBB, as `rgba` packs it) and the depth buffer.
-pub fn clear(self: Window, color: integer) {
+pub fn clear(self: const Window, color: integer) {
   gg_clear(self.handle, color);
 }
 
 // Present the frame.  Its alpha is forced opaque first, so a compositor never shows through it.
-pub fn swap(self: Window) {
+pub fn swap(self: const Window) {
   gg_swap(self.handle);
 }
 
 // The drawable's size in pixels; it follows a resize at `poll`.
-pub fn width(self: Window) -> integer {
+pub fn width(self: const Window) -> integer {
   gg_width(self.handle)
 }
 
 // And its height.
-pub fn height(self: Window) -> integer {
+pub fn height(self: const Window) -> integer {
   gg_height(self.handle)
 }
 
 // The frame drawn so far, as a canvas — read it after the draws and before `swap`.
-pub fn capture(self: Window) -> Canvas {
+pub fn capture(self: const Window) -> Canvas {
   cw = gg_width(self.handle);
   ch = gg_height(self.handle);
   px = filled(cw * ch, 0);
@@ -1481,39 +1481,39 @@ fn OpDrop(self: Shader) {
 
 // Compile and link a GLSL 3.30 program for this window.  Null when either stage does not compile
 // or the program does not link; the driver's log says why, on stderr.
-pub fn shader(self: Window, vertex: text, fragment: text) -> Shader? {
+pub fn shader(self: const Window, vertex: text, fragment: text) -> Shader? {
   h = gg_shader(self.handle, vertex, fragment);
   if h == 0 { return null; }
   Shader { handle: h }
 }
 
 // Set uniform `name` of this shader; a name the program does not use is ignored.
-pub fn set_float(self: Shader, name: text, v: float) {
+pub fn set_float(self: const Shader, name: text, v: float) {
   gg_uniform_f(self.handle, name, [v]);
 }
 
 // A `vec2` uniform.
-pub fn set_vec2(self: Shader, name: text, x: float, y: float) {
+pub fn set_vec2(self: const Shader, name: text, x: float, y: float) {
   gg_uniform_f(self.handle, name, [x, y]);
 }
 
 // A `vec3` uniform.
-pub fn set_vec3(self: Shader, name: text, x: float, y: float, z: float) {
+pub fn set_vec3(self: const Shader, name: text, x: float, y: float, z: float) {
   gg_uniform_f(self.handle, name, [x, y, z]);
 }
 
 // A `vec4` uniform.
-pub fn set_vec4(self: Shader, name: text, x: float, y: float, z: float, w: float) {
+pub fn set_vec4(self: const Shader, name: text, x: float, y: float, z: float, w: float) {
   gg_uniform_f(self.handle, name, [x, y, z, w]);
 }
 
 // A `mat4` uniform from 16 floats, column-major; fewer than 16 is ignored.
-pub fn set_mat4(self: Shader, name: text, m: const vector<float>) {
+pub fn set_mat4(self: const Shader, name: text, m: const vector<float>) {
   if len(m) >= 16 { gg_uniform_f(self.handle, name, m); }
 }
 
 // An `int` (or sampler) uniform.
-pub fn set_int(self: Shader, name: text, v: integer) {
+pub fn set_int(self: const Shader, name: text, v: integer) {
   gg_uniform_i(self.handle, name, v);
 }
 
@@ -1529,13 +1529,88 @@ fn OpDrop(self: GpuMesh) {
 }
 
 // Upload `data` as a mesh of `len(data) / stride` vertices.
-pub fn upload(self: Window, data: const vector<single>, stride: integer) -> GpuMesh {
+pub fn upload(self: const Window, data: const vector<single>, stride: integer) -> GpuMesh {
   GpuMesh { handle: gg_mesh(self.handle, data, stride) }
 }
 
 // Draw every vertex of this mesh as triangles with `shader`.
-pub fn draw(self: GpuMesh, shader: const Shader) {
+pub fn draw(self: const GpuMesh, shader: const Shader) {
   gg_draw(self.handle, shader.handle);
+}
+
+// --- Render state: what the next draws do with depth, blending, faces and the frame's area ---
+//
+// The codes are 0.9's: `GL_DEPTH_TEST`, `GL_BLEND`, `GL_CULL_FACE`, `GL_SCISSOR_TEST` for
+// `enable`/`disable`, the `BLEND_*` factors for `blend`.  A window opens with the depth test on.
+
+fn gg_capability(win: integer, cap: integer, on: integer);
+#c "gg_capability" "void(int64_t, int64_t, int64_t)"
+fn gg_blend(win: integer, src: integer, dst: integer);
+#c "gg_blend" "void(int64_t, int64_t, int64_t)"
+fn gg_cull(win: integer, face: integer);
+#c "gg_cull" "void(int64_t, int64_t)"
+fn gg_depth_write(win: integer, on: integer);
+#c "gg_depth_write" "void(int64_t, int64_t)"
+fn gg_viewport(win: integer, x: integer, y: integer, width: integer, height: integer);
+#c "gg_viewport" "void(int64_t, int64_t, int64_t, int64_t, int64_t)"
+fn gg_scissor(win: integer, x: integer, y: integer, width: integer, height: integer);
+#c "gg_scissor" "void(int64_t, int64_t, int64_t, int64_t, int64_t)"
+fn gg_finish(win: integer);
+#c "gg_finish" "void(int64_t)"
+fn gg_line_width(win: integer, width: const vector<float>);
+#c "gg_line_width" "void(int64_t, const double*, int64_t)"
+fn gg_point_size(win: integer, size: const vector<float>);
+#c "gg_point_size" "void(int64_t, const double*, int64_t)"
+
+// Turn a capability on: `GL_DEPTH_TEST`, `GL_BLEND`, `GL_CULL_FACE` or `GL_SCISSOR_TEST`.
+pub fn enable(self: const Window, cap: integer) {
+  gg_capability(self.handle, cap, 1);
+}
+
+// And off.
+pub fn disable(self: const Window, cap: integer) {
+  gg_capability(self.handle, cap, 0);
+}
+
+// How a blended draw combines with the frame: `w.blend(BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA)`.
+pub fn blend(self: const Window, src: integer, dst: integer) {
+  gg_blend(self.handle, src, dst);
+}
+
+// Which faces `GL_CULL_FACE` drops: 0 the back (counter-clockwise is the front), 1 the front.
+pub fn cull(self: const Window, face: integer) {
+  gg_cull(self.handle, face);
+}
+
+// Whether draws write the depth buffer (they still test it while `GL_DEPTH_TEST` is on).
+pub fn depth_write(self: const Window, on: boolean) {
+  gg_depth_write(self.handle, if on { 1 } else { 0 });
+}
+
+// The rectangle draws map onto, origin bottom-left.  `poll` resets it to the whole window on a
+// resize.
+pub fn viewport(self: const Window, x: integer, y: integer, width: integer, height: integer) {
+  gg_viewport(self.handle, x, y, width, height);
+}
+
+// The rectangle `GL_SCISSOR_TEST` clips to, origin bottom-left.
+pub fn scissor(self: const Window, x: integer, y: integer, width: integer, height: integer) {
+  gg_scissor(self.handle, x, y, width, height);
+}
+
+// Wait until every draw so far has finished.  A stall: for a test or a screenshot, not a frame.
+pub fn finish(self: const Window) {
+  gg_finish(self.handle);
+}
+
+// The width of lines drawn with `DRAW_LINES`.
+pub fn line_width(self: const Window, width: float) {
+  gg_line_width(self.handle, [width]);
+}
+
+// The size of points drawn with `DRAW_POINTS`.
+pub fn point_size(self: const Window, size: float) {
+  gg_point_size(self.handle, [size]);
 }
 
 // --- Input events (Gap 01): an ordered, drained-per-frame event queue ---

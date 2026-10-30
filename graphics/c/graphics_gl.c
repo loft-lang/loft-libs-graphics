@@ -35,6 +35,15 @@ void gg_uniform_i(int64_t sh, const char *name, int64_t v);
 int64_t gg_mesh(int64_t win, const float *data, int64_t n, int64_t stride);
 void gg_draw(int64_t mesh, int64_t shader);
 void gg_release(int64_t res);
+void gg_capability(int64_t win, int64_t cap, int64_t on);
+void gg_blend(int64_t win, int64_t src, int64_t dst);
+void gg_cull(int64_t win, int64_t face);
+void gg_depth_write(int64_t win, int64_t on);
+void gg_viewport(int64_t win, int64_t x, int64_t y, int64_t width, int64_t height);
+void gg_scissor(int64_t win, int64_t x, int64_t y, int64_t width, int64_t height);
+void gg_finish(int64_t win);
+void gg_line_width(int64_t win, const double *width, int64_t n);
+void gg_point_size(int64_t win, const double *size, int64_t n);
 
 /* One queued input event: an EV_* tag (src/graphics.loft) and up to four integer fields. */
 #define GG_EVENT_WORDS 5
@@ -170,6 +179,16 @@ typedef struct {
 #define GL_COMPILE_STATUS 0x8B81
 #define GL_LINK_STATUS 0x8B82
 #define GL_INFO_LOG_LENGTH 0x8B84
+#define GL_BLEND 0x0BE2
+#define GL_CULL_FACE 0x0B44
+#define GL_SCISSOR_TEST 0x0C11
+#define GL_FRONT 0x0404
+#define GL_ZERO 0
+#define GL_ONE 1
+#define GL_SRC_ALPHA 0x0302
+#define GL_ONE_MINUS_SRC_ALPHA 0x0303
+#define GL_DST_ALPHA 0x0304
+#define GL_ONE_MINUS_DST_ALPHA 0x0305
 
 typedef void *gx_fbconfig;
 typedef void *gx_context;
@@ -248,6 +267,14 @@ typedef struct {
     void (*glVertexAttribPointer)(unsigned, int, unsigned, unsigned char, int, const void *);
     void (*glEnableVertexAttribArray)(unsigned);
     void (*glDrawArrays)(unsigned, int, int);
+    void (*glDisable)(unsigned);
+    void (*glBlendFunc)(unsigned, unsigned);
+    void (*glCullFace)(unsigned);
+    void (*glDepthMask)(unsigned char);
+    void (*glScissor)(int, int, int, int);
+    void (*glFinish)(void);
+    void (*glLineWidth)(float);
+    void (*glPointSize)(float);
 } gg_api;
 
 typedef struct {
@@ -354,7 +381,9 @@ static int gg_bind_gl(gg_window *w) {
            GG_PROC(glBindVertexArray) && GG_PROC(glDeleteVertexArrays) && GG_PROC(glGenBuffers) &&
            GG_PROC(glBindBuffer) && GG_PROC(glBufferData) && GG_PROC(glDeleteBuffers) &&
            GG_PROC(glVertexAttribPointer) && GG_PROC(glEnableVertexAttribArray) &&
-           GG_PROC(glDrawArrays);
+           GG_PROC(glDrawArrays) && GG_PROC(glDisable) && GG_PROC(glBlendFunc) &&
+           GG_PROC(glCullFace) && GG_PROC(glDepthMask) && GG_PROC(glScissor) &&
+           GG_PROC(glFinish) && GG_PROC(glLineWidth) && GG_PROC(glPointSize);
 }
 
 /* An X protocol error while the context is made (a config the server refuses, a context the
@@ -843,6 +872,68 @@ void gg_release(int64_t res) {
     gg_forget(w);
 }
 
+/* ── Render state: 0.9's own codes, so a ported call keeps its arguments ─────────────────── */
+
+/* GL_DEPTH_TEST = 1, GL_BLEND = 2, GL_CULL_FACE = 3, GL_SCISSOR_TEST = 4 (src/graphics.loft). */
+void gg_capability(int64_t win, int64_t cap, int64_t on) {
+    static const unsigned caps[] = {0, GL_DEPTH_TEST, GL_BLEND, GL_CULL_FACE, GL_SCISSOR_TEST};
+    gg_window *w = gg_of(win);
+    if (cap < 1 || cap > 4 || !gg_use(w, on ? "Window.enable" : "Window.disable")) return;
+    if (on) w->api.glEnable(caps[cap]);
+    else w->api.glDisable(caps[cap]);
+}
+
+/* BLEND_ZERO = 0 … BLEND_ONE_MINUS_DST_ALPHA = 5; anything else is ONE, as in 0.9. */
+static unsigned gg_blend_factor(int64_t f) {
+    static const unsigned factors[] = {GL_ZERO, GL_ONE, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                                       GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA};
+    return f >= 0 && f <= 5 ? factors[f] : GL_ONE;
+}
+
+void gg_blend(int64_t win, int64_t src, int64_t dst) {
+    gg_window *w = gg_of(win);
+    if (gg_use(w, "Window.blend")) w->api.glBlendFunc(gg_blend_factor(src), gg_blend_factor(dst));
+}
+
+/* 0 culls back faces, anything else front faces. */
+void gg_cull(int64_t win, int64_t face) {
+    gg_window *w = gg_of(win);
+    if (gg_use(w, "Window.cull")) w->api.glCullFace(face == 0 ? GL_BACK : GL_FRONT);
+}
+
+void gg_depth_write(int64_t win, int64_t on) {
+    gg_window *w = gg_of(win);
+    if (gg_use(w, "Window.depth_write")) w->api.glDepthMask(on ? 1 : 0);
+}
+
+void gg_viewport(int64_t win, int64_t x, int64_t y, int64_t width, int64_t height) {
+    gg_window *w = gg_of(win);
+    if (gg_use(w, "Window.viewport"))
+        w->api.glViewport((int) x, (int) y, (int) width, (int) height);
+}
+
+void gg_scissor(int64_t win, int64_t x, int64_t y, int64_t width, int64_t height) {
+    gg_window *w = gg_of(win);
+    if (gg_use(w, "Window.scissor"))
+        w->api.glScissor((int) x, (int) y, (int) width, (int) height);
+}
+
+void gg_finish(int64_t win) {
+    gg_window *w = gg_of(win);
+    if (gg_use(w, "Window.finish")) w->api.glFinish();
+}
+
+/* A float travels as a one-element vector: `#c` takes no scalar float. */
+void gg_line_width(int64_t win, const double *width, int64_t n) {
+    gg_window *w = gg_of(win);
+    if (n >= 1 && gg_use(w, "Window.line_width")) w->api.glLineWidth((float) width[0]);
+}
+
+void gg_point_size(int64_t win, const double *size, int64_t n) {
+    gg_window *w = gg_of(win);
+    if (n >= 1 && gg_use(w, "Window.point_size")) w->api.glPointSize((float) size[0]);
+}
+
 #else /* no window on this host yet */
 
 int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullscreen) {
@@ -918,6 +1009,51 @@ void gg_draw(int64_t mesh, int64_t shader) {
 }
 void gg_release(int64_t res) {
     (void) res;
+}
+void gg_capability(int64_t win, int64_t cap, int64_t on) {
+    (void) win;
+    (void) cap;
+    (void) on;
+}
+void gg_blend(int64_t win, int64_t src, int64_t dst) {
+    (void) win;
+    (void) src;
+    (void) dst;
+}
+void gg_cull(int64_t win, int64_t face) {
+    (void) win;
+    (void) face;
+}
+void gg_depth_write(int64_t win, int64_t on) {
+    (void) win;
+    (void) on;
+}
+void gg_viewport(int64_t win, int64_t x, int64_t y, int64_t width, int64_t height) {
+    (void) win;
+    (void) x;
+    (void) y;
+    (void) width;
+    (void) height;
+}
+void gg_scissor(int64_t win, int64_t x, int64_t y, int64_t width, int64_t height) {
+    (void) win;
+    (void) x;
+    (void) y;
+    (void) width;
+    (void) height;
+}
+void gg_finish(int64_t win) {
+    (void) win;
+}
+void gg_line_width(int64_t win, const double *width, int64_t n) {
+    (void) win;
+    (void) width;
+    (void) n;
+}
+void gg_point_size(int64_t win, const double *size, int64_t n) {
+    (void) win;
+    (void) size;
+    (void) n;
 }
 
 #endif
