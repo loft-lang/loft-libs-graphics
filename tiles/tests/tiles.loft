@@ -415,3 +415,92 @@ fn test_a_fraction_of_a_shade_dithers_evenly() {
   tiles::draw_ground(t, rows_fixture(), 0, 0, 4, (0, 4, 0, 4), (8, 8, 8, 8));
   assert(column(t, 0, 2, 8) == "...rGbW." && column(t, 1, 2, 8) == ".RgBw...", "ramp: {column(t, 0, 2, 8)} {column(t, 1, 2, 8)}");
 }
+
+// --- Turned: draw_turned ---
+
+// Opaque pixels of a w x h surface, and how many of each fixture colour.
+fn census(s: integer, w: integer, h: integer) -> text {
+  n = 0;
+  r = 0;
+  g = 0;
+  b = 0;
+  wh = 0;
+  for p in tiles::pixels(s, w, h) {
+    if p != 0 { n += 1; }
+    if p == R { r += 1; }
+    if p == G { g += 1; }
+    if p == B { b += 1; }
+    if p == W { wh += 1; }
+  }
+  "{n}: {r} {g} {b} {wh}"
+}
+
+// No turn is draw, in every orientation and about any pivot.
+fn test_no_turn_is_draw() {
+  for o in 0..8 {
+    a = tiles::surface(4, 3) ?? 0;
+    tiles::draw(a, fixture(), 0, 1, 1, (o & 1) != 0, (o & 2) != 0, (o & 4) != 0);
+    b = tiles::surface(4, 3) ?? 0;
+    tiles::draw_turned(b, fixture(), 0, 1, 1, 0, (1, 0), (o & 1) != 0, (o & 2) != 0, (o & 4) != 0);
+    assert(show(tiles::pixels(a, 4, 3)) == show(tiles::pixels(b, 4, 3)), "orientation {o}: {show(tiles::pixels(b, 4, 3))}");
+  }
+}
+
+// Quarter turns about the top-left pixel are draw's quarter turns, moved so that pixel stays:
+// 90 (a quarter turn clockwise) lands at x - 1, 180 (a half turn) at (x - 1, y - 1), 270 (a
+// quarter turn back) at y - 1; and -90 is 270, 450 is 90.
+fn test_quarter_turns_are_draw() {
+  for c in [(90, -1, 0, true, false, true), (180, -1, -1, true, true, false), (270, 0, -1, false, true, true),
+            (-90, 0, -1, false, true, true), (450, -1, 0, true, false, true)] {
+    a = tiles::surface(4, 4) ?? 0;
+    tiles::draw(a, fixture(), 0, 1 + c.1, 1 + c.2, c.3, c.4, c.5);
+    b = tiles::surface(4, 4) ?? 0;
+    tiles::draw_turned(b, fixture(), 0, 1, 1, c.0, (0, 0));
+    assert(show(tiles::pixels(a, 4, 4)) == show(tiles::pixels(b, 4, 4)), "{c.0}: {show(tiles::pixels(b, 4, 4))} against {show(tiles::pixels(a, 4, 4))}");
+  }
+}
+
+// 45 degrees about the bottom-left pixel of the R G B W column tile, drawn at (2, 1) so the
+// pivot is (2, 4).  Each pixel (u, v) about the pivot goes u += round(-0.414 v),
+// v += round(0.707 u), u += round(-0.414 v): R (0, -3) to (2, -2) and (1, -3) to (3, -2); G
+// (0, -2) to (1, -1), (1, -2) to (2, -1); B (0, -1) stays, (1, -1) to (1, 0); W (0, 0) stays,
+// (1, 0) to (1, 1).
+fn test_forty_five_degrees() {
+  s = tiles::surface(6, 6) ?? 0;
+  tiles::draw_turned(s, rows_fixture(), 0, 2, 1, 45, (0, 3));
+  t = "";
+  for y in 2..6 { t += "{column_row(s, y, 6)}/"; }
+  assert(t == "....RR/..BGG./..WB../...W../", "got {t}");
+}
+
+fn column_row(s: integer, y: integer, w: integer) -> text {
+  v = tiles::pixels(s, w, 6);
+  t = "";
+  for x in 0..w { t += letter(v[y * w + x] ?? -1); }
+  t
+}
+
+// Every turn keeps every pixel: at each whole degree of a full turn, the column tile turned about
+// its middle on a surface it cannot leave shows its 8 pixels, two of each colour.
+fn test_every_turn_keeps_every_pixel() {
+  s = tiles::surface(12, 12) ?? 0;
+  bad = "";
+  for deg in -180..181 {
+    tiles::clear(s, 0);
+    tiles::draw_turned(s, rows_fixture(), 0, 5, 4, deg, (1, 2));
+    c = census(s, 12, 12);
+    if c != "8: 2 2 2 2" { bad += "{deg}={c} "; }
+  }
+  assert(bad == "", "lost or doubled pixels: {bad}");
+}
+
+// Turned off the surface's edge it is clipped, and shaded like draw.
+fn test_turned_clips_and_shades() {
+  s = tiles::surface(2, 2) ?? 0;
+  tiles::draw_turned(s, fixture(), 1, -1, -1, 30, (1, 1));
+  tiles::draw_turned(s, fixture(), 1, 50, 50, 30, (1, 1));
+  assert(census(s, 2, 2) != "0: 0 0 0 0", "the corner inside is drawn: {census(s, 2, 2)}");
+  t = tiles::surface(2, 2) ?? 0;
+  tiles::draw_turned(t, fixture(), 1, 0, 0, 0, (0, 0), false, false, false, 7);
+  assert(show(tiles::pixels(t, 2, 2)) == "14791,14791,14791,14791,", "shade 7: {show(tiles::pixels(t, 2, 2))}");
+}
