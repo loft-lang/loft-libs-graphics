@@ -64,21 +64,20 @@ int64_t ip_encode(const uint8_t *rgba, int64_t n, int32_t width, int32_t height,
     unsigned char *png = NULL;
     size_t size = 0;
     unsigned err;
+    LodePNGState state;
     if (width <= 0 || height <= 0 || n != (int64_t) width * height * 4) return 0;
-    if (alpha) {
-        err = lodepng_encode32(&png, &size, rgba, (unsigned) width, (unsigned) height);
-    } else {
-        size_t count = (size_t) width * height, i;
-        unsigned char *rgb = (unsigned char *) malloc(count * 3u);
-        if (!rgb) return 0;
-        for (i = 0; i < count; i++) {
-            rgb[3 * i] = rgba[4 * i];
-            rgb[3 * i + 1] = rgba[4 * i + 1];
-            rgb[3 * i + 2] = rgba[4 * i + 2];
-        }
-        err = lodepng_encode24(&png, &size, rgb, (unsigned) width, (unsigned) height);
-        free(rgb);
-    }
+    /* The file is 8-bit RGB when every pixel is opaque, 8-bit RGBA otherwise — the colour type the
+     * caller asked for, never one lodepng picks.  Its default `auto_convert` re-chooses the mode
+     * from the pixels (a palette, down to 1-bit, or grey), which keeps the pixels but not the
+     * colour type this library promises. */
+    lodepng_state_init(&state);
+    state.encoder.auto_convert = 0;
+    state.info_raw.colortype = LCT_RGBA;
+    state.info_raw.bitdepth = 8;
+    state.info_png.color.colortype = alpha ? LCT_RGBA : LCT_RGB;
+    state.info_png.color.bitdepth = 8;
+    err = lodepng_encode(&png, &size, rgba, (unsigned) width, (unsigned) height, &state);
+    lodepng_state_cleanup(&state);
     if (err != 0 || png == NULL) {
         free(png);
         return 0;

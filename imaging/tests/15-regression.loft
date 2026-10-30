@@ -186,3 +186,27 @@ fn test_save_picks_its_colour_type_from_the_pixels() {
   assert(r0.a == 255 && r3.a == 255, "an RGB file reads back opaque");
   assert(r3.r == 30 && r3.g == 20 && r3.b == 30, "colours intact");
 }
+
+// The colour type is the file's, read from its header (byte 25; byte 24 the bit depth): 8-bit RGB
+// (2) when every pixel is opaque, 8-bit RGBA (6) otherwise — never a palette or a grey type the
+// encoder would pick for few colours, which keeps the pixels and loses the promise.
+fn header_type(path: text) -> text {
+  b = read_bytes(path) ?? [];
+  "{(b[25] ?? 0) as integer}/{(b[24] ?? 0) as integer}"
+}
+
+fn test_the_file_is_8_bit_rgb_or_rgba_whatever_the_colours() {
+  one: vector<Pixel> = [];
+  for _ in 0..9 { one += [Pixel{r: 200, g: 10, b: 10}]; }
+  flat = Image{name: "flat", width: 3, height: 3, data: one};
+  assert(flat.save_png("/tmp/imaging_ct_flat.png"), "save one opaque colour");
+  assert(header_type("/tmp/imaging_ct_flat.png") == "2/8", "one opaque colour is still 8-bit RGB ({header_type("/tmp/imaging_ct_flat.png")})");
+  holed = Image{name: "holed", width: 3, height: 3, data: one};
+  holed.data[4] = Pixel{r: 200, g: 10, b: 10, a: 0};
+  assert(holed.save_png("/tmp/imaging_ct_holed.png"), "save one colour with a hole");
+  assert(header_type("/tmp/imaging_ct_holed.png") == "6/8", "one transparent pixel makes it 8-bit RGBA ({header_type("/tmp/imaging_ct_holed.png")})");
+  back = file("/tmp/imaging_ct_holed.png").png() ?? Image { };
+  p4 = back.data[4]?;
+  p0 = back.data[0]?;
+  assert(p4.a == 0 && p0.a == 255 && p0.r == 200, "and the pixels survive");
+}
