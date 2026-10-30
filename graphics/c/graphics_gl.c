@@ -754,10 +754,21 @@ static signed char gc_yes(gc_id self, gc_sel cmd) {
 
 #define GC_SYM(lib, field, name) (*(void **) (&gc.field) = dlsym(gc.lib, name), gc.field != NULL)
 
+/* Why the last window could not open: said once per process, since a Mac with a window server
+ * that opens none is something to act on (a program with no display answers null quietly). */
+static const char *gc_why;
+static void gc_say_why(void) {
+    static int said;
+    if (said || !gc_why) return;
+    said = 1;
+    fprintf(stderr, "graphics: no window — %s\n", gc_why);
+}
+
 static int gc_load(void) {
     void **mode;
     if (gc.loaded) return gc.loaded > 0;
     gc.loaded = -1;
+    gc_why = "the Objective-C runtime, AppKit or OpenGL.framework did not load";
     gc.objc = dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
     gc.appkit = dlopen("/System/Library/Frameworks/AppKit.framework/AppKit", RTLD_NOW | RTLD_GLOBAL);
     gc.gl = dlopen("/System/Library/Frameworks/OpenGL.framework/OpenGL", RTLD_NOW | RTLD_LOCAL);
@@ -775,6 +786,7 @@ static int gc_load(void) {
     mode = (void **) dlsym(RTLD_DEFAULT, "NSDefaultRunLoopMode");
     if (!mode || !*mode) return 0;
     gc.run_loop_mode = *mode;
+    gc_why = "no NSApplication";
     gc.app = gc_o(gc_class("NSApplication"), "sharedApplication");
     if (!gc.app) return 0;
     gc_v_l(gc.app, "setActivationPolicy:", GC_POLICY_REGULAR);
@@ -813,7 +825,9 @@ static int gg_use(gg_window *w, const char *what) {
 }
 
 /* OpenGL.framework exports every core entry point by name. */
-#define GG_PROC(name) (*(void **) (&w->api.name) = dlsym(gc.gl, #name), w->api.name != NULL)
+#define GG_PROC(name)                                                                             \
+    (*(void **) (&w->api.name) = dlsym(gc.gl, #name),                                             \
+     w->api.name != NULL || (gc_why = "OpenGL.framework has no " #name, 0))
 
 static int gg_bind_gl(gg_window *w) {
     return GG_GL_ALL(GG_PROC);
@@ -1505,7 +1519,10 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
         fprintf(stderr, "graphics: on macOS a window opens on the main thread only\n");
         return 0;
     }
-    if (!gc_load()) return 0;
+    if (!gc_load()) {
+        gc_say_why();
+        return 0;
+    }
     w = (gg_window *) calloc(1, sizeof(gg_window));
     if (!w) return 0;
     w->thread = pthread_self();
@@ -1516,13 +1533,16 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
     cls = gc_class("NSWindow");
     if (fullscreen) {
         gc_id screen = gc_o(gc_class("NSScreen"), "mainScreen");
+        gc_why = "no main screen for a fullscreen window";
         if (!screen || !gc.full_class) goto fail;
         content = gc_rc(screen, "frame");
         style = 0;
         cls = gc.full_class;
         w->fullscreen = 1;
     }
+    gc_why = "a window needs a positive size";
     if (content.width <= 0.0 || content.height <= 0.0) goto fail;
+    gc_why = "NSWindow did not initialise";
     w->window = ((gc_id (*)(gc_id, gc_sel, gc_rect, unsigned long, unsigned long, signed char)) gc.msg)(
         gc_o(cls, "alloc"), gc_s("initWithContentRect:styleMask:backing:defer:"), content, style,
         GC_BACKING_BUFFERED, 0);
@@ -1539,10 +1559,12 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
     w->view = gc_o(w->window, "contentView");
     gc_v_l(w->view, "setWantsBestResolutionOpenGLSurface:", 0);
     w->format = gc_o_p(gc_o(gc_class("NSOpenGLPixelFormat"), "alloc"), "initWithAttributes:", attrs);
+    gc_why = "no pixel format for a 3.2 core, double-buffered, 24-bit depth context";
     if (!w->format) goto fail;
     w->context = ((gc_id (*)(gc_id, gc_sel, gc_id, gc_id)) gc.msg)(
         gc_o(gc_class("NSOpenGLContext"), "alloc"), gc_s("initWithFormat:shareContext:"), w->format,
         NULL);
+    gc_why = "NSOpenGLContext did not initialise";
     if (!w->context) goto fail;
     ((void (*)(gc_id, gc_sel, const int *, long)) gc.msg)(w->context, gc_s("setValues:forParameter:"),
                                                            &one, GC_SWAP_INTERVAL);
@@ -1556,10 +1578,12 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
     gc_v_o(w->context, "setView:", w->view);
     gc_v(w->context, "makeCurrentContext");
     gg_current = w;
+    gc_why = "an OpenGL entry point is missing from OpenGL.framework";
     if (!gg_bind_gl(w)) goto fail;
     bounds = gc_rc(w->view, "bounds");
     w->width = (int) bounds.width;
     w->height = (int) bounds.height;
+    gc_why = "the window's content view has no size";
     if (w->width <= 0 || w->height <= 0) goto fail;
 
     /* 0.9's first frames: depth test on, both buffers opaque black before anything is shown. */
@@ -1575,6 +1599,7 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
     gc.pool_pop(pool);
     return (int64_t) (intptr_t) w;
 fail:
+    gc_say_why();
     gc.pool_pop(pool);
     gg_free(w);
     return 0;

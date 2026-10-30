@@ -9,7 +9,7 @@ use graphics::*;
 use imaging::*;
 
 fn display() -> boolean {
-  (env_variable("DISPLAY") ?? "") != ""
+  (env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1"
 }
 
 // Shows a texture over the whole target.
