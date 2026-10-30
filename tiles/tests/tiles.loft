@@ -233,3 +233,274 @@ fn test_frame() {
   got = show(tiles::pixels(t, 3, 3));
   assert(got == "0,{B},0,{B},{B},0,0,0,{G},", "clipped: {got}");
 }
+
+// --- Ground: draw_ground ---
+//
+// A second fixture: one 2x4 tile, a colour per row — R, G, B, W from the top — so a column read
+// top to bottom shows which tile row each pixel took.  `column(s, x, h)` reads column x of a
+// surface h high, one letter a pixel (. for nothing drawn).
+
+fn rows_fixture() -> integer {
+  bytes: vector<u8> = [];
+  for c in [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)] {
+    bytes += px(c.0, c.1, c.2, 255);
+    bytes += px(c.0, c.1, c.2, 255);
+  }
+  tiles::sheet(bytes, 2, 4, 2, 4) ?? 0
+}
+
+// Shade 1 (x 208 / 256 per channel, rounded down) as lower case: r = 25 << 11, g = 51 << 5,
+// b = 25, w = all three; shade 2 (x 168 / 256) as digits: 1 = 20 << 11, 2 = 41 << 5, 3 = 20,
+// 4 = all three.
+fn letter(p: integer) -> text {
+  if p == R { "R" } else if p == G { "G" } else if p == B { "B" } else if p == W { "W" }
+  else if p == 51200 { "r" } else if p == 1632 { "g" } else if p == 25 { "b" } else if p == 52857 { "w" }
+  else if p == 40960 { "1" } else if p == 1312 { "2" } else if p == 20 { "3" } else if p == 42292 { "4" }
+  else if p == 0 { "." } else { "?" }
+}
+
+fn column(s: integer, x: integer, w: integer, h: integer) -> text {
+  v = tiles::pixels(s, w, h);
+  t = "";
+  for y in 0..h { t += letter(v[y * w + x] ?? -1); }
+  t
+}
+
+// With every lift and shade 0 it is `draw`, in all eight orientations, transparency included.
+fn test_flat_ground_is_draw() {
+  for o in 0..8 {
+    fh = (o & 1) != 0;
+    fv = (o & 2) != 0;
+    fd = (o & 4) != 0;
+    a = tiles::surface(4, 3) ?? 0;
+    tiles::draw(a, fixture(), 0, 1, 1, fh, fv, fd);
+    b = tiles::surface(4, 3) ?? 0;
+    tiles::draw_ground(b, fixture(), 0, 1, 1, (0, 0, 0, 0), (0, 0, 0, 0), fh, fv, fd);
+    assert(show(tiles::pixels(a, 4, 3)) == show(tiles::pixels(b, 4, 3)),
+           "orientation {o}: {show(tiles::pixels(a, 4, 3))} against {show(tiles::pixels(b, 4, 3))}");
+  }
+}
+
+// The top edge lifted 2 at y 2: rows 0 .. 5 (6 pixels for 4 rows), each taking the row under its
+// centre, floor((2k + 1) * 4 / 12): R G G B W W.
+fn test_a_lifted_edge_stretches() {
+  s = tiles::surface(2, 8) ?? 0;
+  tiles::draw_ground(s, rows_fixture(), 0, 0, 2, (2, 2, 0, 0));
+  assert(column(s, 0, 2, 8) == "RGGBWW.." && column(s, 1, 2, 8) == "RGGBWW..", "got {column(s, 0, 2, 8)}");
+}
+
+// The bottom edge lifted 2 at y 0: two pixels, rows floor(4 / 4) = 1 and floor(12 / 4) = 3.
+fn test_a_lifted_bottom_squeezes() {
+  s = tiles::surface(2, 4) ?? 0;
+  tiles::draw_ground(s, rows_fixture(), 0, 0, 0, (0, 0, 2, 2));
+  assert(column(s, 0, 2, 4) == "GW.." && column(s, 1, 2, 4) == "GW..", "got {column(s, 0, 2, 4)}");
+}
+
+// The right corners lifted 4 at y 4: column 0 (centre 1/4 across) lifts round(1) = 1, column 1
+// (3/4) round(3) = 3 — a ramp, each column whole.
+fn test_a_ramp_shears_by_column() {
+  s = tiles::surface(2, 8) ?? 0;
+  tiles::draw_ground(s, rows_fixture(), 0, 0, 4, (0, 4, 0, 4));
+  assert(column(s, 0, 2, 8) == "...RGBW." && column(s, 1, 2, 8) == ".RGBW...",
+         "got {column(s, 0, 2, 8)} {column(s, 1, 2, 8)}");
+}
+
+// Lowered 2 (negative lifts round down, floor(-1.5) = -2): rows 2 .. 5.
+fn test_a_negative_lift_lowers() {
+  s = tiles::surface(2, 8) ?? 0;
+  tiles::draw_ground(s, rows_fixture(), 0, 0, 0, (-2, -2, -2, -2));
+  assert(column(s, 0, 2, 8) == "..RGBW..", "got {column(s, 0, 2, 8)}");
+}
+
+// Two tiles sharing their corners' lifts meet exactly: the north one (y 4, lifts 4 and 2) spans
+// rows 0 .. 5, the south one (y 8, lifts 2 and 0) rows 6 .. 11 — no gap, no overlap.
+fn test_shared_corners_meet_without_a_seam() {
+  s = tiles::surface(2, 16) ?? 0;
+  tiles::draw_ground(s, rows_fixture(), 0, 0, 4, (4, 4, 2, 2));
+  tiles::draw_ground(s, rows_fixture(), 0, 0, 8, (2, 2, 0, 0));
+  assert(column(s, 0, 2, 16) == "RGGBWWRGGBWW....", "got {column(s, 0, 2, 16)}");
+}
+
+// Clipped like draw: lifted 4 at y 2 the tile spans rows -2 .. 1, and only rows 0, 1 (tile rows
+// floor(20 / 8) = 2 and 3) are drawn.  A ramp (0, 4, 0, 4) at x -1 shows only its second
+// column, at the surface's x 0: lifted 3, it spans rows -3 .. 0, so only its last row (W) shows.
+fn test_ground_clips() {
+  s = tiles::surface(2, 4) ?? 0;
+  tiles::draw_ground(s, rows_fixture(), 0, 0, 2, (4, 4, 4, 4));
+  assert(column(s, 0, 2, 4) == "BW.." && column(s, 1, 2, 4) == "BW..", "top: {column(s, 0, 2, 4)}");
+  t = tiles::surface(2, 4) ?? 0;
+  tiles::draw_ground(t, rows_fixture(), 0, -1, 0, (0, 4, 0, 4));
+  assert(column(t, 0, 2, 4) == "W..." && column(t, 1, 2, 4) == "....", "left: {column(t, 0, 2, 4)} {column(t, 1, 2, 4)}");
+}
+
+// Shade 0 at the top corners, 16 (one shade) at the bottom: the white 2x2 tile's rows are
+// 4 and 12 sixteenths darker (interpolated at the row centres, (16 * 1 + 2) / 4 and
+// (16 * 3 + 2) / 4), so a pixel takes shade 1 where that exceeds its dither threshold — row 0
+// (thresholds 0, 8): the first; row 1 (12, 4): the second.  Shade 1 of white is 52857.
+fn test_shade_fades_with_a_dither() {
+  s = tiles::surface(2, 2) ?? 0;
+  tiles::draw_ground(s, fixture(), 1, 0, 0, (0, 0, 0, 0), (0, 0, 16, 16));
+  got = show(tiles::pixels(s, 2, 2));
+  assert(got == "52857,{W},{W},52857,", "got {got}");
+}
+
+// Whole shades need no dither: 32 sixteenths everywhere is shade 2 on every pixel; past the
+// darkest it is the darkest (14791 for white), and below 0 it is the tile as it is.
+fn test_shade_whole_and_clamped() {
+  s = tiles::surface(2, 2) ?? 0;
+  tiles::draw(s, fixture(), 1, 0, 0, false, false, false, 2);
+  want = show(tiles::pixels(s, 2, 2));
+  t = tiles::surface(2, 2) ?? 0;
+  tiles::draw_ground(t, fixture(), 1, 0, 0, (0, 0, 0, 0), (32, 32, 32, 32));
+  assert(show(tiles::pixels(t, 2, 2)) == want, "shade 2: {show(tiles::pixels(t, 2, 2))} against {want}");
+  u = tiles::surface(2, 2) ?? 0;
+  tiles::draw_ground(u, fixture(), 1, 0, 0, (0, 0, 0, 0), (999, 999, 999, 999));
+  assert(show(tiles::pixels(u, 2, 2)) == "14791,14791,14791,14791,", "darkest: {show(tiles::pixels(u, 2, 2))}");
+  v = tiles::surface(2, 2) ?? 0;
+  tiles::draw_ground(v, fixture(), 1, 0, 0, (0, 0, 0, 0), (-50, -50, -50, -50));
+  assert(show(tiles::pixels(v, 2, 2)) == "{W},{W},{W},{W},", "lightest: {show(tiles::pixels(v, 2, 2))}");
+}
+
+// Half pixels round up: a ramp (0, 2, 0, 2) lifts column 0 by round(0.5) = 1 and column 1 by
+// round(1.5) = 2; lowered (0, -2, 0, -2), round(-0.5) = 0 and round(-1.5) = -1.
+fn test_half_pixels_round_up() {
+  s = tiles::surface(2, 8) ?? 0;
+  tiles::draw_ground(s, rows_fixture(), 0, 0, 2, (0, 2, 0, 2));
+  assert(column(s, 0, 2, 8) == ".RGBW..." && column(s, 1, 2, 8) == "RGBW....", "up: {column(s, 0, 2, 8)} {column(s, 1, 2, 8)}");
+  t = tiles::surface(2, 8) ?? 0;
+  tiles::draw_ground(t, rows_fixture(), 0, 0, 2, (0, -2, 0, -2));
+  assert(column(t, 0, 2, 8) == "..RGBW.." && column(t, 1, 2, 8) == "...RGBW.", "down: {column(t, 0, 2, 8)} {column(t, 1, 2, 8)}");
+}
+
+// Uneven shared corners still meet: north at y 5 lifted (3, 5, 1, 2), south at y 9 (1, 2, 0, 0).
+// Column 0: the north edge lifted round(14 / 4) = 4 and round(5 / 4) = 1 — rows 1 .. 7, seven
+// pixels, tile rows floor((2k + 1) * 4 / 14) = R R G B B W W; the south one from row 8 to 12,
+// rows floor((2k + 1) * 4 / 10) = R G B B W.  Column 1: lifts round(18 / 4) = 5 and
+// round(7 / 4) = 2 — north rows 0 .. 6, south 7 .. 12 (floor((2k + 1) * 4 / 12) = R G G B W W).
+fn test_uneven_corners_meet_without_a_seam() {
+  s = tiles::surface(2, 16) ?? 0;
+  tiles::draw_ground(s, rows_fixture(), 0, 0, 5, (3, 5, 1, 2));
+  tiles::draw_ground(s, rows_fixture(), 0, 0, 9, (1, 2, 0, 0));
+  assert(column(s, 0, 2, 16) == ".RRGBBWWRGBBW..." && column(s, 1, 2, 16) == "RRGBBWWRGGBWW...",
+         "got {column(s, 0, 2, 16)} {column(s, 1, 2, 16)}");
+}
+
+// A ramp in one whole shade: the ramp of test_a_ramp_shears_by_column, every pixel shade 2.
+fn test_a_ramp_in_one_shade() {
+  s = tiles::surface(2, 8) ?? 0;
+  tiles::draw_ground(s, rows_fixture(), 0, 0, 4, (0, 4, 0, 4), (32, 32, 32, 32));
+  assert(column(s, 0, 2, 8) == "...1234." && column(s, 1, 2, 8) == ".1234...", "got {column(s, 0, 2, 8)} {column(s, 1, 2, 8)}");
+}
+
+// Stretched and fading: the tile of test_a_lifted_edge_stretches (rows R G G B W W) darkening
+// from 0 at the top corners to 16 at the bottom ones.  Tile row q is 4q + 2 sixteenths dark
+// (floor((16 * (2q + 1) + 4) / 8)), so 2, 6, 10, 14; a pixel takes shade 1 where that exceeds
+// the dither threshold of its TILE row — column 0's thresholds 0, 12, 3, 15 darken rows 0 and 2,
+// column 1's 8, 4, 11, 7 rows 1 and 3 — and a stretched row's two pixels choose alike.
+fn test_a_stretched_tile_fades() {
+  s = tiles::surface(2, 8) ?? 0;
+  tiles::draw_ground(s, rows_fixture(), 0, 0, 2, (2, 2, 0, 0), (0, 0, 16, 16));
+  assert(column(s, 0, 2, 8) == "rGGbWW.." && column(s, 1, 2, 8) == "RggBww..", "got {column(s, 0, 2, 8)} {column(s, 1, 2, 8)}");
+}
+
+// Half a shade (8 sixteenths) everywhere is no whole shade: it dithers, flat and on a ramp alike.
+// A pixel takes shade 1 where 8 exceeds its threshold: flat, the white 2x2 tile's thresholds
+// 0, 8 / 12, 4 darken its first and last pixel; on the ramp of test_a_ramp_shears_by_column,
+// column 0 (0, 12, 3, 15) darkens tile rows 0 and 2, column 1 (8, 4, 11, 7) rows 1 and 3.
+fn test_a_fraction_of_a_shade_dithers_evenly() {
+  s = tiles::surface(2, 2) ?? 0;
+  tiles::draw_ground(s, fixture(), 1, 0, 0, (0, 0, 0, 0), (8, 8, 8, 8));
+  assert(show(tiles::pixels(s, 2, 2)) == "52857,{W},{W},52857,", "flat: {show(tiles::pixels(s, 2, 2))}");
+  t = tiles::surface(2, 8) ?? 0;
+  tiles::draw_ground(t, rows_fixture(), 0, 0, 4, (0, 4, 0, 4), (8, 8, 8, 8));
+  assert(column(t, 0, 2, 8) == "...rGbW." && column(t, 1, 2, 8) == ".RgBw...", "ramp: {column(t, 0, 2, 8)} {column(t, 1, 2, 8)}");
+}
+
+// --- Turned: draw_turned ---
+
+// Opaque pixels of a w x h surface, and how many of each fixture colour.
+fn census(s: integer, w: integer, h: integer) -> text {
+  n = 0;
+  r = 0;
+  g = 0;
+  b = 0;
+  wh = 0;
+  for p in tiles::pixels(s, w, h) {
+    if p != 0 { n += 1; }
+    if p == R { r += 1; }
+    if p == G { g += 1; }
+    if p == B { b += 1; }
+    if p == W { wh += 1; }
+  }
+  "{n}: {r} {g} {b} {wh}"
+}
+
+// No turn is draw, in every orientation and about any pivot.
+fn test_no_turn_is_draw() {
+  for o in 0..8 {
+    a = tiles::surface(4, 3) ?? 0;
+    tiles::draw(a, fixture(), 0, 1, 1, (o & 1) != 0, (o & 2) != 0, (o & 4) != 0);
+    b = tiles::surface(4, 3) ?? 0;
+    tiles::draw_turned(b, fixture(), 0, 1, 1, 0, (1, 0), (o & 1) != 0, (o & 2) != 0, (o & 4) != 0);
+    assert(show(tiles::pixels(a, 4, 3)) == show(tiles::pixels(b, 4, 3)), "orientation {o}: {show(tiles::pixels(b, 4, 3))}");
+  }
+}
+
+// Quarter turns about the top-left pixel are draw's quarter turns, moved so that pixel stays:
+// 90 (a quarter turn clockwise) lands at x - 1, 180 (a half turn) at (x - 1, y - 1), 270 (a
+// quarter turn back) at y - 1; and -90 is 270, 450 is 90.
+fn test_quarter_turns_are_draw() {
+  for c in [(90, -1, 0, true, false, true), (180, -1, -1, true, true, false), (270, 0, -1, false, true, true),
+            (-90, 0, -1, false, true, true), (450, -1, 0, true, false, true)] {
+    a = tiles::surface(4, 4) ?? 0;
+    tiles::draw(a, fixture(), 0, 1 + c.1, 1 + c.2, c.3, c.4, c.5);
+    b = tiles::surface(4, 4) ?? 0;
+    tiles::draw_turned(b, fixture(), 0, 1, 1, c.0, (0, 0));
+    assert(show(tiles::pixels(a, 4, 4)) == show(tiles::pixels(b, 4, 4)), "{c.0}: {show(tiles::pixels(b, 4, 4))} against {show(tiles::pixels(a, 4, 4))}");
+  }
+}
+
+// 45 degrees about the bottom-left pixel of the R G B W column tile, drawn at (2, 1) so the
+// pivot is (2, 4).  Each pixel (u, v) about the pivot goes u += round(-0.414 v),
+// v += round(0.707 u), u += round(-0.414 v): R (0, -3) to (2, -2) and (1, -3) to (3, -2); G
+// (0, -2) to (1, -1), (1, -2) to (2, -1); B (0, -1) stays, (1, -1) to (1, 0); W (0, 0) stays,
+// (1, 0) to (1, 1).
+fn test_forty_five_degrees() {
+  s = tiles::surface(6, 6) ?? 0;
+  tiles::draw_turned(s, rows_fixture(), 0, 2, 1, 45, (0, 3));
+  t = "";
+  for y in 2..6 { t += "{column_row(s, y, 6)}/"; }
+  assert(t == "....RR/..BGG./..WB../...W../", "got {t}");
+}
+
+fn column_row(s: integer, y: integer, w: integer) -> text {
+  v = tiles::pixels(s, w, 6);
+  t = "";
+  for x in 0..w { t += letter(v[y * w + x] ?? -1); }
+  t
+}
+
+// Every turn keeps every pixel: at each whole degree of a full turn, the column tile turned about
+// its middle on a surface it cannot leave shows its 8 pixels, two of each colour.
+fn test_every_turn_keeps_every_pixel() {
+  s = tiles::surface(12, 12) ?? 0;
+  bad = "";
+  for deg in -180..181 {
+    tiles::clear(s, 0);
+    tiles::draw_turned(s, rows_fixture(), 0, 5, 4, deg, (1, 2));
+    c = census(s, 12, 12);
+    if c != "8: 2 2 2 2" { bad += "{deg}={c} "; }
+  }
+  assert(bad == "", "lost or doubled pixels: {bad}");
+}
+
+// Turned off the surface's edge it is clipped, and shaded like draw.
+fn test_turned_clips_and_shades() {
+  s = tiles::surface(2, 2) ?? 0;
+  tiles::draw_turned(s, fixture(), 1, -1, -1, 30, (1, 1));
+  tiles::draw_turned(s, fixture(), 1, 50, 50, 30, (1, 1));
+  assert(census(s, 2, 2) != "0: 0 0 0 0", "the corner inside is drawn: {census(s, 2, 2)}");
+  t = tiles::surface(2, 2) ?? 0;
+  tiles::draw_turned(t, fixture(), 1, 0, 0, 0, (0, 0), false, false, false, 7);
+  assert(show(tiles::pixels(t, 2, 2)) == "14791,14791,14791,14791,", "shade 7: {show(tiles::pixels(t, 2, 2))}");
+}
