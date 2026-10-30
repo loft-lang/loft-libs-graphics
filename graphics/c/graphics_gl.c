@@ -56,6 +56,13 @@ int64_t gg_framebuffer(int64_t win);
 void gg_framebuffer_attach(int64_t fb, int64_t tex);
 void gg_render_to(int64_t win, int64_t fb);
 int64_t gg_quad(int64_t win);
+void gg_mesh_update(int64_t mesh, const float *data, int64_t n);
+void gg_mesh_indices(int64_t mesh, const int64_t *idx, int64_t n);
+void gg_draw_as(int64_t mesh, int64_t shader, int64_t mode, int64_t indexed, int64_t instances);
+int64_t gg_instances(int64_t win, const float *data, int64_t n);
+void gg_buffer_update(int64_t buf, const float *data, int64_t n);
+void gg_instance_attrib(int64_t mesh, int64_t buf, int64_t location, int64_t components,
+                        int64_t stride, int64_t offset);
 
 /* One queued input event: an EV_* tag (src/graphics.loft) and up to four integer fields. */
 #define GG_EVENT_WORDS 5
@@ -216,6 +223,11 @@ typedef struct {
 #define GL_COLOR_ATTACHMENT0 0x8CE0
 #define GL_DEPTH_ATTACHMENT 0x8D00
 #define GL_NONE 0
+#define GL_POINTS 0x0000
+#define GL_LINES 0x0001
+#define GL_ELEMENT_ARRAY_BUFFER 0x8893
+#define GL_DYNAMIC_DRAW 0x88E8
+#define GL_UNSIGNED_INT 0x1405
 
 typedef void *gx_fbconfig;
 typedef void *gx_context;
@@ -315,6 +327,10 @@ typedef struct {
     void (*glFramebufferTexture2D)(unsigned, unsigned, unsigned, unsigned, int);
     void (*glDeleteFramebuffers)(int, const unsigned *);
     void (*glDrawBuffer)(unsigned);
+    void (*glDrawElements)(unsigned, int, unsigned, const void *);
+    void (*glDrawArraysInstanced)(unsigned, int, int, int);
+    void (*glDrawElementsInstanced)(unsigned, int, unsigned, const void *, int);
+    void (*glVertexAttribDivisor)(unsigned, unsigned);
 } gg_api;
 
 typedef struct {
@@ -333,12 +349,13 @@ typedef struct {
 } gg_window;
 
 /* A shader or a mesh: its GL names and the window whose context made them. */
-enum { GG_SHADER = 1, GG_MESH = 2, GG_TEXTURE = 3, GG_FRAMEBUFFER = 4 };
+enum { GG_SHADER = 1, GG_MESH = 2, GG_TEXTURE = 3, GG_FRAMEBUFFER = 4, GG_BUFFER = 5 };
 typedef struct {
     gg_window *w;
     int kind;
-    unsigned id, buffer; /* program; vertex array and its buffer; texture; framebuffer */
-    int vertices;
+    unsigned id, buffer; /* program; vertex array and its buffer; texture; framebuffer; buffer */
+    unsigned indices_id; /* a mesh's index buffer, 0 for none */
+    int vertices, indices, stride;
     int width, height, depth; /* a texture */
     int has_colour; /* a framebuffer: a colour attachment, else it draws to no colour buffer */
 } gg_res;
@@ -431,7 +448,9 @@ static int gg_bind_gl(gg_window *w) {
            GG_PROC(glTexSubImage2D) && GG_PROC(glTexParameteri) && GG_PROC(glDeleteTextures) &&
            GG_PROC(glGenerateMipmap) && GG_PROC(glActiveTexture) && GG_PROC(glGenFramebuffers) &&
            GG_PROC(glBindFramebuffer) && GG_PROC(glFramebufferTexture2D) &&
-           GG_PROC(glDeleteFramebuffers) && GG_PROC(glDrawBuffer);
+           GG_PROC(glDeleteFramebuffers) && GG_PROC(glDrawBuffer) && GG_PROC(glDrawElements) &&
+           GG_PROC(glDrawArraysInstanced) && GG_PROC(glDrawElementsInstanced) &&
+           GG_PROC(glVertexAttribDivisor);
 }
 
 /* An X protocol error while the context is made (a config the server refuses, a context the
@@ -860,6 +879,7 @@ int64_t gg_mesh(int64_t win, const float *data, int64_t n, int64_t stride) {
     gl = &w->api;
     bytes = (int) stride * 4;
     r->vertices = (int) (n / stride);
+    r->stride = (int) stride;
     gl->glGenVertexArrays(1, &r->id);
     gl->glGenBuffers(1, &r->buffer);
     gl->glBindVertexArray(r->id);
@@ -889,19 +909,110 @@ int64_t gg_mesh(int64_t win, const float *data, int64_t n, int64_t stride) {
     return (int64_t) (intptr_t) r;
 }
 
-/* Draw all of `mesh`'s vertices as triangles with `shader`. */
-void gg_draw(int64_t mesh, int64_t shader) {
+/* Draw `mesh` with `shader`: DRAW_TRIANGLES 0, DRAW_LINES 1, DRAW_POINTS 2 (0.9's codes); all
+ * its vertices, or all its indices; `instances` times when that is above 0. */
+void gg_draw_as(int64_t mesh, int64_t shader, int64_t mode, int64_t indexed, int64_t instances) {
     gg_res *m = gg_res_of(mesh), *s = gg_res_of(shader);
+    unsigned prim = mode == 1 ? GL_LINES : mode == 2 ? GL_POINTS : GL_TRIANGLES;
+    gg_api *gl;
     if (!m || !s || m->kind != GG_MESH || s->kind != GG_SHADER) return;
     if (m->w != s->w) {
-        fprintf(stderr, "graphics: Mesh.draw with a shader of another window\n");
+        fprintf(stderr, "graphics: GpuMesh.draw with a shader of another window\n");
         return;
     }
-    if (!gg_use(m->w, "Mesh.draw")) return;
-    m->w->api.glUseProgram(s->id);
-    m->w->api.glBindVertexArray(m->id);
-    m->w->api.glDrawArrays(GL_TRIANGLES, 0, m->vertices);
-    m->w->api.glBindVertexArray(0);
+    if (!gg_use(m->w, "GpuMesh.draw")) return;
+    if (indexed && !m->indices_id) return;
+    gl = &m->w->api;
+    gl->glUseProgram(s->id);
+    gl->glBindVertexArray(m->id);
+    if (indexed && instances > 0)
+        gl->glDrawElementsInstanced(prim, m->indices, GL_UNSIGNED_INT, NULL, (int) instances);
+    else if (indexed)
+        gl->glDrawElements(prim, m->indices, GL_UNSIGNED_INT, NULL);
+    else if (instances > 0)
+        gl->glDrawArraysInstanced(prim, 0, m->vertices, (int) instances);
+    else
+        gl->glDrawArrays(prim, 0, m->vertices);
+    gl->glBindVertexArray(0);
+}
+
+void gg_draw(int64_t mesh, int64_t shader) {
+    gg_draw_as(mesh, shader, 0, 0, 0);
+}
+
+static gg_res *gg_mesh_of(int64_t h, const char *what) {
+    gg_res *r = gg_res_of(h);
+    if (!r || r->kind != GG_MESH || !gg_use(r->w, what)) return NULL;
+    return r;
+}
+
+/* New vertices for the mesh, in the same layout; uploaded for change (DYNAMIC_DRAW). */
+void gg_mesh_update(int64_t mesh, const float *data, int64_t n) {
+    gg_res *r = gg_mesh_of(mesh, "GpuMesh.update");
+    if (!r || r->stride < 3) return;
+    r->vertices = (int) (n / r->stride);
+    r->w->api.glBindBuffer(GL_ARRAY_BUFFER, r->buffer);
+    r->w->api.glBufferData(GL_ARRAY_BUFFER, (intptr_t) r->vertices * r->stride * 4, data,
+                           GL_DYNAMIC_DRAW);
+    r->w->api.glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+/* The mesh's index list, 32 bits each; a second call replaces the first. */
+void gg_mesh_indices(int64_t mesh, const int64_t *idx, int64_t n) {
+    gg_res *r = gg_mesh_of(mesh, "GpuMesh.indices");
+    uint32_t *u;
+    int64_t i;
+    if (!r || n < 0) return;
+    u = (uint32_t *) malloc((size_t) (n > 0 ? n : 1) * 4u);
+    if (!u) return;
+    for (i = 0; i < n; i++) u[i] = (uint32_t) idx[i];
+    r->w->api.glBindVertexArray(r->id);
+    if (!r->indices_id) r->w->api.glGenBuffers(1, &r->indices_id);
+    r->w->api.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->indices_id);
+    r->w->api.glBufferData(GL_ELEMENT_ARRAY_BUFFER, (intptr_t) n * 4, u, GL_STATIC_DRAW);
+    r->w->api.glBindVertexArray(0);
+    r->indices = (int) n;
+    free(u);
+}
+
+/* Per-instance floats, uploaded for change (DYNAMIC_DRAW). */
+int64_t gg_instances(int64_t win, const float *data, int64_t n) {
+    gg_window *w = gg_of(win);
+    gg_res *r;
+    if (!gg_use(w, "Window.instances")) return 0;
+    r = gg_new_res(w, GG_BUFFER);
+    if (!r) return 0;
+    w->api.glGenBuffers(1, &r->id);
+    w->api.glBindBuffer(GL_ARRAY_BUFFER, r->id);
+    w->api.glBufferData(GL_ARRAY_BUFFER, (intptr_t) n * 4, data, GL_DYNAMIC_DRAW);
+    w->api.glBindBuffer(GL_ARRAY_BUFFER, 0);
+    return (int64_t) (intptr_t) r;
+}
+
+void gg_buffer_update(int64_t buf, const float *data, int64_t n) {
+    gg_res *r = gg_res_of(buf);
+    if (!r || r->kind != GG_BUFFER || !gg_use(r->w, "InstanceBuffer.update")) return;
+    r->w->api.glBindBuffer(GL_ARRAY_BUFFER, r->id);
+    r->w->api.glBufferData(GL_ARRAY_BUFFER, (intptr_t) n * 4, data, GL_DYNAMIC_DRAW);
+    r->w->api.glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+/* Feed attribute `location` of `mesh` from `buf`, once per instance: `components` floats at
+ * `offset` floats into each record of `stride` floats. */
+void gg_instance_attrib(int64_t mesh, int64_t buf, int64_t location, int64_t components,
+                        int64_t stride, int64_t offset) {
+    gg_res *m = gg_mesh_of(mesh, "GpuMesh.instance_attrib"), *b = gg_res_of(buf);
+    gg_api *gl;
+    if (!m || !b || b->kind != GG_BUFFER || b->w != m->w || location < 0) return;
+    gl = &m->w->api;
+    gl->glBindVertexArray(m->id);
+    gl->glBindBuffer(GL_ARRAY_BUFFER, b->id);
+    gl->glVertexAttribPointer((unsigned) location, (int) components, GL_FLOAT, 0,
+                              (int) stride * 4, (const void *) (intptr_t) (offset * 4));
+    gl->glEnableVertexAttribArray((unsigned) location);
+    gl->glVertexAttribDivisor((unsigned) location, 1);
+    gl->glBindBuffer(GL_ARRAY_BUFFER, 0);
+    gl->glBindVertexArray(0);
 }
 
 /* Release a shader or a mesh.  After its window closed there is nothing left to delete. */
@@ -917,6 +1028,9 @@ void gg_release(int64_t res) {
         } else if (r->kind == GG_MESH) {
             w->api.glDeleteVertexArrays(1, &r->id);
             w->api.glDeleteBuffers(1, &r->buffer);
+            if (r->indices_id) w->api.glDeleteBuffers(1, &r->indices_id);
+        } else if (r->kind == GG_BUFFER) {
+            w->api.glDeleteBuffers(1, &r->id);
         } else if (r->kind == GG_TEXTURE) {
             w->api.glDeleteTextures(1, &r->id);
         } else {
@@ -1190,6 +1304,7 @@ int64_t gg_quad(int64_t win) {
     if (!r) return 0;
     gl = &w->api;
     r->vertices = 6;
+    r->stride = 4;
     gl->glGenVertexArrays(1, &r->id);
     gl->glGenBuffers(1, &r->buffer);
     gl->glBindVertexArray(r->id);
@@ -1381,6 +1496,44 @@ void gg_render_to(int64_t win, int64_t fb) {
 int64_t gg_quad(int64_t win) {
     (void) win;
     return 0;
+}
+
+void gg_mesh_update(int64_t mesh, const float *data, int64_t n) {
+    (void) mesh;
+    (void) data;
+    (void) n;
+}
+void gg_mesh_indices(int64_t mesh, const int64_t *idx, int64_t n) {
+    (void) mesh;
+    (void) idx;
+    (void) n;
+}
+void gg_draw_as(int64_t mesh, int64_t shader, int64_t mode, int64_t indexed, int64_t instances) {
+    (void) mesh;
+    (void) shader;
+    (void) mode;
+    (void) indexed;
+    (void) instances;
+}
+int64_t gg_instances(int64_t win, const float *data, int64_t n) {
+    (void) win;
+    (void) data;
+    (void) n;
+    return 0;
+}
+void gg_buffer_update(int64_t buf, const float *data, int64_t n) {
+    (void) buf;
+    (void) data;
+    (void) n;
+}
+void gg_instance_attrib(int64_t mesh, int64_t buf, int64_t location, int64_t components,
+                        int64_t stride, int64_t offset) {
+    (void) mesh;
+    (void) buf;
+    (void) location;
+    (void) components;
+    (void) stride;
+    (void) offset;
 }
 
 #endif

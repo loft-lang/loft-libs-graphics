@@ -1538,6 +1538,86 @@ pub fn draw(self: const GpuMesh, shader: const Shader) {
   gg_draw(self.handle, shader.handle);
 }
 
+fn gg_mesh_update(mesh: integer, data: const vector<single>);
+#c "gg_mesh_update" "void(int64_t, const float*, int64_t)"
+fn gg_mesh_indices(mesh: integer, idx: const vector<integer>);
+#c "gg_mesh_indices" "void(int64_t, const int64_t*, int64_t)"
+fn gg_draw_as(mesh: integer, shader: integer, mode: integer, indexed: integer, instances: integer);
+#c "gg_draw_as" "void(int64_t, int64_t, int64_t, int64_t, int64_t)"
+fn gg_instances(win: integer, data: const vector<single>) -> integer;
+#c "gg_instances" "int64_t(int64_t, const float*, int64_t)"
+fn gg_buffer_update(buf: integer, data: const vector<single>);
+#c "gg_buffer_update" "void(int64_t, const float*, int64_t)"
+fn gg_instance_attrib(
+  mesh: integer,
+  buf: integer,
+  location: integer,
+  components: integer,
+  stride: integer,
+  offset: integer
+);
+#c "gg_instance_attrib" "void(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)"
+
+// Draw every vertex of this mesh as `mode`: `DRAW_TRIANGLES`, `DRAW_LINES` or `DRAW_POINTS`.
+pub fn draw_mode(self: const GpuMesh, shader: const Shader, mode: integer) {
+  gg_draw_as(self.handle, shader.handle, mode, 0, 0);
+}
+
+// Replace the vertices, in the same layout; the count follows `len(data) / stride`.  For data that
+// changes every frame.
+pub fn update(self: const GpuMesh, data: const vector<single>) {
+  gg_mesh_update(self.handle, data);
+}
+
+// Give the mesh an index list (a second call replaces the first); `draw_indexed` then draws the
+// vertices it names, in its order.
+pub fn indices(self: const GpuMesh, list: const vector<integer>) {
+  gg_mesh_indices(self.handle, list);
+}
+
+// Draw the vertices the index list names, as `mode`.
+pub fn draw_indexed(self: const GpuMesh, shader: const Shader, mode: integer) {
+  gg_draw_as(self.handle, shader.handle, mode, 1, 0);
+}
+
+// Draw the mesh's triangles `count` times; attributes fed by `instance_attrib` advance once per
+// copy.
+pub fn draw_instanced(self: const GpuMesh, shader: const Shader, count: integer) {
+  gg_draw_as(self.handle, shader.handle, 0, 0, count);
+}
+
+// Feed attribute `location` (use 5 and up: the vertex layout takes 0-4) from `instances`, once per
+// copy: `components` floats at `offset` floats into each record of `stride` floats.
+pub fn instance_attrib(
+  self: const GpuMesh,
+  instances: const InstanceBuffer,
+  location: integer,
+  components: integer,
+  stride: integer,
+  offset: integer
+) {
+  gg_instance_attrib(self.handle, instances.handle, location, components, stride, offset);
+}
+
+// Floats read once per drawn copy of a mesh — a position, a colour — through `instance_attrib`.
+pub struct InstanceBuffer {
+  handle: integer,
+}
+
+fn OpDrop(self: InstanceBuffer) {
+  if self.handle != 0 { gg_release(self.handle); }
+}
+
+// Upload per-copy data, for a mesh to read through `instance_attrib`.
+pub fn instances(self: const Window, data: const vector<single>) -> InstanceBuffer {
+  InstanceBuffer { handle: gg_instances(self.handle, data) }
+}
+
+// Replace the data; meshes reading it see the new values at their next draw.
+pub fn update(self: const InstanceBuffer, data: const vector<single>) {
+  gg_buffer_update(self.handle, data);
+}
+
 // --- Render state: what the next draws do with depth, blending, faces and the frame's area ---
 //
 // The codes are 0.9's: `GL_DEPTH_TEST`, `GL_BLEND`, `GL_CULL_FACE`, `GL_SCISSOR_TEST` for
