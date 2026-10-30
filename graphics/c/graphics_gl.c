@@ -697,6 +697,8 @@ static struct {
     void (*msg_stret)(void); /* objc_msgSend_stret: a returned rect on x86-64; none on arm64 */
     void *(*pool_push)(void);
     void (*pool_pop)(void *);
+    void (*dispatch_sync_f)(void *, void *, void (*)(void *));
+    void *main_queue; /* dispatch_get_main_queue(): `_dispatch_main_q`'s address */
     gc_id app, run_loop_mode, full_class;
     gg_window *open; /* the open windows, each event routed to its own */
 } gc;
@@ -783,9 +785,28 @@ static int gc_load(void) {
 #if defined(__x86_64__)
     if (!GC_SYM(objc, msg_stret, "objc_msgSend_stret")) return 0;
 #endif
+    *(void **) (&gc.dispatch_sync_f) = dlsym(RTLD_DEFAULT, "dispatch_sync_f");
+    gc.main_queue = dlsym(RTLD_DEFAULT, "_dispatch_main_q");
     mode = (void **) dlsym(RTLD_DEFAULT, "NSDefaultRunLoopMode");
-    if (!mode || !*mode) return 0;
+    if (!gc.dispatch_sync_f || !gc.main_queue || !mode || !*mode) return 0;
     gc.run_loop_mode = *mode;
+    gc.loaded = 1;
+    return 1;
+}
+
+/* Run `job` on the main thread, where AppKit makes and drives windows, and wait for it.  On the
+ * main thread already (the interpreter, the C backend) it runs here; from another thread (a
+ * `--native` program runs on a big-stack thread) it is sent to the main queue, which loft's
+ * native `main` serves on macOS (`run_beside_main_queue`). */
+static void gc_on_main(void (*job)(void *), void *arg) {
+    if (pthread_main_np()) job(arg);
+    else gc.dispatch_sync_f(gc.main_queue, arg, job);
+}
+
+/* The application, once, on the main thread: a regular app (a Dock icon, key windows), launched,
+ * and the fullscreen window's class. */
+static int gc_app(void) {
+    if (gc.app) return 1;
     gc_why = "no NSApplication";
     gc.app = gc_o(gc_class("NSApplication"), "sharedApplication");
     if (!gc.app) return 0;
@@ -804,7 +825,6 @@ static int gc_load(void) {
     } else {
         gc.full_class = gc_class("GGFullscreenWindow"); /* registered by an earlier load */
     }
-    gc.loaded = 1;
     return 1;
 }
 
@@ -833,20 +853,17 @@ static int gg_bind_gl(gg_window *w) {
     return GG_GL_ALL(GG_PROC);
 }
 
-/* Close the window: the context (and every GL object in it) and the NSWindow. */
-static void gg_teardown(gg_window *w) {
-    gg_window **link;
-    void *pool;
-    w->closed = 1;
-    if (gc.loaded <= 0) return;
+/* The main thread's half of closing: out of the routing list, the context's drawable, the
+ * NSWindow. */
+static void gc_teardown_main(void *arg) {
+    gg_window *w = (gg_window *) arg, **link;
+    void *pool = gc.pool_push();
     for (link = &gc.open; *link; link = (gg_window **) &(*link)->next_open)
         if (*link == w) {
             *link = (gg_window *) w->next_open;
             break;
         }
-    pool = gc.pool_push();
     if (w->context) {
-        if (gg_current == w) gc_v(gc_class("NSOpenGLContext"), "clearCurrentContext");
         gc_v(w->context, "clearDrawable");
         gc_v(w->context, "release");
     }
@@ -857,7 +874,17 @@ static void gg_teardown(gg_window *w) {
     }
     if (w->fullscreen) gc_v_l(gc.app, "setPresentationOptions:", 0);
     gc.pool_pop(pool);
-    if (gg_current == w) gg_current = NULL;
+}
+
+/* Close the window: the context (and every GL object in it) and the NSWindow. */
+static void gg_teardown(gg_window *w) {
+    w->closed = 1;
+    if (gc.loaded <= 0) return;
+    if (gg_current == w) { /* the context is current on this thread, not the main one */
+        gc_v(gc_class("NSOpenGLContext"), "clearCurrentContext");
+        gg_current = NULL;
+    }
+    gc_on_main(gc_teardown_main, w);
 }
 
 #else /* GG_BROWSER: the page's canvas and WebGL2 context, through its `loft_gl` imports */
@@ -1502,55 +1529,55 @@ static void gg_present(gg_window *w) {
     if (w->target) w->api.glBindFramebuffer(GL_FRAMEBUFFER, w->target);
 }
 
-/* A titled window centred on the main screen, or for `fullscreen` a borderless one over the whole
- * screen, the dock and the menu bar hidden.  The pixel format is 0.9's: double-buffered RGB, no
- * alpha, 24-bit depth.  The drawable is in points (no Retina backing), as the window's size is. */
-int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullscreen) {
-    static const uint32_t attrs[] = {GC_PFA_ACCELERATED, GC_PFA_DOUBLE_BUFFER, GC_PFA_COLOR_SIZE, 24,
-                                     GC_PFA_DEPTH_SIZE, 24, GC_PFA_PROFILE, GC_PROFILE_3_2_CORE, 0};
+/* What opening asks of the main thread, and what it answers. */
+typedef struct {
     gg_window *w;
+    double width, height;
+    const char *title;
+    int fullscreen, ok;
+} gc_open_job;
+
+/* The main thread's half of opening: a titled window centred on the main screen, or for
+ * `fullscreen` a borderless one over the whole screen, the dock and the menu bar hidden; its
+ * context, with 0.9's pixel format (double-buffered RGB, no alpha, 24-bit depth) and the view as
+ * its drawable, in points (no Retina backing), as the window's size is. */
+static void gc_open_main(void *arg) {
+    static const uint32_t attrs[] = {GC_PFA_DOUBLE_BUFFER, GC_PFA_COLOR_SIZE, 24, GC_PFA_DEPTH_SIZE,
+                                     24, GC_PFA_PROFILE, GC_PROFILE_3_2_CORE, 0};
+    gc_open_job *job = (gc_open_job *) arg;
+    gg_window *w = job->w;
     void *pool;
     gc_rect content, bounds;
     unsigned long style = GC_STYLE_TITLED | GC_STYLE_CLOSABLE | GC_STYLE_MINIATURIZABLE |
                           GC_STYLE_RESIZABLE;
     gc_id cls;
     int one = 1;
-    if (!pthread_main_np()) {
-        fprintf(stderr, "graphics: on macOS a window opens on the main thread only\n");
-        return 0;
-    }
-    if (!gc_load()) {
-        gc_say_why();
-        return 0;
-    }
-    w = (gg_window *) calloc(1, sizeof(gg_window));
-    if (!w) return 0;
-    w->thread = pthread_self();
+    if (!gc_app()) return;
     pool = gc.pool_push();
     content.x = content.y = 0.0;
-    content.width = (double) width;
-    content.height = (double) height;
+    content.width = job->width;
+    content.height = job->height;
     cls = gc_class("NSWindow");
-    if (fullscreen) {
+    if (job->fullscreen) {
         gc_id screen = gc_o(gc_class("NSScreen"), "mainScreen");
         gc_why = "no main screen for a fullscreen window";
-        if (!screen || !gc.full_class) goto fail;
+        if (!screen || !gc.full_class) goto done;
         content = gc_rc(screen, "frame");
         style = 0;
         cls = gc.full_class;
         w->fullscreen = 1;
     }
     gc_why = "a window needs a positive size";
-    if (content.width <= 0.0 || content.height <= 0.0) goto fail;
+    if (content.width <= 0.0 || content.height <= 0.0) goto done;
     gc_why = "NSWindow did not initialise";
     w->window = ((gc_id (*)(gc_id, gc_sel, gc_rect, unsigned long, unsigned long, signed char)) gc.msg)(
         gc_o(cls, "alloc"), gc_s("initWithContentRect:styleMask:backing:defer:"), content, style,
         GC_BACKING_BUFFERED, 0);
-    if (!w->window) goto fail;
+    if (!w->window) goto done;
     gc_v_l(w->window, "setReleasedWhenClosed:", 0);
     gc_v_l(w->window, "setAcceptsMouseMovedEvents:", 1);
-    gc_v_o(w->window, "setTitle:", gc_o_p(gc_class("NSString"), "stringWithUTF8String:", title));
-    if (fullscreen) {
+    gc_v_o(w->window, "setTitle:", gc_o_p(gc_class("NSString"), "stringWithUTF8String:", job->title));
+    if (job->fullscreen) {
         gc_v_l(w->window, "setLevel:", GC_MAIN_MENU_LEVEL + 1);
         gc_v_l(gc.app, "setPresentationOptions:", (long) (GC_HIDE_DOCK | GC_HIDE_MENU_BAR));
     } else {
@@ -1558,14 +1585,14 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
     }
     w->view = gc_o(w->window, "contentView");
     gc_v_l(w->view, "setWantsBestResolutionOpenGLSurface:", 0);
-    w->format = gc_o_p(gc_o(gc_class("NSOpenGLPixelFormat"), "alloc"), "initWithAttributes:", attrs);
     gc_why = "no pixel format for a 3.2 core, double-buffered, 24-bit depth context";
-    if (!w->format) goto fail;
+    w->format = gc_o_p(gc_o(gc_class("NSOpenGLPixelFormat"), "alloc"), "initWithAttributes:", attrs);
+    if (!w->format) goto done;
+    gc_why = "NSOpenGLContext did not initialise";
     w->context = ((gc_id (*)(gc_id, gc_sel, gc_id, gc_id)) gc.msg)(
         gc_o(gc_class("NSOpenGLContext"), "alloc"), gc_s("initWithFormat:shareContext:"), w->format,
         NULL);
-    gc_why = "NSOpenGLContext did not initialise";
-    if (!w->context) goto fail;
+    if (!w->context) goto done;
     ((void (*)(gc_id, gc_sel, const int *, long)) gc.msg)(w->context, gc_s("setValues:forParameter:"),
                                                            &one, GC_SWAP_INTERVAL);
     ((void (*)(gc_id, gc_sel, const int *, long)) gc.msg)(w->context, gc_s("setValues:forParameter:"),
@@ -1576,15 +1603,37 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
     gc.open = w;
     gc_pump(); /* the window on screen before its view is drawn into */
     gc_v_o(w->context, "setView:", w->view);
-    gc_v(w->context, "makeCurrentContext");
-    gg_current = w;
-    gc_why = "an OpenGL entry point is missing from OpenGL.framework";
-    if (!gg_bind_gl(w)) goto fail;
     bounds = gc_rc(w->view, "bounds");
     w->width = (int) bounds.width;
     w->height = (int) bounds.height;
     gc_why = "the window's content view has no size";
-    if (w->width <= 0 || w->height <= 0) goto fail;
+    job->ok = w->width > 0 && w->height > 0;
+done:
+    gc.pool_pop(pool);
+}
+
+int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullscreen) {
+    gg_window *w;
+    gc_open_job job;
+    if (!gc_load()) {
+        gc_say_why();
+        return 0;
+    }
+    w = (gg_window *) calloc(1, sizeof(gg_window));
+    if (!w) return 0;
+    w->thread = pthread_self();
+    job.w = w;
+    job.width = (double) width;
+    job.height = (double) height;
+    job.title = title;
+    job.fullscreen = (int) fullscreen;
+    job.ok = 0;
+    gc_on_main(gc_open_main, &job);
+    if (!job.ok) goto fail;
+    gc_v(w->context, "makeCurrentContext"); /* on the thread that draws */
+    gg_current = w;
+    gc_why = "an OpenGL entry point is missing from OpenGL.framework";
+    if (!gg_bind_gl(w)) goto fail;
 
     /* 0.9's first frames: depth test on, both buffers opaque black before anything is shown. */
     w->api.glEnable(GL_DEPTH_TEST);
@@ -1596,40 +1645,46 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
     w->api.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     w->api.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     gg_present(w);
-    gc.pool_pop(pool);
     return (int64_t) (intptr_t) w;
 fail:
     gc_say_why();
-    gc.pool_pop(pool);
     gg_free(w);
     return 0;
 }
 
-/* Take the queued events; a resize applies to the context and the viewport and is queued as a
- * `Resize`; the window's close button ends the loop (a minimised window is still open). */
-int64_t gg_poll(int64_t h) {
-    gg_window *w = gg_of(h);
-    void *pool;
+/* The main thread's half of a poll: every queued event taken (each to its own window), whether
+ * the close button was pressed (a minimised window is still open), and the view's size — a
+ * changed one is applied to the context here, where AppKit wants that done. */
+static void gc_poll_main(void *arg) {
+    gg_window *w = (gg_window *) arg;
+    void *pool = gc.pool_push();
     gc_rect bounds;
     int width, height;
-    if (!gg_use(w, "Window.poll")) return 0;
-    pool = gc.pool_push();
     gc_pump();
-    if (!w->closed) {
-        if (!gc_b(w->window, "isVisible") && !gc_b(w->window, "isMiniaturized")) w->should_close = 1;
-        bounds = gc_rc(w->view, "bounds");
-        width = (int) bounds.width;
-        height = (int) bounds.height;
-        if (width > 0 && height > 0 && (width != w->width || height != w->height)) {
-            gg_use(w, "Window.poll");
-            gc_v(w->context, "update");
-            w->width = width;
-            w->height = height;
-            w->api.glViewport(0, 0, width, height);
-            gg_push(w, GG_EV_RESIZE, width, height, 0, 0);
-        }
+    if (!gc_b(w->window, "isVisible") && !gc_b(w->window, "isMiniaturized")) w->should_close = 1;
+    bounds = gc_rc(w->view, "bounds");
+    width = (int) bounds.width;
+    height = (int) bounds.height;
+    if (width > 0 && height > 0 && (width != w->width || height != w->height)) {
+        gc_v(w->context, "update");
+        w->width = width;
+        w->height = height;
+        gg_push(w, GG_EV_RESIZE, width, height, 0, 0);
     }
     gc.pool_pop(pool);
+}
+
+/* Take the queued events; a resize reaches the viewport and is queued as a `Resize`; the window's
+ * close button ends the loop. */
+int64_t gg_poll(int64_t h) {
+    gg_window *w = gg_of(h);
+    int width, height;
+    if (!gg_use(w, "Window.poll")) return 0;
+    width = w->width;
+    height = w->height;
+    gc_on_main(gc_poll_main, w);
+    if (w->width != width || w->height != height)
+        w->api.glViewport(0, 0, w->width, w->height);
     return !w->should_close;
 }
 
