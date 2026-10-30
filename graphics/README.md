@@ -87,8 +87,9 @@ Everything without a window — the canvas, fonts, PNG output — answers the sa
 
 ## Moving from 0.9
 
-0.10 is a declared break (`api_compatible_with = "0.10.0"`), so `loft update` keeps a 0.9
-program on 0.9 until it moves.  The calls map as: `gl_create_window` → `open_window`;
+0.10 is a declared break (`api_compatible_with = "0.10.0"`): a program whose `loft.lock` holds
+a 0.9 release stays there through `loft update`, which names 0.10.0 as held back, until
+`loft.toml` asks for `>=0.10.0`.  A fresh install with no lock takes 0.10.  The calls map as: `gl_create_window` → `open_window`;
 `gl_poll_events` / `gl_next_event` → `poll` + `events()`; `gl_key_pressed` → `key_down`;
 `gl_create_shader` + `gl_set_uniform_*` → `shader` + `set_*`; `gl_upload_vertices` + `gl_draw`
 → `upload` + `draw`; `gl_create_framebuffer` / `gl_create_color_texture` → `framebuffer` /
