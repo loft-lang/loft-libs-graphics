@@ -16,8 +16,13 @@
  * through its `loft_gl` imports (loft's doc/loft-gl-wasm.js) — the GL function table is filled
  * from them, and everything above it is the same code as on Linux.
  *
- * Other hosts (Windows, macOS, a WASI module) open no window yet: `gg_open` answers 0, which the
- * loft side reports as a null `Window`. */
+ * macOS: AppKit and an `NSOpenGLContext` (a 3.2 core profile, which macOS serves as GL 4.1),
+ * reached through the Objective-C runtime — libobjc, AppKit and OpenGL.framework opened at run
+ * time, each message sent through `objc_msgSend` cast to the method's own type — so it too builds
+ * with loft's fixed flags and no SDK.  A Cocoa window lives on the main thread.
+ *
+ * Other hosts (Windows, a WASI module) open no window yet: `gg_open` answers 0, which the loft
+ * side reports as a null `Window`. */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -91,11 +96,13 @@ void gg_instance_attrib(int64_t mesh, int64_t buf, int64_t location, int64_t com
 
 #if defined(__linux__) && !defined(__wasm__)
 #define GG_X11 1 /* a window through X11 and GLX, opened at run time */
+#elif defined(__APPLE__) && !defined(__wasm__)
+#define GG_COCOA 1 /* a window through AppKit and NSOpenGL, by the Objective-C runtime */
 #elif defined(__wasm__) && defined(LOFT_BROWSER)
 #define GG_BROWSER 1 /* the page's canvas, through its `loft_gl` imports (WebGL2) */
 #endif
 
-#if defined(GG_X11) || defined(GG_BROWSER)
+#if defined(GG_X11) || defined(GG_COCOA) || defined(GG_BROWSER)
 
 #if defined(GG_X11)
 #include <dlfcn.h>
@@ -249,6 +256,61 @@ typedef struct {
 #define GLX_CONTEXT_CORE_PROFILE_BIT_ARB 0x1
 
 #endif /* GG_X11 */
+
+#if defined(GG_COCOA)
+#include <dlfcn.h>
+#include <math.h>
+#include <pthread.h>
+
+/* ── The Objective-C runtime and AppKit, as much as this file uses ───────────────────────────── */
+typedef void *gc_id;
+typedef void *gc_sel;
+typedef struct {
+    double x, y;
+} gc_point;
+typedef struct {
+    double x, y, width, height;
+} gc_rect;
+
+#define GC_STYLE_TITLED 1ul
+#define GC_STYLE_CLOSABLE 2ul
+#define GC_STYLE_MINIATURIZABLE 4ul
+#define GC_STYLE_RESIZABLE 8ul
+#define GC_BACKING_BUFFERED 2ul
+#define GC_POLICY_REGULAR 0l
+#define GC_MAIN_MENU_LEVEL 24l
+#define GC_HIDE_DOCK (1ul << 1)
+#define GC_HIDE_MENU_BAR (1ul << 3)
+
+#define GC_PFA_DOUBLE_BUFFER 5u
+#define GC_PFA_COLOR_SIZE 8u
+#define GC_PFA_DEPTH_SIZE 12u
+#define GC_PFA_ACCELERATED 73u
+#define GC_PFA_PROFILE 99u
+#define GC_PROFILE_3_2_CORE 0x3200u
+#define GC_SWAP_INTERVAL 222l
+#define GC_SURFACE_OPACITY 236l
+
+#define GC_LEFT_DOWN 1ul
+#define GC_LEFT_UP 2ul
+#define GC_RIGHT_DOWN 3ul
+#define GC_RIGHT_UP 4ul
+#define GC_MOVED 5ul
+#define GC_LEFT_DRAGGED 6ul
+#define GC_RIGHT_DRAGGED 7ul
+#define GC_KEY_DOWN 10ul
+#define GC_KEY_UP 11ul
+#define GC_FLAGS_CHANGED 12ul
+#define GC_SCROLL 22ul
+#define GC_OTHER_DOWN 25ul
+#define GC_OTHER_UP 26ul
+#define GC_OTHER_DRAGGED 27ul
+
+#define GC_FLAG_SHIFT (1ul << 17)
+#define GC_FLAG_CONTROL (1ul << 18)
+#define GC_FLAG_OPTION (1ul << 19)
+#define GC_FLAG_COMMAND (1ul << 20)
+#endif /* GG_COCOA */
 
 #define GL_DEPTH_BUFFER_BIT 0x0100
 #define GL_COLOR_BUFFER_BIT 0x4000
@@ -416,6 +478,27 @@ typedef struct {
     void (*glVertexAttribDivisor)(unsigned, unsigned);
 } gg_api;
 
+/* Every entry of `gg_api`, for a platform that looks each one up by name: `P(name)` answers
+ * whether `name` was found. */
+#define GG_GL_ALL(P)                                                                              \
+    (P(glClearColor) && P(glClear) && P(glColorMask) && P(glViewport) && P(glEnable) &&           \
+     P(glReadBuffer) && P(glPixelStorei) && P(glReadPixels) && P(glCreateShader) &&               \
+     P(glShaderSource) && P(glCompileShader) && P(glGetShaderiv) && P(glGetShaderInfoLog) &&      \
+     P(glDeleteShader) && P(glCreateProgram) && P(glAttachShader) && P(glLinkProgram) &&          \
+     P(glGetProgramiv) && P(glGetProgramInfoLog) && P(glDeleteProgram) && P(glUseProgram) &&      \
+     P(glGetUniformLocation) && P(glUniform1f) && P(glUniform2f) && P(glUniform3f) &&             \
+     P(glUniform4f) && P(glUniform1i) && P(glUniformMatrix4fv) && P(glGenVertexArrays) &&         \
+     P(glBindVertexArray) && P(glDeleteVertexArrays) && P(glGenBuffers) && P(glBindBuffer) &&     \
+     P(glBufferData) && P(glDeleteBuffers) && P(glVertexAttribPointer) &&                         \
+     P(glEnableVertexAttribArray) && P(glDrawArrays) && P(glDisable) && P(glBlendFunc) &&         \
+     P(glCullFace) && P(glDepthMask) && P(glScissor) && P(glFinish) && P(glLineWidth) &&          \
+     P(glPointSize) && P(glGenTextures) && P(glBindTexture) && P(glTexImage2D) &&                 \
+     P(glTexSubImage2D) && P(glTexParameteri) && P(glDeleteTextures) && P(glGenerateMipmap) &&    \
+     P(glActiveTexture) && P(glGenFramebuffers) && P(glBindFramebuffer) &&                        \
+     P(glFramebufferTexture2D) && P(glDeleteFramebuffers) && P(glDrawBuffer) &&                   \
+     P(glDrawElements) && P(glDrawArraysInstanced) && P(glDrawElementsInstanced) &&               \
+     P(glVertexAttribDivisor))
+
 typedef struct {
     gg_api api;
 #if defined(GG_X11)
@@ -426,6 +509,11 @@ typedef struct {
     gx_context context;
     pthread_t thread;
     void *im, *ic; /* the input method and context, when the server has one */
+#elif defined(GG_COCOA)
+    gc_id window, view, context, format;
+    int fullscreen;
+    pthread_t thread;
+    void *next_open; /* the next open window: AppKit has one event queue for all of them */
 #endif
     int width, height, should_close;
     int closed; /* `gg_close` ran: the context and the X window are gone */
@@ -526,29 +614,7 @@ static int gg_bind(gg_window *w) {
 static int gg_bind_gl(gg_window *w) {
     *(void **) (&w->xa.glXSwapIntervalEXT) = /* optional */
         w->xa.glXGetProcAddressARB((const unsigned char *) "glXSwapIntervalEXT");
-    return GG_PROC(glClearColor) && GG_PROC(glClear) && GG_PROC(glColorMask) &&
-           GG_PROC(glViewport) && GG_PROC(glEnable) && GG_PROC(glReadBuffer) &&
-           GG_PROC(glPixelStorei) && GG_PROC(glReadPixels) && GG_PROC(glCreateShader) &&
-           GG_PROC(glShaderSource) && GG_PROC(glCompileShader) && GG_PROC(glGetShaderiv) &&
-           GG_PROC(glGetShaderInfoLog) && GG_PROC(glDeleteShader) && GG_PROC(glCreateProgram) &&
-           GG_PROC(glAttachShader) && GG_PROC(glLinkProgram) && GG_PROC(glGetProgramiv) &&
-           GG_PROC(glGetProgramInfoLog) && GG_PROC(glDeleteProgram) && GG_PROC(glUseProgram) &&
-           GG_PROC(glGetUniformLocation) && GG_PROC(glUniform1f) && GG_PROC(glUniform2f) &&
-           GG_PROC(glUniform3f) && GG_PROC(glUniform4f) && GG_PROC(glUniform1i) &&
-           GG_PROC(glUniformMatrix4fv) && GG_PROC(glGenVertexArrays) &&
-           GG_PROC(glBindVertexArray) && GG_PROC(glDeleteVertexArrays) && GG_PROC(glGenBuffers) &&
-           GG_PROC(glBindBuffer) && GG_PROC(glBufferData) && GG_PROC(glDeleteBuffers) &&
-           GG_PROC(glVertexAttribPointer) && GG_PROC(glEnableVertexAttribArray) &&
-           GG_PROC(glDrawArrays) && GG_PROC(glDisable) && GG_PROC(glBlendFunc) &&
-           GG_PROC(glCullFace) && GG_PROC(glDepthMask) && GG_PROC(glScissor) &&
-           GG_PROC(glFinish) && GG_PROC(glLineWidth) && GG_PROC(glPointSize) &&
-           GG_PROC(glGenTextures) && GG_PROC(glBindTexture) && GG_PROC(glTexImage2D) &&
-           GG_PROC(glTexSubImage2D) && GG_PROC(glTexParameteri) && GG_PROC(glDeleteTextures) &&
-           GG_PROC(glGenerateMipmap) && GG_PROC(glActiveTexture) && GG_PROC(glGenFramebuffers) &&
-           GG_PROC(glBindFramebuffer) && GG_PROC(glFramebufferTexture2D) &&
-           GG_PROC(glDeleteFramebuffers) && GG_PROC(glDrawBuffer) && GG_PROC(glDrawElements) &&
-           GG_PROC(glDrawArraysInstanced) && GG_PROC(glDrawElementsInstanced) &&
-           GG_PROC(glVertexAttribDivisor);
+    return GG_GL_ALL(GG_PROC);
 }
 
 /* An X protocol error while the context is made (a config the server refuses, a context the
@@ -611,6 +677,173 @@ static void gg_teardown(gg_window *w) {
     if (w->libgl) dlclose(w->libgl);
     if (w->libx11) dlclose(w->libx11);
     w->closed = 1;
+}
+
+#elif defined(GG_COCOA)
+
+/* The window whose context is current on this thread (speed only, as on X11). */
+static __thread gg_window *gg_current;
+
+/* The runtime, bound once for the process: system libraries are never unloaded. */
+static struct {
+    int loaded; /* 1 bound, -1 could not be */
+    void *objc, *appkit, *gl;
+    gc_id (*get_class)(const char *);
+    gc_sel (*selector)(const char *);
+    gc_id (*allocate_class)(gc_id, const char *, size_t);
+    void (*register_class)(gc_id);
+    signed char (*add_method)(gc_id, gc_sel, void (*)(void), const char *);
+    void (*msg)(void);       /* objc_msgSend, cast at each call to the method's own type */
+    void (*msg_stret)(void); /* objc_msgSend_stret: a returned rect on x86-64; none on arm64 */
+    void *(*pool_push)(void);
+    void (*pool_pop)(void *);
+    gc_id app, run_loop_mode, full_class;
+    gg_window *open; /* the open windows, each event routed to its own */
+} gc;
+
+static gc_sel gc_s(const char *name) {
+    return gc.selector(name);
+}
+static gc_id gc_class(const char *name) {
+    return gc.get_class(name);
+}
+static gc_id gc_o(gc_id o, const char *s) {
+    return ((gc_id (*)(gc_id, gc_sel)) gc.msg)(o, gc_s(s));
+}
+static gc_id gc_o_p(gc_id o, const char *s, const void *a) {
+    return ((gc_id (*)(gc_id, gc_sel, const void *)) gc.msg)(o, gc_s(s), a);
+}
+static void gc_v(gc_id o, const char *s) {
+    ((void (*)(gc_id, gc_sel)) gc.msg)(o, gc_s(s));
+}
+static void gc_v_o(gc_id o, const char *s, gc_id a) {
+    ((void (*)(gc_id, gc_sel, gc_id)) gc.msg)(o, gc_s(s), a);
+}
+static void gc_v_l(gc_id o, const char *s, long a) { /* an integer, enum or BOOL argument */
+    ((void (*)(gc_id, gc_sel, long)) gc.msg)(o, gc_s(s), a);
+}
+static unsigned long gc_l(gc_id o, const char *s) { /* an NSInteger, NSUInteger or enum */
+    return ((unsigned long (*)(gc_id, gc_sel)) gc.msg)(o, gc_s(s));
+}
+static int gc_b(gc_id o, const char *s) { /* a BOOL: only its low byte is defined */
+    return ((signed char (*)(gc_id, gc_sel)) gc.msg)(o, gc_s(s)) != 0;
+}
+static double gc_d(gc_id o, const char *s) {
+    return ((double (*)(gc_id, gc_sel)) gc.msg)(o, gc_s(s));
+}
+static gc_point gc_pt(gc_id o, const char *s) {
+    return ((gc_point (*)(gc_id, gc_sel)) gc.msg)(o, gc_s(s));
+}
+static gc_rect gc_rc(gc_id o, const char *s) {
+#if defined(__x86_64__)
+    gc_rect r;
+    ((void (*)(gc_rect *, gc_id, gc_sel)) gc.msg_stret)(&r, o, gc_s(s));
+    return r;
+#else
+    return ((gc_rect (*)(gc_id, gc_sel)) gc.msg)(o, gc_s(s));
+#endif
+}
+
+/* A borderless window takes no keys unless its class says it can: the fullscreen window's class,
+ * made at run time, answers yes. */
+static signed char gc_yes(gc_id self, gc_sel cmd) {
+    (void) self;
+    (void) cmd;
+    return 1;
+}
+
+#define GC_SYM(lib, field, name) (*(void **) (&gc.field) = dlsym(gc.lib, name), gc.field != NULL)
+
+static int gc_load(void) {
+    void **mode;
+    if (gc.loaded) return gc.loaded > 0;
+    gc.loaded = -1;
+    gc.objc = dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
+    gc.appkit = dlopen("/System/Library/Frameworks/AppKit.framework/AppKit", RTLD_NOW | RTLD_GLOBAL);
+    gc.gl = dlopen("/System/Library/Frameworks/OpenGL.framework/OpenGL", RTLD_NOW | RTLD_LOCAL);
+    if (!gc.objc || !gc.appkit || !gc.gl) return 0;
+    if (!(GC_SYM(objc, get_class, "objc_getClass") && GC_SYM(objc, selector, "sel_registerName") &&
+          GC_SYM(objc, allocate_class, "objc_allocateClassPair") &&
+          GC_SYM(objc, register_class, "objc_registerClassPair") &&
+          GC_SYM(objc, add_method, "class_addMethod") && GC_SYM(objc, msg, "objc_msgSend") &&
+          GC_SYM(objc, pool_push, "objc_autoreleasePoolPush") &&
+          GC_SYM(objc, pool_pop, "objc_autoreleasePoolPop")))
+        return 0;
+#if defined(__x86_64__)
+    if (!GC_SYM(objc, msg_stret, "objc_msgSend_stret")) return 0;
+#endif
+    mode = (void **) dlsym(RTLD_DEFAULT, "NSDefaultRunLoopMode");
+    if (!mode || !*mode) return 0;
+    gc.run_loop_mode = *mode;
+    gc.app = gc_o(gc_class("NSApplication"), "sharedApplication");
+    if (!gc.app) return 0;
+    gc_v_l(gc.app, "setActivationPolicy:", GC_POLICY_REGULAR);
+    gc_v(gc.app, "finishLaunching");
+    gc.full_class = gc.allocate_class(gc_class("NSWindow"), "GGFullscreenWindow", 0);
+    if (gc.full_class) {
+#if defined(__x86_64__)
+        const char *types = "c@:";
+#else
+        const char *types = "B@:";
+#endif
+        gc.add_method(gc.full_class, gc_s("canBecomeKeyWindow"), (void (*)(void)) gc_yes, types);
+        gc.add_method(gc.full_class, gc_s("canBecomeMainWindow"), (void (*)(void)) gc_yes, types);
+        gc.register_class(gc.full_class);
+    } else {
+        gc.full_class = gc_class("GGFullscreenWindow"); /* registered by an earlier load */
+    }
+    gc.loaded = 1;
+    return 1;
+}
+
+static int gg_on_thread(gg_window *w, const char *what) {
+    if (pthread_equal(w->thread, pthread_self())) return 1;
+    fprintf(stderr, "graphics: %s called from a thread other than the one that opened the "
+                    "window; a window is used on its own thread only\n", what);
+    return 0;
+}
+
+static int gg_use(gg_window *w, const char *what) {
+    if (!w || w->closed || !gg_on_thread(w, what)) return 0;
+    if (gg_current != w) {
+        gc_v(w->context, "makeCurrentContext");
+        gg_current = w;
+    }
+    return 1;
+}
+
+/* OpenGL.framework exports every core entry point by name. */
+#define GG_PROC(name) (*(void **) (&w->api.name) = dlsym(gc.gl, #name), w->api.name != NULL)
+
+static int gg_bind_gl(gg_window *w) {
+    return GG_GL_ALL(GG_PROC);
+}
+
+/* Close the window: the context (and every GL object in it) and the NSWindow. */
+static void gg_teardown(gg_window *w) {
+    gg_window **link;
+    void *pool;
+    w->closed = 1;
+    if (gc.loaded <= 0) return;
+    for (link = &gc.open; *link; link = (gg_window **) &(*link)->next_open)
+        if (*link == w) {
+            *link = (gg_window *) w->next_open;
+            break;
+        }
+    pool = gc.pool_push();
+    if (w->context) {
+        if (gg_current == w) gc_v(gc_class("NSOpenGLContext"), "clearCurrentContext");
+        gc_v(w->context, "clearDrawable");
+        gc_v(w->context, "release");
+    }
+    if (w->format) gc_v(w->format, "release");
+    if (w->window) {
+        gc_v(w->window, "close");
+        gc_v(w->window, "release");
+    }
+    if (w->fullscreen) gc_v_l(gc.app, "setPresentationOptions:", 0);
+    gc.pool_pop(pool);
+    if (gg_current == w) gg_current = NULL;
 }
 
 #else /* GG_BROWSER: the page's canvas and WebGL2 context, through its `loft_gl` imports */
@@ -1062,6 +1295,317 @@ int64_t gg_poll(int64_t h) {
     return !w->should_close;
 }
 
+#elif defined(GG_COCOA)
+
+/* 0.9's key codes from a virtual key code: the named keys by their place on the keyboard, a
+ * character key by what it types with Shift alone (`charactersIgnoringModifiers`), lower-cased —
+ * so Shift+1 is `!`, as X11 reports it — and -1 for a key there is no code for. */
+static int64_t gc_key_code(unsigned kc, gc_id ev) {
+    static const unsigned char fkeys[12] = {0x7A, 0x78, 0x63, 0x76, 0x60, 0x61,
+                                            0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F};
+    const char *chars;
+    int i;
+    for (i = 0; i < 12; i++)
+        if (kc == fkeys[i]) return 135 + i; /* F1-F12 */
+    if (kc >= 0x52 && kc <= 0x59) return '0' + (int64_t) (kc - 0x52); /* keypad 0-7 */
+    switch (kc) {
+    case 0x5B: return '8';
+    case 0x5C: return '9';
+    case 0x24: case 0x4C: return 13; /* Return, keypad Enter */
+    case 0x35: return 27;  /* Escape */
+    case 0x30: return 9;   /* Tab */
+    case 0x33: return 8;   /* Delete, which types a backspace */
+    case 0x7E: return 128; /* Up */
+    case 0x7D: return 129; /* Down */
+    case 0x7B: return 130; /* Left */
+    case 0x7C: return 131; /* Right */
+    case 0x38: case 0x3C: return 132; /* Shift */
+    case 0x3B: case 0x3E: return 133; /* Control */
+    case 0x75: return 147; /* forward delete */
+    case 0x72: return 148; /* Help, where Insert is */
+    case 0x73: return 149; /* Home */
+    case 0x77: return 150; /* End */
+    case 0x74: return 151; /* Page Up */
+    case 0x79: return 152; /* Page Down */
+    case 0x3A: case 0x3D: case 0x37: case 0x36: case 0x39: return -1; /* Option, Command, Caps */
+    default: break;
+    }
+    if (!ev) return -1;
+    chars = (const char *) gc_o(gc_o(ev, "charactersIgnoringModifiers"), "UTF8String");
+    if (chars && chars[0] >= 0x20 && chars[0] <= 0x7e && chars[1] == 0)
+        return chars[0] >= 'A' && chars[0] <= 'Z' ? chars[0] + 32 : chars[0];
+    return -1;
+}
+
+static int64_t gc_mods(unsigned long flags) {
+    return ((flags & GC_FLAG_SHIFT) ? GG_MOD_SHIFT : 0) | ((flags & GC_FLAG_CONTROL) ? GG_MOD_CTRL : 0) |
+           ((flags & GC_FLAG_OPTION) ? GG_MOD_ALT : 0) | ((flags & GC_FLAG_COMMAND) ? GG_MOD_SUPER : 0);
+}
+
+/* A key: KeyDown (a repeat when it is already down) and the Text it typed, or KeyUp — the
+ * modifiers as they stood before the event, as on X11.  What a key types is AppKit's, except
+ * where X11 types something else: Delete types a backspace "\b", forward delete "\x7f", and the
+ * keys that type nothing (arrows, F-keys: U+F700-U+F8FF here) no Text. */
+static void gc_key(gg_window *w, gc_id ev, int press) {
+    unsigned kc = (unsigned) gc_l(ev, "keyCode");
+    int64_t code = gc_key_code(kc, ev);
+    int64_t mods = gc_mods(gc_l(ev, "modifierFlags"));
+    if (!press) {
+        if (code >= 0 && code < 256) w->keys[code] = 0;
+        gg_push(w, GG_EV_KEY_UP, code, mods, 0, 0);
+        return;
+    }
+    {
+        int repeat = code >= 0 && code < 256 && w->keys[code];
+        const char *text = (const char *) gc_o(gc_o(ev, "characters"), "UTF8String");
+        size_t n = text ? strlen(text) : 0;
+        if (code >= 0 && code < 256) w->keys[code] = 1;
+        gg_push(w, GG_EV_KEY_DOWN, code, mods, repeat, 0);
+        if (kc == 0x33) text = "\b", n = 1;
+        else if (kc == 0x75) text = "\x7f", n = 1;
+        else if (n == 3 && (unsigned char) text[0] == 0xEF && (unsigned char) text[1] >= 0x9C &&
+                 (unsigned char) text[1] <= 0xA3)
+            n = 0; /* U+F700-U+F8FF: AppKit's function-key characters */
+        if (n > 0) gg_text_push(w, text, (int) n);
+    }
+}
+
+/* Shift, Control, Option, Command: AppKit reports them as the modifier state changing.  The
+ * key's bit in the new state says press or release; the state before is the new one without it
+ * (a press) or with it (a release). */
+static void gc_flags(gg_window *w, gc_id ev) {
+    unsigned kc = (unsigned) gc_l(ev, "keyCode");
+    unsigned long flags = gc_l(ev, "modifierFlags"), bit;
+    int64_t code = gc_key_code(kc, NULL);
+    int press;
+    switch (kc) {
+    case 0x38: case 0x3C: bit = GC_FLAG_SHIFT; break;
+    case 0x3B: case 0x3E: bit = GC_FLAG_CONTROL; break;
+    case 0x3A: case 0x3D: bit = GC_FLAG_OPTION; break;
+    case 0x37: case 0x36: bit = GC_FLAG_COMMAND; break;
+    default: return; /* Caps Lock, Fn */
+    }
+    press = (flags & bit) != 0;
+    if (code >= 0 && code < 256) w->keys[code] = (unsigned char) press;
+    gg_push(w, press ? GG_EV_KEY_DOWN : GG_EV_KEY_UP, code,
+            gc_mods(press ? flags & ~bit : flags | bit), 0, 0);
+}
+
+/* The event's place in pixels from the content's top left (AppKit's y runs up from the bottom). */
+static void gc_where(gg_window *w, gc_id ev, int *x, int *y) {
+    gc_point p = gc_pt(ev, "locationInWindow");
+    *x = (int) floor(p.x);
+    *y = (int) floor((double) w->height - p.y);
+}
+
+static void gc_event(gg_window *w, gc_id ev, unsigned long type) {
+    int x, y, bit = 0, inside;
+    double dy;
+    switch (type) {
+    case GC_KEY_DOWN:
+    case GC_KEY_UP:
+        gc_key(w, ev, type == GC_KEY_DOWN);
+        return;
+    case GC_FLAGS_CHANGED:
+        gc_flags(w, ev);
+        return;
+    default:
+        break;
+    }
+    gc_where(w, ev, &x, &y);
+    inside = x >= 0 && y >= 0 && x < w->width && y < w->height;
+    switch (type) {
+    case GC_LEFT_DOWN: case GC_LEFT_UP: bit = 1; break;
+    case GC_RIGHT_DOWN: case GC_RIGHT_UP: bit = 2; break;
+    case GC_OTHER_DOWN: case GC_OTHER_UP: bit = gc_l(ev, "buttonNumber") == 2 ? 4 : 0; break;
+    case GC_MOVED: case GC_LEFT_DRAGGED: case GC_RIGHT_DRAGGED: case GC_OTHER_DRAGGED:
+        if (!inside && !w->buttons) return; /* over the title bar */
+        w->mouse_x = x;
+        w->mouse_y = y;
+        gg_push(w, GG_EV_MOUSE_MOVE, x, y, 0, 0);
+        return;
+    case GC_SCROLL:
+        dy = gc_d(ev, "scrollingDeltaY");
+        if (!inside || dy == 0.0) return;
+        w->mouse_x = x;
+        w->mouse_y = y;
+        gg_push(w, GG_EV_WHEEL, dy > 0.0 ? 1 : -1, x, y, 0);
+        return;
+    default:
+        return;
+    }
+    if (!bit) return;
+    if (type == GC_LEFT_DOWN || type == GC_RIGHT_DOWN || type == GC_OTHER_DOWN) {
+        if (!inside) return; /* the title bar or a border: the window's, not the program's */
+        w->buttons |= bit;
+        w->mouse_x = x;
+        w->mouse_y = y;
+        gg_push(w, GG_EV_MOUSE_DOWN, bit, x, y, 0);
+    } else if (w->buttons & bit) { /* a release ends a press, wherever it lands */
+        w->buttons &= ~bit;
+        w->mouse_x = x;
+        w->mouse_y = y;
+        gg_push(w, GG_EV_MOUSE_UP, bit, x, y, 0);
+    }
+}
+
+/* Take every queued event, each to the window it belongs to.  Keys are answered here and not
+ * passed on: AppKit beeps at a key no view takes.  Everything else goes on to AppKit, which moves,
+ * resizes and closes the window. */
+static void gc_pump(void) {
+    gc_id past = gc_o(gc_class("NSDate"), "distantPast");
+    for (;;) {
+        gc_id ev = ((gc_id (*)(gc_id, gc_sel, unsigned long, gc_id, gc_id, signed char)) gc.msg)(
+            gc.app, gc_s("nextEventMatchingMask:untilDate:inMode:dequeue:"), ~0ul, past,
+            gc.run_loop_mode, 1);
+        unsigned long type;
+        gc_id target;
+        gg_window *w;
+        if (!ev) break;
+        type = gc_l(ev, "type");
+        target = gc_o(ev, "window");
+        for (w = gc.open; w; w = (gg_window *) w->next_open)
+            if (w->window == target) {
+                gc_event(w, ev, type);
+                break;
+            }
+        if (type == GC_KEY_DOWN || type == GC_KEY_UP) continue;
+        gc_v_o(gc.app, "sendEvent:", ev);
+    }
+    gc_v(gc.app, "updateWindows");
+}
+
+/* Present an opaque frame: whatever alpha the shaders wrote is forced to 1 first, as 0.9 did. */
+static void gg_present(gg_window *w) {
+    if (w->target) w->api.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    w->api.glColorMask(0, 0, 0, 1);
+    w->api.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    w->api.glClear(GL_COLOR_BUFFER_BIT);
+    w->api.glColorMask(1, 1, 1, 1);
+    gc_v(w->context, "flushBuffer");
+    if (w->target) w->api.glBindFramebuffer(GL_FRAMEBUFFER, w->target);
+}
+
+/* A titled window centred on the main screen, or for `fullscreen` a borderless one over the whole
+ * screen, the dock and the menu bar hidden.  The pixel format is 0.9's: double-buffered RGB, no
+ * alpha, 24-bit depth.  The drawable is in points (no Retina backing), as the window's size is. */
+int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullscreen) {
+    static const uint32_t attrs[] = {GC_PFA_ACCELERATED, GC_PFA_DOUBLE_BUFFER, GC_PFA_COLOR_SIZE, 24,
+                                     GC_PFA_DEPTH_SIZE, 24, GC_PFA_PROFILE, GC_PROFILE_3_2_CORE, 0};
+    gg_window *w;
+    void *pool;
+    gc_rect content, bounds;
+    unsigned long style = GC_STYLE_TITLED | GC_STYLE_CLOSABLE | GC_STYLE_MINIATURIZABLE |
+                          GC_STYLE_RESIZABLE;
+    gc_id cls;
+    int one = 1;
+    if (!pthread_main_np()) {
+        fprintf(stderr, "graphics: on macOS a window opens on the main thread only\n");
+        return 0;
+    }
+    if (!gc_load()) return 0;
+    w = (gg_window *) calloc(1, sizeof(gg_window));
+    if (!w) return 0;
+    w->thread = pthread_self();
+    pool = gc.pool_push();
+    content.x = content.y = 0.0;
+    content.width = (double) width;
+    content.height = (double) height;
+    cls = gc_class("NSWindow");
+    if (fullscreen) {
+        gc_id screen = gc_o(gc_class("NSScreen"), "mainScreen");
+        if (!screen || !gc.full_class) goto fail;
+        content = gc_rc(screen, "frame");
+        style = 0;
+        cls = gc.full_class;
+        w->fullscreen = 1;
+    }
+    if (content.width <= 0.0 || content.height <= 0.0) goto fail;
+    w->window = ((gc_id (*)(gc_id, gc_sel, gc_rect, unsigned long, unsigned long, signed char)) gc.msg)(
+        gc_o(cls, "alloc"), gc_s("initWithContentRect:styleMask:backing:defer:"), content, style,
+        GC_BACKING_BUFFERED, 0);
+    if (!w->window) goto fail;
+    gc_v_l(w->window, "setReleasedWhenClosed:", 0);
+    gc_v_l(w->window, "setAcceptsMouseMovedEvents:", 1);
+    gc_v_o(w->window, "setTitle:", gc_o_p(gc_class("NSString"), "stringWithUTF8String:", title));
+    if (fullscreen) {
+        gc_v_l(w->window, "setLevel:", GC_MAIN_MENU_LEVEL + 1);
+        gc_v_l(gc.app, "setPresentationOptions:", (long) (GC_HIDE_DOCK | GC_HIDE_MENU_BAR));
+    } else {
+        gc_v(w->window, "center");
+    }
+    w->view = gc_o(w->window, "contentView");
+    gc_v_l(w->view, "setWantsBestResolutionOpenGLSurface:", 0);
+    w->format = gc_o_p(gc_o(gc_class("NSOpenGLPixelFormat"), "alloc"), "initWithAttributes:", attrs);
+    if (!w->format) goto fail;
+    w->context = ((gc_id (*)(gc_id, gc_sel, gc_id, gc_id)) gc.msg)(
+        gc_o(gc_class("NSOpenGLContext"), "alloc"), gc_s("initWithFormat:shareContext:"), w->format,
+        NULL);
+    if (!w->context) goto fail;
+    ((void (*)(gc_id, gc_sel, const int *, long)) gc.msg)(w->context, gc_s("setValues:forParameter:"),
+                                                           &one, GC_SWAP_INTERVAL);
+    ((void (*)(gc_id, gc_sel, const int *, long)) gc.msg)(w->context, gc_s("setValues:forParameter:"),
+                                                           &one, GC_SURFACE_OPACITY);
+    gc_v_o(w->window, "makeKeyAndOrderFront:", NULL);
+    gc_v_l(gc.app, "activateIgnoringOtherApps:", 1);
+    w->next_open = gc.open;
+    gc.open = w;
+    gc_pump(); /* the window on screen before its view is drawn into */
+    gc_v_o(w->context, "setView:", w->view);
+    gc_v(w->context, "makeCurrentContext");
+    gg_current = w;
+    if (!gg_bind_gl(w)) goto fail;
+    bounds = gc_rc(w->view, "bounds");
+    w->width = (int) bounds.width;
+    w->height = (int) bounds.height;
+    if (w->width <= 0 || w->height <= 0) goto fail;
+
+    /* 0.9's first frames: depth test on, both buffers opaque black before anything is shown. */
+    w->api.glEnable(GL_DEPTH_TEST);
+    w->caps = 1u << 1;
+    w->api.glViewport(0, 0, w->width, w->height);
+    w->api.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    w->api.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    gg_present(w);
+    w->api.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    w->api.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    gg_present(w);
+    gc.pool_pop(pool);
+    return (int64_t) (intptr_t) w;
+fail:
+    gc.pool_pop(pool);
+    gg_free(w);
+    return 0;
+}
+
+/* Take the queued events; a resize applies to the context and the viewport and is queued as a
+ * `Resize`; the window's close button ends the loop (a minimised window is still open). */
+int64_t gg_poll(int64_t h) {
+    gg_window *w = gg_of(h);
+    void *pool;
+    gc_rect bounds;
+    int width, height;
+    if (!gg_use(w, "Window.poll")) return 0;
+    pool = gc.pool_push();
+    gc_pump();
+    if (!w->closed) {
+        if (!gc_b(w->window, "isVisible") && !gc_b(w->window, "isMiniaturized")) w->should_close = 1;
+        bounds = gc_rc(w->view, "bounds");
+        width = (int) bounds.width;
+        height = (int) bounds.height;
+        if (width > 0 && height > 0 && (width != w->width || height != w->height)) {
+            gg_use(w, "Window.poll");
+            gc_v(w->context, "update");
+            w->width = width;
+            w->height = height;
+            w->api.glViewport(0, 0, width, height);
+            gg_push(w, GG_EV_RESIZE, width, height, 0, 0);
+        }
+    }
+    gc.pool_pop(pool);
+    return !w->should_close;
+}
+
 #else /* GG_BROWSER */
 
 /* Present the frame and give the page its turn: the browser draws it, and its events arrive. */
@@ -1140,7 +1684,7 @@ void gg_clear(int64_t h, int64_t color) {
 void gg_close(int64_t h) {
     gg_window *w = gg_of(h);
     if (!w || w->closed) return;
-#if defined(GG_X11)
+#if defined(GG_X11) || defined(GG_COCOA)
     if (!gg_on_thread(w, "Window.close")) return;
 #endif
     gg_free(w);
