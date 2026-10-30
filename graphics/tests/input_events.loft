@@ -1,27 +1,54 @@
 // Copyright (c) 2026 Jurjen Stellingwerff
 // SPDX-License-Identifier: LGPL-3.0-or-later
 //
-// Binding smoke test for the Gap 01 input-event queue: the queue is pollable
-// without a GL window (gl_next_event / gl_event_* touch only the event queue,
-// not GL), so this validates the loft<->native binding, constant exports, and
-// return marshalling on both interpreter and --native — no display needed.
+// Input arrives as `Event` values: one variant per kind of host input, each carrying its own
+// fields, read with `match` — nothing is latched between events and nothing is read through a
+// separate accessor.  This pins the shape a window's `events()` answers (every variant and its
+// fields, in the order they are declared) and the KEY_* / MOD_* codes `key` and `mods` carry.
+// No window is needed.
 use graphics::*;
 
+fn describe(ev: const Event) -> text {
+  match ev {
+    KeyDown { key, mods, repeat } => "down {key} {mods} {repeat}",
+    KeyUp { key, mods } => "up {key} {mods}",
+    Text { content } => "text {content}",
+    MouseDown { button, x, y } => "press {button} {x} {y}",
+    MouseUp { button, x, y } => "release {button} {x} {y}",
+    MouseMove { x, y } => "move {x} {y}",
+    Wheel { delta, x, y } => "wheel {delta} {x} {y}",
+    TouchBegin { id, x, y } => "touch {id} {x} {y}",
+    TouchMove { id, x, y } => "drag {id} {x} {y}",
+    TouchEnd { id, x, y } => "lift {id} {x} {y}",
+    Resize { width, height } => "resize {width}x{height}",
+  }
+}
+
 fn main() {
-  // With no input, the queue is empty: next_event returns EV_NONE and the
-  // accessors read their reset defaults.
-  assert(graphics::gl_next_event() == graphics::EV_NONE);
-  assert(graphics::gl_event_key() == 0);
-  assert(graphics::gl_event_mods() == 0);
-  assert(graphics::gl_event_text() == "");
-  assert(graphics::gl_event_x() == 0.0);
-  assert(graphics::gl_event_wheel() == 0);
-  // Constants are exported with the expected values (kept in sync with the
-  // native EV_*/MOD_*/KEY_* codes).
-  assert(graphics::EV_TEXT == 3);
-  assert(graphics::EV_RESIZE == 11);
-  assert(graphics::MOD_CTRL == 2);
+  events: vector<Event> = [
+    KeyDown { key: graphics::KEY_HOME, mods: graphics::MOD_CTRL | graphics::MOD_SHIFT, repeat: true },
+    KeyUp { key: graphics::KEY_ENTER, mods: 0 },
+    Text { content: "é!" },
+    MouseDown { button: 1, x: 10.25, y: 20.5 },
+    MouseUp { button: 4, x: 11.25, y: 21.5 },
+    MouseMove { x: 3.5, y: 4.75 },
+    Wheel { delta: -2, x: 5.5, y: 6.5 },
+    TouchBegin { id: 7, x: 1.5, y: 2.5 },
+    TouchMove { id: 7, x: 1.75, y: 2.75 },
+    TouchEnd { id: 7, x: 2.25, y: 3.25 },
+    Resize { width: 640, height: 480 },
+  ];
+  seen = "";
+  for ev in events { seen += describe(ev) + ";"; }
+  assert(seen == "down 149 3 true;up 13 0;text é!;press 1 10.25 20.5;release 4 11.25 21.5;" +
+                 "move 3.5 4.75;wheel -2 5.5 6.5;touch 7 1.5 2.5;drag 7 1.75 2.75;lift 7 2.25 3.25;" +
+                 "resize 640x480;", "every variant carries its own fields: {seen}");
+  // The codes `key` and `mods` carry (the 0.9 table: ASCII lower-cased, named keys above 127).
+  assert(graphics::MOD_SHIFT == 1 && graphics::MOD_CTRL == 2 && graphics::MOD_ALT == 4 && graphics::MOD_SUPER == 8);
   assert(graphics::KEY_HOME == 149);
   assert(graphics::KEY_ENTER == 13);
-  println("graphics input_events smoke: PASS");
+  assert(graphics::KEY_BACKSPACE == 8);
+  assert(graphics::KEY_UP == 128 && graphics::KEY_RIGHT == 131);
+  assert(graphics::KEY_W == 119 && graphics::KEY_SPACE == 32 && graphics::KEY_ESCAPE == 27);
+  println("graphics input events: PASS");
 }

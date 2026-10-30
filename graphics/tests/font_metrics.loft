@@ -1,0 +1,32 @@
+// A `Font`'s metrics are the font's own numbers, the ones fontdue reported for the same file in
+// graphics 0.9: ascent and line height from OS/2's typographic metrics (this font sets
+// USE_TYPO_METRICS: 1491 / -431 / 269 against hhea's 1916 / -434 / 0, 2048 to the em), widths
+// from `hmtx` plus the `kern` table.  The values were measured through fontdue, so a reader that
+// takes hhea, skips kerning or rounds an advance answers a different number here.
+use graphics::*;
+
+fn near(a: float, b: float) -> boolean { (a - b) < 0.0001 && (b - a) < 0.0001 }
+
+fn test_the_fixture_font_measures_as_fontdue_did() {
+  loaded = graphics::load_font("../examples/LiberationSansNarrow-Bold.ttf");
+  assert(loaded != null, "the bundled fixture font must load");
+  f = loaded ?? return;
+  assert(f.units_per_em == 2048, "units per em ({f.units_per_em})");
+  assert(near(f.ascent(20.0), 14.560546875), "ascent at 20px ({f.ascent(20.0)})");
+  assert(near(f.ascent(40.0), 29.12109375), "ascent at 40px ({f.ascent(40.0)})");
+  assert(f.line_height(20.0) == 22, "line height at 20px ({f.line_height(20.0)})");
+  assert(f.line_height(40.0) == 43, "line height at 40px ({f.line_height(40.0)})");
+  assert(near(f.measure("A", 40.0), 23.671875), "A ({f.measure("A", 40.0)})");
+  assert(near(f.measure("V", 40.0), 21.875), "V ({f.measure("V", 40.0)})");
+  assert(near(f.measure("AV", 40.0), 43.14453125), "AV, kerned ({f.measure("AV", 40.0)})");
+  assert(near(f.measure("To", 40.0), 37.67578125), "To, kerned ({f.measure("To", 40.0)})");
+  assert(near(f.measure("Hello, World", 40.0), 190.78125), "a sentence ({f.measure("Hello, World", 40.0)})");
+  assert(near(f.measure("WAVE ffi 123", 40.0), 198.10546875), "kerned capitals and digits ({f.measure("WAVE ffi 123", 40.0)})");
+  assert(f.measure("", 40.0) == 0.0, "nothing measures nothing");
+}
+
+fn test_a_missing_or_foreign_file_is_no_font() {
+  assert(graphics::load_font("../examples/no-such-font.ttf") == null, "a missing file is null");
+  assert(graphics::load_font("../examples/LiberationSansNarrow-Bold.LICENSE.txt") == null,
+         "a file that is not a TrueType font is null");
+}
