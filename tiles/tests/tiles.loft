@@ -504,3 +504,23 @@ fn test_turned_clips_and_shades() {
   tiles::draw_turned(t, fixture(), 1, 0, 0, 0, (0, 0), false, false, false, 7);
   assert(show(tiles::pixels(t, 2, 2)) == "14791,14791,14791,14791,", "shade 7: {show(tiles::pixels(t, 2, 2))}");
 }
+
+// A ghost draws every other pixel, a checkerboard fixed to the surface: the white tile at (1, 1)
+// on a blue surface keeps (1, 1) and (2, 2) — x + y even — and leaves the blue at (2, 1) and
+// (1, 2); at (2, 1) it keeps (3, 1) and (2, 2).  Turned 0 degrees, the same.
+fn test_a_ghost_lets_what_is_behind_show() {
+  s = tiles::surface(4, 3) ?? 0;
+  tiles::clear(s, B);
+  tiles::draw(s, fixture(), 1, 1, 1, false, false, false, 0, true);
+  got = show(tiles::pixels(s, 4, 3));
+  assert(got == "{B},{B},{B},{B},{B},{W},{B},{B},{B},{B},{W},{B},", "at (1, 1): {got}");
+  t = tiles::surface(4, 3) ?? 0;
+  tiles::clear(t, B);
+  tiles::draw(t, fixture(), 1, 2, 1, false, false, false, 0, true);
+  got2 = show(tiles::pixels(t, 4, 3));
+  assert(got2 == "{B},{B},{B},{B},{B},{B},{B},{W},{B},{B},{W},{B},", "at (2, 1): {got2}");
+  u = tiles::surface(4, 3) ?? 0;
+  tiles::clear(u, B);
+  tiles::draw_turned(u, fixture(), 1, 1, 1, 0, (0, 0), false, false, false, 0, true);
+  assert(show(tiles::pixels(u, 4, 3)) == got, "turned 0: {show(tiles::pixels(u, 4, 3))}");
+}

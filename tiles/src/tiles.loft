@@ -156,26 +156,33 @@ pub const SHADES = 8;
 /// A sprite is a tile drawn this way.  Transparent pixels and whatever falls off the surface
 /// are skipped.  `shade` darkens it: 0 is the tile as it is, and each shade up to
 /// `SHADES - 1` is darker, down to about a quarter of the light, so the darkest still shows
-/// what is there.  A shade costs nothing: each sheet keeps its palette at every shade.
+/// what is there.  A shade costs nothing: each sheet keeps its palette at every shade.  A
+/// `ghost` draws every other pixel only, in a checkerboard fixed to the surface — what is behind
+/// shows through: a figure seen through what stands in front of it.
 pub fn draw(surface: integer, sheet: integer, tile: integer, x: integer, y: integer,
             flip_h: boolean = false, flip_v: boolean = false, flip_d: boolean = false,
-            shade: integer = 0) {
+            shade: integer = 0, ghost: boolean = false) {
   s = if shade < 0 { 0 } else if shade >= SHADES { SHADES - 1 } else { shade };
-  tl_draw(surface, sheet, tile, x, y, flags(flip_h, flip_v, flip_d) + s * 256);
+  tl_draw(surface, sheet, tile, x, y, flags(flip_h, flip_v, flip_d) + s * 256 + (if ghost { GHOST } else { 0 }));
 }
+
+// The flags bit of a ghost (c/tiles.c).
+const GHOST = 4096;
 
 /// Draw tile `tile` of `sheet` turned `degrees` clockwise about its pixel `pivot` (x, y within
 /// the tile): placed as `draw` places it at (x, y), oriented by the flips first, then turned —
 /// a character's slight lean as it walks, a weapon held at an angle or swung.  Every pixel of
 /// the tile lands on exactly one pixel of the surface (the turn is whole quarter turns and three
 /// shears of whole rows and columns), so the pixel art keeps its pixels and colours at any angle;
-/// 0 degrees is `draw`, and 90, 180 and 270 are its quarter turns.  The shade, transparency
-/// and clipping are `draw`'s.
+/// 0 degrees is `draw`, and 90, 180 and 270 are its quarter turns.  The shade, the ghost,
+/// transparency and clipping are `draw`'s.
 pub fn draw_turned(surface: integer, sheet: integer, tile: integer, x: integer, y: integer,
                    degrees: integer, pivot: (integer, integer), flip_h: boolean = false,
-                   flip_v: boolean = false, flip_d: boolean = false, shade: integer = 0) {
+                   flip_v: boolean = false, flip_d: boolean = false, shade: integer = 0,
+                   ghost: boolean = false) {
   s = if shade < 0 { 0 } else if shade >= SHADES { SHADES - 1 } else { shade };
-  tl_draw_turned(surface, sheet, tile, x, y, degrees, pivot.0, pivot.1, flags(flip_h, flip_v, flip_d) + s * 256);
+  tl_draw_turned(surface, sheet, tile, x, y, degrees, pivot.0, pivot.1,
+                 flags(flip_h, flip_v, flip_d) + s * 256 + (if ghost { GHOST } else { 0 }));
 }
 
 /// How finely `draw_ground` shades: its darkness is counted in sixteenths of a shade.
