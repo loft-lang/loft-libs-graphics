@@ -4,7 +4,8 @@ version = "0.19.0"
 
 # 0.19 is a declared break: the GL path draws on graphics 0.10's objects — `gl_stage(window)`
 # answers a `StageGl` in place of `painter_new()`'s `Painter`, and `gl_render` takes the window.
-# A 0.18 program keeps 0.18 (and graphics 0.9) until it moves; the software path is unchanged.
+# A program whose loft.lock holds 0.18 keeps it (and graphics 0.9) through `loft update`
+# until it moves; the software path is unchanged.
 api_compatible_with  = "0.19.0"   # oldest own release this is a drop-in for
 data_compatible_with = "0.18.1"   # oldest own release whose stored data this reads
 loft = ">=2026.10.0"
