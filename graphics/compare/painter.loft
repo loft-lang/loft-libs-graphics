@@ -1,0 +1,125 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The 2D painter, sprites and grouped meshes on the C shim against 0.9's helpers (@PLN208 G5).
+// A comparison, not a test — see window.loft for why and how to run it; the oracle is 0.9 on the
+// interpreter.  One frame through the same steps on both paths: two grouped bands (one upserted
+// again), blended rectangles, a linearly filtered image with a transparent texel, and two sprites.
+use graphics::*;
+use imaging::*;
+
+fn display() -> boolean {
+  (env_variable("DISPLAY") ?? "") != ""
+}
+
+const BAND_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+void main() {{ gl_Position = vec4(pos, 1.0); }}
+`;
+
+const BAND_F: text = `
+#version 330 core
+out vec4 frag;
+void main() {{ frag = vec4(0.25, 0.3, 0.45, 1.0); }}
+`;
+
+fn band(x0: float, x1: float, y0: float, y1: float) -> vector<single> {
+  xy = [x0, y0, x1, y0, x1, y1, x0, y0, x1, y1, x0, y1];
+  out: vector<single> = [];
+  for i in 0..6 { out += [xy[2 * i] as single, xy[2 * i + 1] as single, 0.0 as single]; }
+  out
+}
+
+fn picture() -> Canvas {
+  c = canvas(3, 3, 0);
+  c.set_pixel(0, 0, rgba(240, 40, 40, 255));
+  c.set_pixel(1, 0, rgba(40, 240, 40, 255));
+  c.set_pixel(2, 0, rgba(40, 40, 240, 255));
+  c.set_pixel(0, 1, rgba(240, 240, 40, 255));
+  c.set_pixel(1, 1, rgba(40, 240, 240, 0));
+  c.set_pixel(2, 1, rgba(240, 40, 240, 255));
+  c.set_pixel(0, 2, rgba(255, 255, 255, 255));
+  c.set_pixel(1, 2, rgba(128, 128, 128, 255));
+  c.set_pixel(2, 2, rgba(20, 20, 20, 255));
+  c
+}
+
+fn atlas() -> Canvas {
+  c = canvas(8, 4, rgba(200, 60, 30, 255));
+  for y in 0..4 {
+    for x in 4..8 { c.set_pixel(x, y, rgba(30, 90, 210, 255)); }
+  }
+  c.set_pixel(1, 1, rgba(250, 250, 0, 255));
+  c.set_pixel(6, 2, rgba(0, 250, 120, 255));
+  c
+}
+
+fn test_painter_matches_0_9() {
+  if !display() { return; }
+  wo = open_window(96, 72, "g5-painter-new");
+  w = wo ?? return assert(false, "no window");
+  bs = w.shader(BAND_V, BAND_F) ?? return assert(false, "band shader");
+  p = w.painter() ?? return assert(false, "painter");
+  sheet = w.sprites(atlas(), 2, 1) ?? return assert(false, "sprites");
+  w.clear(rgba(15, 15, 20, 255));
+  groups = group_meshes(3, DRAW_TRIANGLES);
+  z = 0.0 as single;
+  groups.upsert(w, 7, band(-0.9, -0.6, -0.9, 0.9), z, z, z, z);
+  groups.upsert(w, 9, band(0.6, 0.9, -0.9, 0.9), z, z, z, z);
+  groups.upsert(w, 7, band(-0.95, -0.7, -0.5, 0.5), z, z, z, z);
+  groups.draw_all(bs);
+  w.enable(GL_BLEND);
+  w.blend(BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA);
+  p.rect(10.0, 6.0, 40.0, 20.0, 1.0, 0.6, 0.1, 1.0);
+  p.rect(30.0, 16.0, 30.0, 30.0, 0.1, 0.5, 1.0, 0.45);
+  t = w.texture_from(picture());
+  p.image(t, 50.0, 30.0, 40.0, 36.0);
+  p.sprite(sheet, 4.0, 40.0, 24.0, 24.0, 0);
+  p.sprite(sheet, 60.0, 4.0, 30.0, 20.0, 1);
+  got = w.capture();
+  w.close();
+
+  assert(gl_create_window(96, 72, "g5-painter-0.9"), "0.9 opens its window");
+  bp = gl_create_shader(BAND_V, BAND_F);
+  assert(bp != 0, "0.9 compiles the band shader");
+  pa = create_painter_2d(96.0, 72.0);
+  ss = create_sprite_sheet(atlas(), 2, 1, painter_vao(pa));
+  gl_clear(rgba(15, 15, 20, 255));
+  set = group_vbos_new(3, DRAW_TRIANGLES);
+  zz = 0.0 as single;
+  group_vbos_upsert(set, 7, band(-0.9, -0.6, -0.9, 0.9), zz, zz, zz, zz);
+  group_vbos_upsert(set, 9, band(0.6, 0.9, -0.9, 0.9), zz, zz, zz, zz);
+  group_vbos_upsert(set, 7, band(-0.95, -0.7, -0.5, 0.5), zz, zz, zz, zz);
+  gl_use_shader(bp);
+  group_vbos_draw_all(set);
+  gl_enable(GL_BLEND);
+  gl_blend_func(BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA);
+  draw_rect_at(pa, 10.0, 6.0, 40.0, 20.0, 1.0, 0.6, 0.1, 1.0);
+  draw_rect_at(pa, 30.0, 16.0, 30.0, 30.0, 0.1, 0.5, 1.0, 0.45);
+  pic = picture();
+  tex = gl_upload_canvas(pic.data, 3, 3);
+  draw_texture_at(pa, tex, 50.0, 30.0, 40.0, 36.0);
+  draw_sprite_at(ss, pa, 4.0, 40.0, 24.0, 24.0, 0);
+  draw_sprite_at(ss, pa, 60.0, 4.0, 30.0, 20.0, 1);
+  shot = "_tmp_gfx_g5_painter_09.png";
+  assert(gl_screenshot(96, 72, shot), "0.9 screenshot");
+  gl_destroy_window();
+  img = file(shot).png() ?? return assert(false, "0.9 screenshot decodes");
+  differ = 0;
+  colours: vector<integer> = [];
+  for i in 0..96 * 72 {
+    q = img.data[i];
+    want = rgba(q.r, q.g, q.b, 255);
+    if (got.data[i] ?? -1) | 0xFF000000 != want { differ += 1; }
+    if len(colours) < 64 {
+      seen = false;
+      for c in colours {
+        if c == want { seen = true; }
+      }
+      if !seen { colours += [want]; }
+    }
+  }
+  assert(len(colours) >= 20, "the frame is rich: {len(colours)} colours");
+  assert(differ == 0, "{differ} of {96 * 72} pixels differ from 0.9");
+}

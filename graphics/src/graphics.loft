@@ -1828,6 +1828,205 @@ pub fn quad(self: const Window) -> GpuMesh {
   GpuMesh { handle: gg_quad(self.handle) }
 }
 
+// --- 2D drawing on a window: rectangles, images and sprites at pixel positions ---
+//
+//   p = w.painter() ?? return;              // origin top-left, y down, sized to the window
+//   p.rect(10.0, 10.0, 100.0, 20.0, 1.0, 0.5, 0.0, 1.0);
+//   p.image(icon, 120.0, 10.0, 32.0, 32.0);
+//   for ev in w.events() { match ev { Resize { width, height } => p.resize(width, height), _ => {} } }
+//
+// Each holds its own shaders and quad, released when it dies.  0.9's `create_painter_2d`,
+// `draw_rect_at`, `draw_texture_at`, `create_sprite_sheet` and `draw_sprite_at` draw the same
+// pixels through integer handles; `Sprites` is the 0.10 `SpriteSheet`.
+
+// Shaders and a unit quad for drawing at pixel positions.
+pub struct Painter {
+  flat: Shader,
+  tex: Shader,
+  quad: GpuMesh,
+  proj: vector<float>,
+}
+
+// The orthographic projection of a `width` x `height` target, origin top-left.
+fn pixel_projection(width: integer, height: integer) -> vector<float> {
+  [
+    2.0 / width as float ?? 0.0, 0.0, 0.0, 0.0, 0.0, -2.0 / height as float ?? 0.0, 0.0, 0.0, 0.0,
+    0.0, -1.0, 0.0, -1.0, 1.0, 0.0, 1.0,
+  ]
+}
+
+// The unit quad (0, 0)-(1, 1) as two triangles.
+fn unit_quad() -> vector<single> {
+  [
+    0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f,
+    1.0f, 0.0f,
+  ]
+}
+
+// A painter for this window, sized to it.  Null when its shaders do not compile.
+pub fn painter(self: const Window) -> Painter? {
+  flat = self.shader(FLAT_VERT_2D, FLAT_FRAG_2D) ?? return null;
+  tex = self.shader(TEX_VERT_2D, TEX_FRAG_2D) ?? return null;
+  Painter {
+    flat: flat,
+    tex: tex,
+    quad: self.upload(unit_quad(), 3),
+    proj: pixel_projection(self.width(), self.height()),
+  }
+}
+
+// Draw for a target of `width` x `height` pixels from now on — after a `Resize`.
+pub fn resize(self: Painter, width: integer, height: integer) {
+  self.proj = pixel_projection(width, height);
+}
+
+// A filled rectangle at (x, y) of `w` x `h` pixels, channels 0.0-1.0; the alpha blends where the
+// window has `GL_BLEND` on.
+pub fn rect(
+  self: const Painter,
+  x: float,
+  y: float,
+  w: float,
+  h: float,
+  r: float,
+  g: float,
+  b: float,
+  a: float
+) {
+  self.flat.set_mat4("uMVP", build_mvp_2d(self.proj, x, y, w, h));
+  self.flat.set_vec3("uColor", r, g, b);
+  self.flat.set_float("uAlpha", a);
+  self.quad.draw(self.flat);
+}
+
+// A texture stretched over (x, y) of `w` x `h` pixels; fully transparent texels are not drawn.
+pub fn image(self: const Painter, t: const Texture, x: float, y: float, w: float, h: float) {
+  t.bind(0);
+  self.tex.set_int("uTex", 0);
+  self.tex.set_mat4("uMVP", build_mvp_2d(self.proj, x, y, w, h));
+  self.quad.draw(self.tex);
+}
+
+// Sprite `index` of `sheet` over (x, y) of `w` x `h` pixels.
+pub fn sprite(
+  self: const Painter,
+  sheet: const Sprites,
+  x: float,
+  y: float,
+  w: float,
+  h: float,
+  index: integer
+) {
+  sheet.draw(build_mvp_2d(self.proj, x, y, w, h), index);
+}
+
+// A canvas atlas on the GPU, cut into a grid of `cols` x `rows` sprites; sprite 0 is the top left,
+// counting along the rows.
+pub struct Sprites {
+  texture: Texture,
+  shader: Shader,
+  quad: GpuMesh,
+  pub const cols: integer,
+  pub const rows: integer,
+}
+
+// Upload `atlas` as a sprite sheet of `cols` x `rows` cells.  Null when its shader does not
+// compile.
+pub fn sprites(self: const Window, atlas: const Canvas, cols: integer, rows: integer) -> Sprites? {
+  sh = self.shader(SPRITE_VERT, SPRITE_FRAG) ?? return null;
+  Sprites {
+    texture: self.texture_from(atlas),
+    shader: sh,
+    quad: self.upload(unit_quad(), 3),
+    cols: cols,
+    rows: rows,
+  }
+}
+
+// Draw sprite `index` through `mvp`, which maps the unit quad onto the target (16 floats,
+// column-major).
+pub fn draw(self: const Sprites, mvp: const vector<float>, index: integer) {
+  if self.cols <= 0 || self.rows <= 0 { return; }
+  // the divisors are positive (checked above), so no `??` default is ever taken
+  col = (index % self.cols) ?? 0;
+  row = (index / self.cols) ?? 0;
+  cols = self.cols as float;
+  rows = self.rows as float;
+  self.texture.bind(0);
+  self.shader.set_int("uTex", 0);
+  self.shader.set_float("uU0", (col as float / cols) ?? 0.0);
+  self.shader.set_float("uV0", (row as float / rows) ?? 0.0);
+  self.shader.set_float("uU1", ((col + 1) as float / cols) ?? 0.0);
+  self.shader.set_float("uV1", ((row + 1) as float / rows) ?? 0.0);
+  self.shader.set_mat4("uMVP", mvp);
+  self.quad.draw(self.shader);
+}
+
+// A mesh in groups, each re-uploaded on its own: after an edit only the groups whose geometry
+// changed go to the GPU again (`upsert`), every other keeps its buffer.  All groups share one
+// vertex layout (`stride` floats) and one draw mode.  Each group records its world XZ bounds.
+pub struct GroupMeshes {
+  slots: hash<GroupSlot[gk]>,
+  meshes: vector<GpuMesh>,
+  pub const stride: integer,
+  pub const mode: integer,
+}
+
+// Where group `gk` lives in `meshes`, and its bounds.
+struct GroupSlot {
+  const gk: integer,
+  at: integer,
+  min_x: single,
+  min_z: single,
+  max_x: single,
+  max_z: single,
+}
+
+// An empty set for vertices of `stride` floats, drawn as `mode` (`DRAW_TRIANGLES`, …).
+pub fn group_meshes(stride: integer, mode: integer) -> GroupMeshes {
+  GroupMeshes { slots: [], meshes: [], stride: stride, mode: mode }
+}
+
+// Upload group `gk`'s vertices — a new group, or new geometry for one already there (its buffer is
+// reused).  No vertices empties the group.
+pub fn upsert(
+  self: GroupMeshes,
+  w: const Window,
+  gk: integer,
+  verts: const vector<single>,
+  min_x: single,
+  min_z: single,
+  max_x: single,
+  max_z: single
+) {
+  old = self.slots[gk];
+  if old != null {
+    old.min_x = min_x;
+    old.min_z = min_z;
+    old.max_x = max_x;
+    old.max_z = max_z;
+    mesh = self.meshes[old.at] ?? return; // `at` names a mesh: slots and meshes grow together
+    mesh.update(verts);
+    return;
+  }
+  self.slots += [
+    GroupSlot {
+      gk: gk,
+      at: len(self.meshes),
+      min_x: min_x,
+      min_z: min_z,
+      max_x: max_x,
+      max_z: max_z,
+    },
+  ];
+  self.meshes += [w.upload(verts, self.stride)];
+}
+
+// Draw every group with `shader`.
+pub fn draw_all(self: const GroupMeshes, shader: const Shader) {
+  for m in self.meshes { m.draw_mode(shader, self.mode); }
+}
+
 // --- Input events (Gap 01): an ordered, drained-per-frame event queue ---
 //
 // The polling API above loses text, key-repeat, per-event modifiers, and event
@@ -1966,8 +2165,15 @@ fn rasterize_text_into(font: integer, content: text, size: float, buf: vector<in
 // does NOT work headless: without it the call is a no-op and the canvas keeps
 // whatever was under the text.  `text2d` exists for exactly that case — it
 // carries a baked face and draws through `set_pixel`, so text always appears.
-pub fn draw_text(self: Canvas, font: integer, content: text, size: float,
-                 dt_x: integer, dt_y: integer, color: integer) {
+pub fn draw_text(
+  self: Canvas,
+  font: integer,
+  content: text,
+  size: float,
+  dt_x: integer,
+  dt_y: integer,
+  color: integer
+) {
   dt_tw = gl_measure_text(font, content, size) as integer + 1;
   dt_th = gl_text_height(font, size);
   if dt_tw <= 0 or dt_th <= 0 { return; }
@@ -1985,9 +2191,7 @@ pub fn draw_text(self: Canvas, font: integer, content: text, size: float,
       // fit — discharge at the source. The `>=` guard above keeps it in bounds,
       // so `?? 0` never actually fires.
       dt_a = dt_buf[dt_idx] ?? 0;
-      if dt_a > 0 {
-        self.blend_pixel(dt_x + dt_bx, dt_y + dt_by, rgba(dt_cr, dt_cg, dt_cb, dt_a));
-      }
+      if dt_a > 0 { self.blend_pixel(dt_x + dt_bx, dt_y + dt_by, rgba(dt_cr, dt_cg, dt_cb, dt_a)); }
     }
   }
 }
@@ -2005,13 +2209,13 @@ pub fn draw_text(self: Canvas, font: integer, content: text, size: float,
 struct CmapRange {
   first: integer,
   last: integer,
-  glyph: integer
+  glyph: integer,
 }
 
 // One kerning pair, keyed by `(left glyph << 16) | right glyph`, its value in font units.
 struct KernPair {
   key: integer,
-  value: integer
+  value: integer,
 }
 
 // A TrueType face.  Obtain one from `load_font`; its fields are the font's own numbers, in font
@@ -2025,16 +2229,22 @@ pub struct Font {
   cmap: vector<CmapRange>,
   kern: hash<KernPair[key]>,
   // The whole file, kept for the glyph outlines a rasterizer reads.
-  data: vector<u8>
+  data: vector<u8>,
 }
 
-fn tt_u8(b: const vector<u8>, at: integer) -> integer { (b[at] ?? 0) as integer }
-fn tt_u16(b: const vector<u8>, at: integer) -> integer { tt_u8(b, at) * 256 + tt_u8(b, at + 1) }
+fn tt_u8(b: const vector<u8>, at: integer) -> integer {
+  (b[at] ?? 0) as integer
+}
+fn tt_u16(b: const vector<u8>, at: integer) -> integer {
+  tt_u8(b, at)*256 + tt_u8(b, at + 1)
+}
 fn tt_i16(b: const vector<u8>, at: integer) -> integer {
   v = tt_u16(b, at);
   if v >= 32768 { v - 65536 } else { v }
 }
-fn tt_u32(b: const vector<u8>, at: integer) -> integer { tt_u16(b, at) * 65536 + tt_u16(b, at + 2) }
+fn tt_u32(b: const vector<u8>, at: integer) -> integer {
+  tt_u16(b, at)*65536 + tt_u16(b, at + 2)
+}
 
 // The offset of table `tag` in the file, or -1 when the font has none.
 fn tt_table(b: const vector<u8>, tag: text) -> integer {
@@ -2054,7 +2264,9 @@ fn tt_cmap_ranges(b: const vector<u8>, sub: integer) -> vector<CmapRange> {
   if format == 12 {
     for i in 0..tt_u32(b, sub + 12) {
       g = sub + 16 + 12 * i;
-      out += [CmapRange { first: tt_u32(b, g), last: tt_u32(b, g + 4), glyph: tt_u32(b, g + 8) }];
+      out += [
+        CmapRange { first: tt_u32(b, g), last: tt_u32(b, g + 4), glyph: tt_u32(b, g + 8) },
+      ];
     }
   } else if format == 4 {
     seg_x2 = tt_u16(b, sub + 6);
@@ -2073,15 +2285,23 @@ fn tt_cmap_ranges(b: const vector<u8>, sub: integer) -> vector<CmapRange> {
         g0 = (first + delta) % 65536;
         wrap_at = first + (65536 - g0);
         if wrap_at <= last {
-          out += [CmapRange { first: first, last: wrap_at - 1, glyph: g0 }];
-          out += [CmapRange { first: wrap_at, last: last, glyph: 0 }];
-        } else {
-          out += [CmapRange { first: first, last: last, glyph: g0 }];
-        }
+          out += [
+            CmapRange { first: first, last: wrap_at - 1, glyph: g0 },
+          ];
+          out += [
+            CmapRange { first: wrap_at, last: last, glyph: 0 },
+          ];
+        } else { out += [
+          CmapRange { first: first, last: last, glyph: g0 },
+        ]; }
       } else {
         for c in first..last + 1 {
           g = tt_u16(b, offsets + 2 * i + ro + 2 * (c - first));
-          if g != 0 { out += [CmapRange { first: c, last: c, glyph: (g + delta) % 65536 }]; }
+          if g != 0 {
+            out += [
+              CmapRange { first: c, last: c, glyph: (g + delta) % 65536 },
+            ];
+          }
         }
       }
     }
@@ -2106,8 +2326,12 @@ pub fn load_font(path: text) -> Font? {
   if head < 0 || hhea < 0 || hmtx < 0 || cmap < 0 { return null; }
   upem = tt_u16(b, head + 18);
   if upem == 0 { return null; }
-  f = Font { units_per_em: upem, ascender: tt_i16(b, hhea + 4), descender: tt_i16(b, hhea + 6),
-             line_gap: tt_i16(b, hhea + 8) };
+  f = Font {
+    units_per_em: upem,
+    ascender: tt_i16(b, hhea + 4),
+    descender: tt_i16(b, hhea + 6),
+    line_gap: tt_i16(b, hhea + 8),
+  };
   os2 = tt_table(b, "OS/2");
   if os2 >= 0 && (tt_u16(b, os2 + 62) & 128) != 0 {
     f.ascender = tt_i16(b, os2 + 68);
@@ -2126,7 +2350,9 @@ pub fn load_font(path: text) -> Font? {
     unicode = platform == 0 || (platform == 3 && (encoding == 1 || encoding == 10));
     format = tt_u16(b, sub);
     rank = if !unicode { 0 } else if format == 12 { 2 } else if format == 4 { 1 } else { 0 };
-    if rank > best_rank { best = sub; best_rank = rank; }
+    if rank > best_rank {
+      best = sub; best_rank = rank;
+    }
   }
   if best >= 0 { f.cmap = tt_cmap_ranges(b, best); }
   kern = tt_table(b, "kern");
@@ -2139,7 +2365,9 @@ pub fn load_font(path: text) -> Font? {
       if coverage / 256 == 0 && (coverage & 7) == 1 {
         for p in 0..tt_u16(b, at + 6) {
           e = at + 14 + 6 * p;
-          f.kern += [KernPair { key: tt_u16(b, e) * 65536 + tt_u16(b, e + 2), value: tt_i16(b, e + 4) }];
+          f.kern += [
+            KernPair { key: tt_u16(b, e)*65536 + tt_u16(b, e + 2), value: tt_i16(b, e + 4) },
+          ];
         }
       }
       at += length;
@@ -2274,9 +2502,9 @@ void main() {{
 /// A sprite sheet backed by a Canvas atlas uploaded as a GL texture.
 /// Sprites are arranged in a grid of `ss_cols` x `ss_rows` cells.
 pub struct SpriteSheet {
-  pub const ss_tex: integer,  // GL texture handle
-  const ss_shader: integer,   // textured quad shader
-  const ss_vao: integer,      // unit quad VAO (shared)
+  pub const ss_tex: integer, // GL texture handle
+  const ss_shader: integer, // textured quad shader
+  const ss_vao: integer, // unit quad VAO (shared)
   const ss_cols: integer,
   const ss_rows: integer,
   const ss_cell_w: integer,
@@ -2383,10 +2611,10 @@ void main() {{
 /// projection. Create once per window with `create_painter_2d`, then use
 /// `draw_rect_at`, `draw_sprite_at`, and `draw_texture_at` to render.
 pub struct Painter2D {
-  p2_flat: integer,        // flat color shader
-  pub p2_tex: integer,     // textured quad shader (V-flipped)
-  pub p2_vao: integer,     // shared unit-quad VAO
-  pub p2_proj: vector<float>,           // orthographic projection (16 floats)
+  p2_flat: integer, // flat color shader
+  pub p2_tex: integer, // textured quad shader (V-flipped)
+  pub p2_vao: integer, // shared unit-quad VAO
+  pub p2_proj: vector<float>, // orthographic projection (16 floats)
 }
 
 /// Create a Painter2D for a window of size `screen_w` x `screen_h`.
@@ -2398,29 +2626,24 @@ pub fn create_painter_2d(screen_w: float, screen_h: float) -> Painter2D {
   cpn_tex = gl_create_shader(TEX_VERT_2D, TEX_FRAG_2D);
   // Unit quad — two triangles from (0,0) to (1,1), z=0, in f32.
   cpn_quad = [
-    0.0f, 0.0f, 0.0f,  1.0f, 0.0f, 0.0f,  1.0f, 1.0f, 0.0f,
-    0.0f, 0.0f, 0.0f,  1.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f
+    0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f,
+    1.0f, 0.0f,
   ];
   cpn_vao = gl_upload_vertices(cpn_quad, 3);
   // `?? 0.0` is lint suppression — both screen_w and screen_h are
   // construction-time positive (caller passes window dimensions).
   cpn_proj = [
-    2.0 / screen_w ?? 0.0, 0.0, 0.0, 0.0,
-    0.0, -2.0 / screen_h ?? 0.0, 0.0, 0.0,
-    0.0, 0.0, -1.0, 0.0,
-    -1.0, 1.0, 0.0, 1.0
+    2.0 / screen_w ?? 0.0, 0.0, 0.0, 0.0, 0.0, -2.0 / screen_h ?? 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+    0.0, -1.0, 1.0, 0.0, 1.0,
   ];
-  Painter2D {
-    p2_flat: cpn_flat,
-    p2_tex: cpn_tex,
-    p2_vao: cpn_vao,
-    p2_proj: cpn_proj,
-  }
+  Painter2D { p2_flat: cpn_flat, p2_tex: cpn_tex, p2_vao: cpn_vao, p2_proj: cpn_proj, }
 }
 
 /// Return the unit-quad VAO owned by the painter, so it can be shared with
 /// `create_sprite_sheet` instead of uploading a second copy.
-pub fn painter_vao(self: const Painter2D) -> integer { self.p2_vao }
+pub fn painter_vao(self: const Painter2D) -> integer {
+  self.p2_vao
+}
 
 // Build an MVP = proj * translate(x, y, 0) * scale(w, h, 1) without going
 // through the generic math::mat4_mul path. The model matrix is sparse, so
@@ -2428,11 +2651,20 @@ pub fn painter_vao(self: const Painter2D) -> integer { self.p2_vao }
 fn build_mvp_2d(proj: const vector<float>, x: float, y: float, w: float, h: float) -> vector<float> {
   bmn_mvp = [
     // column 0 = proj.col0 * w
-    proj[0] * w,  proj[1] * w,  proj[2] * w,  proj[3] * w,
+    proj[0] * w,
+    proj[1] * w,
+    proj[2] * w,
+    proj[3] * w,
     // column 1 = proj.col1 * h
-    proj[4] * h,  proj[5] * h,  proj[6] * h,  proj[7] * h,
+    proj[4] * h,
+    proj[5] * h,
+    proj[6] * h,
+    proj[7] * h,
     // column 2 = proj.col2 (z untouched)
-    proj[8],      proj[9],      proj[10],     proj[11],
+    proj[8],
+    proj[9],
+    proj[10],
+    proj[11],
     // column 3 = proj.col0 * x + proj.col1 * y + proj.col3
     proj[0] * x + proj[4] * y + proj[12],
     proj[1] * x + proj[5] * y + proj[13],
@@ -2444,8 +2676,17 @@ fn build_mvp_2d(proj: const vector<float>, x: float, y: float, w: float, h: floa
 
 /// Draw a filled rectangle at screen position (x, y) with size (w, h).
 /// Colour channels are in 0.0..1.0. Uses the painter's flat-color shader.
-pub fn draw_rect_at(painter: const Painter2D, x: float, y: float, w: float, h: float,
-                    r: float, g: float, b: float, a: float) {
+pub fn draw_rect_at(
+  painter: const Painter2D,
+  x: float,
+  y: float,
+  w: float,
+  h: float,
+  r: float,
+  g: float,
+  b: float,
+  a: float
+) {
   drn_mvp = build_mvp_2d(painter.p2_proj, x, y, w, h);
   gl_use_shader(painter.p2_flat);
   gl_set_uniform_mat4(painter.p2_flat, "uMVP", drn_mvp);
@@ -2457,8 +2698,15 @@ pub fn draw_rect_at(painter: const Painter2D, x: float, y: float, w: float, h: f
 /// Draw a sprite from `sheet` at screen position (x, y) with size (w, h).
 /// `sp_idx` is the 0-based sprite index (row-major) in the sheet.
 /// This is a one-liner replacement for `make_mvp` + `draw_sprite`.
-pub fn draw_sprite_at(sheet: const SpriteSheet, painter: const Painter2D,
-                      x: float, y: float, w: float, h: float, sp_idx: integer) {
+pub fn draw_sprite_at(
+  sheet: const SpriteSheet,
+  painter: const Painter2D,
+  x: float,
+  y: float,
+  w: float,
+  h: float,
+  sp_idx: integer
+) {
   dsn_mvp = build_mvp_2d(painter.p2_proj, x, y, w, h);
   draw_sprite(sheet, dsn_mvp, sp_idx);
 }
@@ -2466,8 +2714,14 @@ pub fn draw_sprite_at(sheet: const SpriteSheet, painter: const Painter2D,
 /// Draw an arbitrary GL texture as a screen-space quad at (x, y, w, h).
 /// Uses the painter's textured shader, which flips V to match canvas origin.
 /// Suitable for textures created with `create_text_texture` or `gl_upload_canvas`.
-pub fn draw_texture_at(painter: const Painter2D, tex: integer,
-                       x: float, y: float, w: float, h: float) {
+pub fn draw_texture_at(
+  painter: const Painter2D,
+  tex: integer,
+  x: float,
+  y: float,
+  w: float,
+  h: float
+) {
   dxn_mvp = build_mvp_2d(painter.p2_proj, x, y, w, h);
   gl_use_shader(painter.p2_tex);
   gl_bind_texture(tex, 0);
@@ -2484,7 +2738,7 @@ pub fn draw_texture_at(painter: const Painter2D, tex: integer,
 pub fn create_text_texture(font: integer, content: text, size: float, color: integer) -> integer {
   ctn_pad = 2;
   ctn_tw = gl_measure_text(font, content, size) as integer + ctn_pad * 2 + 1;
-  ctn_th = gl_text_height(font, size) + ctn_pad * 2;
+  ctn_th = gl_text_height(font, size)+ctn_pad * 2;
   if ctn_tw <= 0 or ctn_th <= 0 { return 0; }
   ctn_cv = canvas(ctn_tw, ctn_th, 0);
   ctn_cv.draw_text(font, content, size, ctn_pad, ctn_pad, color);
@@ -2508,8 +2762,13 @@ pub fn audio_load(path: text) -> integer;
 // A handle is never handed out twice.  When a clip finishes its slot is reused,
 // but the handle carries which use it belongs to, so an `audio_stop` on a
 // finished sound stops nothing instead of stopping whatever took its place.
-pub fn audio_play(clip: integer, volume: float, looping: boolean = false,
-                  pan: float = 0.0, start: float = 0.0) -> integer;
+pub fn audio_play(
+  clip: integer,
+  volume: float,
+  looping: boolean = false,
+  pan: float = 0.0,
+  start: float = 0.0
+) -> integer;
 #native "loft_audio_play"
 // Stop a playing clip by its playback handle.
 pub fn audio_stop(sink: integer);
@@ -2575,11 +2834,13 @@ fn sfx_env(sfx_env_t: single, sfx_env_atk: single, sfx_env_dur: single) -> singl
 // Short percussive beep — brick hit, UI click.
 pub fn sfx_beep(sb_freq: single, sb_dur: single, sb_vol: single) -> integer {
   sb_n = (sb_dur * SFX_RATE as single) as integer;
-  sb_buf: vector<single> = [for sb_i in 0..sb_n {
-    sb_t = sb_i as single / SFX_RATE as single;
-    sb_p = (sb_t * sb_freq) % 1.0f;
-    sfx_sq(sb_p, 0.5f) * sfx_env(sb_t, 0.005f, sb_dur) * sb_vol
-  }];
+  sb_buf: vector<single> = [
+    for sb_i in 0..sb_n {
+      sb_t = sb_i as single / SFX_RATE as single;
+      sb_p = (sb_t * sb_freq) % 1.0f;
+      sfx_sq(sb_p, 0.5f)*sfx_env(sb_t, 0.005f, sb_dur)*sb_vol
+    }
+  ];
   return audio_play_raw(sb_buf, SFX_RATE, 1.0);
 }
 
@@ -2587,12 +2848,14 @@ pub fn sfx_beep(sb_freq: single, sb_dur: single, sb_vol: single) -> integer {
 pub fn sfx_descend(sd_f0: single, sd_f1: single, sd_dur: single, sd_vol: single) -> integer {
   sd_n = (sd_dur * SFX_RATE as single) as integer;
   sd_ph = 0.0f;
-  sd_buf: vector<single> = [for sd_i in 0..sd_n {
-    sd_t = sd_i as single / SFX_RATE as single;
-    sd_f = sd_f0 + (sd_f1 - sd_f0) * ((sd_t / sd_dur) ?? 0.0f);
-    sd_ph = (sd_ph + sd_f / SFX_RATE as single) % 1.0f;
-    sfx_saw(sd_ph) * sfx_env(sd_t, 0.01f, sd_dur) * sd_vol
-  }];
+  sd_buf: vector<single> = [
+    for sd_i in 0..sd_n {
+      sd_t = sd_i as single / SFX_RATE as single;
+      sd_f = sd_f0 + (sd_f1 - sd_f0)*((sd_t / sd_dur) ?? 0.0f);
+      sd_ph = (sd_ph + sd_f / SFX_RATE as single) % 1.0f;
+      sfx_saw(sd_ph)*sfx_env(sd_t, 0.01f, sd_dur)*sd_vol
+    }
+  ];
   return audio_play_raw(sd_buf, SFX_RATE, 1.0);
 }
 
@@ -2600,12 +2863,14 @@ pub fn sfx_descend(sd_f0: single, sd_f1: single, sd_dur: single, sd_vol: single)
 pub fn sfx_chirp(sc_f0: single, sc_f1: single, sc_dur: single, sc_vol: single) -> integer {
   sc_n = (sc_dur * SFX_RATE as single) as integer;
   sc_ph = 0.0f;
-  sc_buf: vector<single> = [for sc_i in 0..sc_n {
-    sc_t = sc_i as single / SFX_RATE as single;
-    sc_f = sc_f0 + (sc_f1 - sc_f0) * ((sc_t / sc_dur) ?? 0.0f);
-    sc_ph = (sc_ph + sc_f / SFX_RATE as single) % 1.0f;
-    sfx_tri(sc_ph) * sfx_env(sc_t, 0.005f, sc_dur) * sc_vol
-  }];
+  sc_buf: vector<single> = [
+    for sc_i in 0..sc_n {
+      sc_t = sc_i as single / SFX_RATE as single;
+      sc_f = sc_f0 + (sc_f1 - sc_f0)*((sc_t / sc_dur) ?? 0.0f);
+      sc_ph = (sc_ph + sc_f / SFX_RATE as single) % 1.0f;
+      sfx_tri(sc_ph)*sfx_env(sc_t, 0.005f, sc_dur)*sc_vol
+    }
+  ];
   return audio_play_raw(sc_buf, SFX_RATE, 1.0);
 }
 
@@ -2613,12 +2878,14 @@ pub fn sfx_chirp(sc_f0: single, sc_f1: single, sc_dur: single, sc_vol: single) -
 pub fn sfx_noise(sn_dur: single, sn_vol: single) -> integer {
   sn_n = (sn_dur * SFX_RATE as single) as integer;
   sn_seed = 12345;
-  sn_buf: vector<single> = [for sn_i in 0..sn_n {
-    sn_t = sn_i as single / SFX_RATE as single;
-    sn_seed = (sn_seed * 1103515245 + 12345) % 2147483647;
-    sn_rnd = (sn_seed as single / 1073741824.0f) - 1.0f;
-    sn_rnd * sfx_env(sn_t, 0.002f, sn_dur) * sn_vol
-  }];
+  sn_buf: vector<single> = [
+    for sn_i in 0..sn_n {
+      sn_t = sn_i as single / SFX_RATE as single;
+      sn_seed = (sn_seed * 1103515245 + 12345) % 2147483647;
+      sn_rnd = (sn_seed as single / 1073741824.0f) - 1.0f;
+      sn_rnd * sfx_env(sn_t, 0.002f, sn_dur)*sn_vol
+    }
+  ];
   return audio_play_raw(sn_buf, SFX_RATE, 1.0);
 }
 

@@ -1,0 +1,125 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The 2D painter, sprite sheets and grouped meshes on the C shim (@PLN208 G5), against pixels
+// computed by hand on a 64 x 48 window (origin top-left, as the painter draws and `capture`
+// reads).  Under Xvfb, start the server with `-noreset` (see window.loft).
+use graphics::*;
+
+fn display() -> boolean {
+  (env_variable("DISPLAY") ?? "") != ""
+}
+
+const RED = 0xFFFF0000;
+const GREEN = 0xFF00FF00;
+const BLUE = 0xFF0000FF;
+const WHITE = 0xFFFFFFFF;
+const BLACK = 0xFF000000;
+
+fn at(c: const Canvas, x: integer, y: integer) -> integer {
+  (c.data[y * 64 + x] ?? -1) | 0xFF000000
+}
+
+fn test_rectangles_land_on_their_pixels() {
+  wo = open_window(64, 48, "g5-painter");
+  if !display() { return; }
+  w = wo ?? return assert(false, "a display is set and no window opened");
+  p = w.painter() ?? return assert(false, "the painter's shaders compile");
+  w.clear(BLACK);
+  p.rect(8.0, 4.0, 16.0, 10.0, 1.0, 0.0, 0.0, 1.0);
+  c = w.capture();
+  assert(at(c, 8, 4) == RED && at(c, 23, 13) == RED, "the corners (8, 4) and (23, 13)");
+  assert(at(c, 24, 4) == BLACK && at(c, 8, 14) == BLACK && at(c, 7, 4) == BLACK, "and no further");
+  p.resize(32, 24);
+  w.clear(BLACK);
+  p.rect(0.0, 0.0, 16.0, 12.0, 0.0, 1.0, 0.0, 1.0);
+  c = w.capture();
+  assert(
+    at(c, 31, 23) == GREEN && at(c, 32, 24) == BLACK,
+    "after resize(32, 24) a pixel unit is two"
+  );
+}
+
+fn test_an_image_keeps_its_rows_and_skips_the_transparent() {
+  wo = open_window(64, 48, "g5-image");
+  if !display() { return; }
+  w = wo ?? return assert(false, "no window");
+  p = w.painter() ?? return assert(false, "painter");
+  img = canvas(2, 2, 0);
+  img.set_pixel(0, 0, RED);
+  img.set_pixel(1, 0, GREEN);
+  img.set_pixel(0, 1, BLUE);
+  img.set_pixel(1, 1, 0x00FFFFFF);
+  t = w.texture_from(img);
+  t.filter(true);
+  w.clear(BLACK);
+  p.image(t, 32.0, 0.0, 32.0, 48.0);
+  c = w.capture();
+  assert(
+    at(c, 40, 10) == RED && at(c, 56, 10) == GREEN,
+    "canvas row 0 on top: {at(c, 40, 10):x} {at(c, 56, 10):x}"
+  );
+  assert(at(c, 40, 40) == BLUE, "canvas row 1 below: {at(c, 40, 40):x}");
+  assert(at(c, 56, 40) == BLACK, "a transparent texel is not drawn: {at(c, 56, 40):x}");
+  assert(at(c, 16, 24) == BLACK, "nothing left of the image");
+}
+
+fn test_a_sprite_shows_its_cell() {
+  wo = open_window(64, 48, "g5-sprite");
+  if !display() { return; }
+  w = wo ?? return assert(false, "no window");
+  p = w.painter() ?? return assert(false, "painter");
+  atlas = canvas(4, 2, RED);
+  for y in 0..2 {
+    atlas.set_pixel(2, y, GREEN); atlas.set_pixel(3, y, GREEN);
+  }
+  sheet = w.sprites(atlas, 2, 1) ?? return assert(false, "sprite shader");
+  w.clear(BLACK);
+  p.sprite(sheet, 0.0, 0.0, 32.0, 48.0, 1);
+  p.sprite(sheet, 32.0, 0.0, 32.0, 48.0, 0);
+  c = w.capture();
+  assert(at(c, 16, 24) == GREEN, "sprite 1 is the right cell: {at(c, 16, 24):x}");
+  assert(at(c, 48, 24) == RED, "sprite 0 the left: {at(c, 48, 24):x}");
+}
+
+const FLAT_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+void main() {{ gl_Position = vec4(pos, 1.0); }}
+`;
+
+const FLAT_F: text = `
+#version 330 core
+out vec4 frag;
+void main() {{ frag = vec4(1.0); }}
+`;
+
+// A full-height band x0..x1 as two triangles.
+fn band(x0: float, x1: float) -> vector<single> {
+  xy = [x0, -1.0, x1, -1.0, x1, 1.0, x0, -1.0, x1, 1.0, x0, 1.0];
+  out: vector<single> = [];
+  for i in 0..6 { out += [xy[2 * i] as single, xy[2 * i + 1] as single, 0.0 as single]; }
+  out
+}
+
+fn test_groups_reupload_on_their_own() {
+  wo = open_window(64, 48, "g5-groups");
+  if !display() { return; }
+  w = wo ?? return assert(false, "no window");
+  s = w.shader(FLAT_V, FLAT_F) ?? return assert(false, "shader");
+  set = group_meshes(3, DRAW_TRIANGLES);
+  z = 0.0 as single;
+  set.upsert(w, 1, band(-1.0, -0.5), z, z, z, z);
+  set.upsert(w, 2, band(0.5, 1.0), z, z, z, z);
+  w.clear(BLACK);
+  set.draw_all(s);
+  c = w.capture();
+  got = [at(c, 8, 24), at(c, 24, 24), at(c, 40, 24), at(c, 56, 24)];
+  assert(got == [WHITE, BLACK, BLACK, WHITE], "groups 1 and 2: {got}");
+  set.upsert(w, 1, band(-0.5, 0.0), z, z, z, z);
+  w.clear(BLACK);
+  set.draw_all(s);
+  c = w.capture();
+  got = [at(c, 8, 24), at(c, 24, 24), at(c, 40, 24), at(c, 56, 24)];
+  assert(got == [BLACK, WHITE, BLACK, WHITE], "group 1 moved, group 2 kept: {got}");
+}
