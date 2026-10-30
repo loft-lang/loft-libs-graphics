@@ -44,6 +44,18 @@ void gg_scissor(int64_t win, int64_t x, int64_t y, int64_t width, int64_t height
 void gg_finish(int64_t win);
 void gg_line_width(int64_t win, const double *width, int64_t n);
 void gg_point_size(int64_t win, const double *size, int64_t n);
+int64_t gg_texture(int64_t win, int64_t width, int64_t height, int64_t depth);
+int64_t gg_texture_from(int64_t win, const int64_t *px, int64_t n, int64_t width, int64_t height);
+void gg_texture_put(int64_t tex, int64_t x, int64_t y, int64_t width, int64_t height,
+                    const int64_t *px, int64_t n);
+void gg_texture_filter(int64_t tex, int64_t nearest);
+void gg_texture_mipmaps(int64_t tex);
+void gg_texture_bind(int64_t tex, int64_t unit);
+int64_t gg_texture_size(int64_t tex, int64_t which);
+int64_t gg_framebuffer(int64_t win);
+void gg_framebuffer_attach(int64_t fb, int64_t tex);
+void gg_render_to(int64_t win, int64_t fb);
+int64_t gg_quad(int64_t win);
 
 /* One queued input event: an EV_* tag (src/graphics.loft) and up to four integer fields. */
 #define GG_EVENT_WORDS 5
@@ -189,6 +201,21 @@ typedef struct {
 #define GL_ONE_MINUS_SRC_ALPHA 0x0303
 #define GL_DST_ALPHA 0x0304
 #define GL_ONE_MINUS_DST_ALPHA 0x0305
+#define GL_TEXTURE_2D 0x0DE1
+#define GL_TEXTURE0 0x84C0
+#define GL_TEXTURE_MIN_FILTER 0x2801
+#define GL_TEXTURE_MAG_FILTER 0x2800
+#define GL_TEXTURE_WRAP_S 0x2802
+#define GL_TEXTURE_WRAP_T 0x2803
+#define GL_NEAREST 0x2600
+#define GL_LINEAR 0x2601
+#define GL_LINEAR_MIPMAP_LINEAR 0x2703
+#define GL_CLAMP_TO_EDGE 0x812F
+#define GL_DEPTH_COMPONENT 0x1902
+#define GL_FRAMEBUFFER 0x8D40
+#define GL_COLOR_ATTACHMENT0 0x8CE0
+#define GL_DEPTH_ATTACHMENT 0x8D00
+#define GL_NONE 0
 
 typedef void *gx_fbconfig;
 typedef void *gx_context;
@@ -275,6 +302,19 @@ typedef struct {
     void (*glFinish)(void);
     void (*glLineWidth)(float);
     void (*glPointSize)(float);
+    void (*glGenTextures)(int, unsigned *);
+    void (*glBindTexture)(unsigned, unsigned);
+    void (*glTexImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+    void (*glTexSubImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+    void (*glTexParameteri)(unsigned, unsigned, int);
+    void (*glDeleteTextures)(int, const unsigned *);
+    void (*glGenerateMipmap)(unsigned);
+    void (*glActiveTexture)(unsigned);
+    void (*glGenFramebuffers)(int, unsigned *);
+    void (*glBindFramebuffer)(unsigned, unsigned);
+    void (*glFramebufferTexture2D)(unsigned, unsigned, unsigned, unsigned, int);
+    void (*glDeleteFramebuffers)(int, const unsigned *);
+    void (*glDrawBuffer)(unsigned);
 } gg_api;
 
 typedef struct {
@@ -286,18 +326,21 @@ typedef struct {
     pthread_t thread;
     int width, height, should_close;
     int closed; /* `gg_close` ran: the context and the X window are gone */
+    unsigned target; /* the framebuffer draws go to, 0 for the window */
     int64_t refs; /* the shaders and meshes still holding this window */
     int64_t *events;
     int64_t event_count, event_cap;
 } gg_window;
 
 /* A shader or a mesh: its GL names and the window whose context made them. */
-enum { GG_SHADER = 1, GG_MESH = 2 };
+enum { GG_SHADER = 1, GG_MESH = 2, GG_TEXTURE = 3, GG_FRAMEBUFFER = 4 };
 typedef struct {
     gg_window *w;
     int kind;
-    unsigned id, buffer; /* program; or vertex array and its buffer */
+    unsigned id, buffer; /* program; vertex array and its buffer; texture; framebuffer */
     int vertices;
+    int width, height, depth; /* a texture */
+    int has_colour; /* a framebuffer: a colour attachment, else it draws to no colour buffer */
 } gg_res;
 
 static gg_window *gg_of(int64_t h) {
@@ -383,7 +426,12 @@ static int gg_bind_gl(gg_window *w) {
            GG_PROC(glVertexAttribPointer) && GG_PROC(glEnableVertexAttribArray) &&
            GG_PROC(glDrawArrays) && GG_PROC(glDisable) && GG_PROC(glBlendFunc) &&
            GG_PROC(glCullFace) && GG_PROC(glDepthMask) && GG_PROC(glScissor) &&
-           GG_PROC(glFinish) && GG_PROC(glLineWidth) && GG_PROC(glPointSize);
+           GG_PROC(glFinish) && GG_PROC(glLineWidth) && GG_PROC(glPointSize) &&
+           GG_PROC(glGenTextures) && GG_PROC(glBindTexture) && GG_PROC(glTexImage2D) &&
+           GG_PROC(glTexSubImage2D) && GG_PROC(glTexParameteri) && GG_PROC(glDeleteTextures) &&
+           GG_PROC(glGenerateMipmap) && GG_PROC(glActiveTexture) && GG_PROC(glGenFramebuffers) &&
+           GG_PROC(glBindFramebuffer) && GG_PROC(glFramebufferTexture2D) &&
+           GG_PROC(glDeleteFramebuffers) && GG_PROC(glDrawBuffer);
 }
 
 /* An X protocol error while the context is made (a config the server refuses, a context the
@@ -477,11 +525,13 @@ static void gg_push(gg_window *w, int64_t tag, int64_t a, int64_t b, int64_t c, 
 
 /* Present an opaque frame: whatever alpha the shaders wrote is forced to 1 first, as 0.9 did. */
 static void gg_present(gg_window *w) {
+    if (w->target) w->api.glBindFramebuffer(GL_FRAMEBUFFER, 0);
     w->api.glColorMask(0, 0, 0, 1);
     w->api.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     w->api.glClear(GL_COLOR_BUFFER_BIT);
     w->api.glColorMask(1, 1, 1, 1);
     w->api.glXSwapBuffers(w->display, w->window);
+    if (w->target) w->api.glBindFramebuffer(GL_FRAMEBUFFER, w->target);
 }
 
 int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullscreen) {
@@ -684,9 +734,11 @@ void gg_read_pixels(int64_t h, int64_t *out, int64_t n) {
     if (n != (int64_t) w->width * w->height || n <= 0) return;
     rgba = (unsigned char *) malloc((size_t) n * 4u);
     if (!rgba) return;
+    if (w->target) w->api.glBindFramebuffer(GL_FRAMEBUFFER, 0);
     w->api.glPixelStorei(GL_PACK_ALIGNMENT, 1);
     w->api.glReadBuffer(GL_BACK);
     w->api.glReadPixels(0, 0, w->width, w->height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    if (w->target) w->api.glBindFramebuffer(GL_FRAMEBUFFER, w->target);
     for (y = 0; y < w->height; y++) {
         const unsigned char *row = rgba + (size_t) (w->height - 1 - y) * w->width * 4u;
         for (x = 0; x < w->width; x++) {
@@ -859,12 +911,20 @@ void gg_release(int64_t res) {
     if (!r) return;
     w = r->w;
     if (!w->closed) {
-        if (!gg_use(w, r->kind == GG_SHADER ? "Shader drop" : "Mesh drop")) return;
+        if (!gg_use(w, "a GL object's drop")) return;
         if (r->kind == GG_SHADER) {
             w->api.glDeleteProgram(r->id);
-        } else {
+        } else if (r->kind == GG_MESH) {
             w->api.glDeleteVertexArrays(1, &r->id);
             w->api.glDeleteBuffers(1, &r->buffer);
+        } else if (r->kind == GG_TEXTURE) {
+            w->api.glDeleteTextures(1, &r->id);
+        } else {
+            if (w->target == r->id) { /* drawing returns to the window */
+                w->api.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                w->target = 0;
+            }
+            w->api.glDeleteFramebuffers(1, &r->id);
         }
     }
     w->refs--;
@@ -932,6 +992,215 @@ void gg_line_width(int64_t win, const double *width, int64_t n) {
 void gg_point_size(int64_t win, const double *size, int64_t n) {
     gg_window *w = gg_of(win);
     if (n >= 1 && gg_use(w, "Window.point_size")) w->api.glPointSize((float) size[0]);
+}
+
+/* ── Textures and framebuffers, made as 0.9 made them ──────────────────────────────────────── */
+
+static gg_res *gg_texture_of(int64_t h, const char *what) {
+    gg_res *r = gg_res_of(h);
+    if (!r || r->kind != GG_TEXTURE || !gg_use(r->w, what)) return NULL;
+    return r;
+}
+
+/* An empty colour texture (RGBA8, linear) or depth texture (32-bit float, nearest, clamped). */
+int64_t gg_texture(int64_t win, int64_t width, int64_t height, int64_t depth) {
+    gg_window *w = gg_of(win);
+    gg_res *r;
+    gg_api *gl;
+    if (width <= 0 || height <= 0 || !gg_use(w, "Window.texture")) return 0;
+    r = gg_new_res(w, GG_TEXTURE);
+    if (!r) return 0;
+    gl = &w->api;
+    r->width = (int) width;
+    r->height = (int) height;
+    r->depth = depth != 0;
+    gl->glGenTextures(1, &r->id);
+    gl->glBindTexture(GL_TEXTURE_2D, r->id);
+    if (r->depth) {
+        gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, r->width, r->height, 0,
+                         GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+        gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    } else {
+        gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, r->width, r->height, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, NULL);
+        gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    }
+    gl->glBindTexture(GL_TEXTURE_2D, 0);
+    return (int64_t) (intptr_t) r;
+}
+
+/* 0xAARRGGBB pixels as RGBA bytes, row 0 first (it lands at the texture's bottom row). */
+static unsigned char *gg_rgba(const int64_t *px, int64_t n) {
+    unsigned char *out = (unsigned char *) malloc((size_t) n * 4u);
+    int64_t i;
+    if (!out) return NULL;
+    for (i = 0; i < n; i++) {
+        uint32_t p = (uint32_t) px[i];
+        out[4 * i] = (unsigned char) (p >> 16);
+        out[4 * i + 1] = (unsigned char) (p >> 8);
+        out[4 * i + 2] = (unsigned char) p;
+        out[4 * i + 3] = (unsigned char) (p >> 24);
+    }
+    return out;
+}
+
+/* A colour texture holding a canvas's pixels: linear, clamped. */
+int64_t gg_texture_from(int64_t win, const int64_t *px, int64_t n, int64_t width, int64_t height) {
+    gg_window *w = gg_of(win);
+    unsigned char *rgba;
+    gg_res *r;
+    gg_api *gl;
+    if (width <= 0 || height <= 0 || n < width * height || !gg_use(w, "Window.texture_from"))
+        return 0;
+    rgba = gg_rgba(px, width * height);
+    if (!rgba) return 0;
+    r = gg_new_res(w, GG_TEXTURE);
+    if (!r) {
+        free(rgba);
+        return 0;
+    }
+    gl = &w->api;
+    r->width = (int) width;
+    r->height = (int) height;
+    gl->glGenTextures(1, &r->id);
+    gl->glBindTexture(GL_TEXTURE_2D, r->id);
+    gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, r->width, r->height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                     rgba);
+    gl->glBindTexture(GL_TEXTURE_2D, 0);
+    free(rgba);
+    return (int64_t) (intptr_t) r;
+}
+
+/* Replace a `width` x `height` region at (x, y) of a colour texture. */
+void gg_texture_put(int64_t tex, int64_t x, int64_t y, int64_t width, int64_t height,
+                    const int64_t *px, int64_t n) {
+    gg_res *r = gg_texture_of(tex, "Texture.put");
+    unsigned char *rgba;
+    if (!r || r->depth || width <= 0 || height <= 0 || n < width * height) return;
+    rgba = gg_rgba(px, width * height);
+    if (!rgba) return;
+    r->w->api.glBindTexture(GL_TEXTURE_2D, r->id);
+    r->w->api.glTexSubImage2D(GL_TEXTURE_2D, 0, (int) x, (int) y, (int) width, (int) height,
+                              GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    r->w->api.glBindTexture(GL_TEXTURE_2D, 0);
+    free(rgba);
+}
+
+void gg_texture_filter(int64_t tex, int64_t nearest) {
+    gg_res *r = gg_texture_of(tex, "Texture.filter");
+    int f = nearest ? GL_NEAREST : GL_LINEAR;
+    if (!r) return;
+    r->w->api.glBindTexture(GL_TEXTURE_2D, r->id);
+    r->w->api.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, f);
+    r->w->api.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, f);
+    r->w->api.glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+/* Mipmaps from the current pixels, minified trilinearly. */
+void gg_texture_mipmaps(int64_t tex) {
+    gg_res *r = gg_texture_of(tex, "Texture.mipmaps");
+    if (!r) return;
+    r->w->api.glBindTexture(GL_TEXTURE_2D, r->id);
+    r->w->api.glGenerateMipmap(GL_TEXTURE_2D);
+    r->w->api.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    r->w->api.glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+/* Bind to texture unit `unit`, where a sampler uniform set to `unit` reads it. */
+void gg_texture_bind(int64_t tex, int64_t unit) {
+    gg_res *r = gg_texture_of(tex, "Texture.bind");
+    if (!r || unit < 0) return;
+    r->w->api.glActiveTexture(GL_TEXTURE0 + (unsigned) unit);
+    r->w->api.glBindTexture(GL_TEXTURE_2D, r->id);
+}
+
+/* 0: the width, 1: the height. */
+int64_t gg_texture_size(int64_t tex, int64_t which) {
+    gg_res *r = gg_res_of(tex);
+    if (!r || r->kind != GG_TEXTURE) return 0;
+    return which == 0 ? r->width : r->height;
+}
+
+int64_t gg_framebuffer(int64_t win) {
+    gg_window *w = gg_of(win);
+    gg_res *r;
+    if (!gg_use(w, "Window.framebuffer")) return 0;
+    r = gg_new_res(w, GG_FRAMEBUFFER);
+    if (!r) return 0;
+    w->api.glGenFramebuffers(1, &r->id);
+    return (int64_t) (intptr_t) r;
+}
+
+/* Attach a texture: a depth texture as the depth buffer, any other as colour 0.  Without a
+ * colour attachment the framebuffer draws and reads no colour (a depth-only pass). */
+void gg_framebuffer_attach(int64_t fb, int64_t tex) {
+    gg_res *f = gg_res_of(fb), *t = gg_res_of(tex);
+    gg_api *gl;
+    if (!f || !t || f->kind != GG_FRAMEBUFFER || t->kind != GG_TEXTURE) return;
+    if (f->w != t->w) {
+        fprintf(stderr, "graphics: Framebuffer.attach with a texture of another window\n");
+        return;
+    }
+    if (!gg_use(f->w, "Framebuffer.attach")) return;
+    gl = &f->w->api;
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, f->id);
+    gl->glFramebufferTexture2D(GL_FRAMEBUFFER, t->depth ? GL_DEPTH_ATTACHMENT : GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, t->id, 0);
+    if (!t->depth) f->has_colour = 1;
+    gl->glDrawBuffer(f->has_colour ? GL_COLOR_ATTACHMENT0 : GL_NONE);
+    gl->glReadBuffer(f->has_colour ? GL_COLOR_ATTACHMENT0 : GL_NONE);
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, f->w->target);
+}
+
+/* Draw into framebuffer `fb` from now on; 0 draws into the window again. */
+void gg_render_to(int64_t win, int64_t fb) {
+    gg_window *w = gg_of(win);
+    gg_res *f = gg_res_of(fb);
+    unsigned id = 0;
+    if (f) {
+        if (f->kind != GG_FRAMEBUFFER || f->w != w) {
+            fprintf(stderr, "graphics: Window.render_to with a framebuffer of another window\n");
+            return;
+        }
+        id = f->id;
+    }
+    if (!gg_use(w, "Window.render_to")) return;
+    w->api.glBindFramebuffer(GL_FRAMEBUFFER, id);
+    w->target = id;
+}
+
+/* Two triangles over the whole target: a vec2 position at location 0, a vec2 UV at 1. */
+int64_t gg_quad(int64_t win) {
+    static const float verts[24] = {-1.0f, -1.0f, 0.0f, 0.0f, 1.0f,  -1.0f, 1.0f, 0.0f,
+                                    -1.0f, 1.0f,  0.0f, 1.0f, 1.0f,  -1.0f, 1.0f, 0.0f,
+                                    1.0f,  1.0f,  1.0f, 1.0f, -1.0f, 1.0f,  0.0f, 1.0f};
+    gg_window *w = gg_of(win);
+    gg_res *r;
+    gg_api *gl;
+    if (!gg_use(w, "Window.quad")) return 0;
+    r = gg_new_res(w, GG_MESH);
+    if (!r) return 0;
+    gl = &w->api;
+    r->vertices = 6;
+    gl->glGenVertexArrays(1, &r->id);
+    gl->glGenBuffers(1, &r->buffer);
+    gl->glBindVertexArray(r->id);
+    gl->glBindBuffer(GL_ARRAY_BUFFER, r->buffer);
+    gl->glBufferData(GL_ARRAY_BUFFER, (intptr_t) sizeof verts, verts, GL_STATIC_DRAW);
+    gl->glVertexAttribPointer(0, 2, GL_FLOAT, 0, 16, (const void *) 0);
+    gl->glEnableVertexAttribArray(0);
+    gl->glVertexAttribPointer(1, 2, GL_FLOAT, 0, 16, (const void *) 8);
+    gl->glEnableVertexAttribArray(1);
+    gl->glBindVertexArray(0);
+    return (int64_t) (intptr_t) r;
 }
 
 #else /* no window on this host yet */
@@ -1054,6 +1323,64 @@ void gg_point_size(int64_t win, const double *size, int64_t n) {
     (void) win;
     (void) size;
     (void) n;
+}
+
+int64_t gg_texture(int64_t win, int64_t width, int64_t height, int64_t depth) {
+    (void) win;
+    (void) width;
+    (void) height;
+    (void) depth;
+    return 0;
+}
+int64_t gg_texture_from(int64_t win, const int64_t *px, int64_t n, int64_t width, int64_t height) {
+    (void) win;
+    (void) px;
+    (void) n;
+    (void) width;
+    (void) height;
+    return 0;
+}
+void gg_texture_put(int64_t tex, int64_t x, int64_t y, int64_t width, int64_t height,
+                    const int64_t *px, int64_t n) {
+    (void) tex;
+    (void) x;
+    (void) y;
+    (void) width;
+    (void) height;
+    (void) px;
+    (void) n;
+}
+void gg_texture_filter(int64_t tex, int64_t nearest) {
+    (void) tex;
+    (void) nearest;
+}
+void gg_texture_mipmaps(int64_t tex) {
+    (void) tex;
+}
+void gg_texture_bind(int64_t tex, int64_t unit) {
+    (void) tex;
+    (void) unit;
+}
+int64_t gg_texture_size(int64_t tex, int64_t which) {
+    (void) tex;
+    (void) which;
+    return 0;
+}
+int64_t gg_framebuffer(int64_t win) {
+    (void) win;
+    return 0;
+}
+void gg_framebuffer_attach(int64_t fb, int64_t tex) {
+    (void) fb;
+    (void) tex;
+}
+void gg_render_to(int64_t win, int64_t fb) {
+    (void) win;
+    (void) fb;
+}
+int64_t gg_quad(int64_t win) {
+    (void) win;
+    return 0;
 }
 
 #endif

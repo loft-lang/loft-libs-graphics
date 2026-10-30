@@ -1613,6 +1613,141 @@ pub fn point_size(self: const Window, size: float) {
   gg_point_size(self.handle, [size]);
 }
 
+// --- Textures and framebuffers: images on the GPU, and drawing into them ---
+//
+//   colour = w.texture(256, 256);                // empty RGBA
+//   target = w.framebuffer();
+//   target.attach(colour);
+//   w.render_to(target);  w.viewport(0, 0, 256, 256);  …draws…
+//   w.render_to_window(); w.viewport(0, 0, w.width(), w.height());
+//   colour.bind(0);  s.set_int("image", 0);  w.quad().draw(s);
+//
+// Each belongs to its window and is deleted when it dies, like a shader or a mesh.  A texture
+// attached to a framebuffer stays usable after the framebuffer is gone, and the other way round.
+
+fn gg_texture(win: integer, width: integer, height: integer, depth: integer) -> integer;
+#c "gg_texture" "int64_t(int64_t, int64_t, int64_t, int64_t)"
+fn gg_texture_from(win: integer, px: const vector<integer>, width: integer, height: integer) -> integer;
+#c "gg_texture_from" "int64_t(int64_t, const int64_t*, int64_t, int64_t, int64_t)"
+fn gg_texture_put(
+  tex: integer,
+  x: integer,
+  y: integer,
+  width: integer,
+  height: integer,
+  px: const vector<integer>
+);
+#c "gg_texture_put" "void(int64_t, int64_t, int64_t, int64_t, int64_t, const int64_t*, int64_t)"
+fn gg_texture_filter(tex: integer, nearest: integer);
+#c "gg_texture_filter" "void(int64_t, int64_t)"
+fn gg_texture_mipmaps(tex: integer);
+#c "gg_texture_mipmaps" "void(int64_t)"
+fn gg_texture_bind(tex: integer, unit: integer);
+#c "gg_texture_bind" "void(int64_t, int64_t)"
+fn gg_texture_size(tex: integer, which: integer) -> integer;
+#c "gg_texture_size" "int64_t(int64_t, int64_t)"
+fn gg_framebuffer(win: integer) -> integer;
+#c "gg_framebuffer" "int64_t(int64_t)"
+fn gg_framebuffer_attach(fb: integer, tex: integer);
+#c "gg_framebuffer_attach" "void(int64_t, int64_t)"
+fn gg_render_to(win: integer, fb: integer);
+#c "gg_render_to" "void(int64_t, int64_t)"
+fn gg_quad(win: integer) -> integer;
+#c "gg_quad" "int64_t(int64_t)"
+
+// An image on the GPU: colour (RGBA, 8 bits a channel) or depth (32-bit float).
+pub struct Texture {
+  handle: integer,
+}
+
+fn OpDrop(self: Texture) {
+  if self.handle != 0 { gg_release(self.handle); }
+}
+
+// An empty colour texture, filtered linearly — a render target.
+pub fn texture(self: const Window, width: integer, height: integer) -> Texture {
+  Texture { handle: gg_texture(self.handle, width, height, 0) }
+}
+
+// An empty depth texture, filtered to the nearest texel and clamped at its edges — the depth of a
+// render target, or a shadow map.
+pub fn depth_texture(self: const Window, width: integer, height: integer) -> Texture {
+  Texture { handle: gg_texture(self.handle, width, height, 1) }
+}
+
+// A colour texture holding a canvas's pixels, filtered linearly and clamped at its edges.  The
+// canvas's row 0 is the texture's row 0, which GL places at the bottom (texture coordinate 0).
+pub fn texture_from(self: const Window, image: const Canvas) -> Texture {
+  Texture { handle: gg_texture_from(self.handle, image.data, image.width, image.height) }
+}
+
+// Its width in texels.
+pub fn width(self: const Texture) -> integer {
+  gg_texture_size(self.handle, 0)
+}
+
+// And its height.
+pub fn height(self: const Texture) -> integer {
+  gg_texture_size(self.handle, 1)
+}
+
+// Replace the region at (`x`, `y`) — origin bottom-left — with a canvas's pixels.
+pub fn put(self: const Texture, x: integer, y: integer, image: const Canvas) {
+  gg_texture_put(self.handle, x, y, image.width, image.height, image.data);
+}
+
+// Sample the nearest texel (pixel art), or interpolate between texels (the default).
+pub fn filter(self: const Texture, nearest: boolean) {
+  gg_texture_filter(self.handle, if nearest { 1 } else { 0 });
+}
+
+// Build mipmaps from the current pixels and minify through them; call again after `put`.
+pub fn mipmaps(self: const Texture) {
+  gg_texture_mipmaps(self.handle);
+}
+
+// Bind to texture unit `unit`; a `sampler2D` uniform set to `unit` then reads it.
+pub fn bind(self: const Texture, unit: integer) {
+  gg_texture_bind(self.handle, unit);
+}
+
+// A target for draws other than the window: textures attached as its colour and depth.
+pub struct Framebuffer {
+  handle: integer,
+}
+
+fn OpDrop(self: Framebuffer) {
+  if self.handle != 0 { gg_release(self.handle); }
+}
+
+// An empty framebuffer; attach textures before drawing into it.
+pub fn framebuffer(self: const Window) -> Framebuffer {
+  Framebuffer { handle: gg_framebuffer(self.handle) }
+}
+
+// Attach `t`: a depth texture as the depth buffer, a colour texture as the colour.  With only a
+// depth texture the framebuffer draws no colour (a depth-only pass).
+pub fn attach(self: const Framebuffer, t: const Texture) {
+  gg_framebuffer_attach(self.handle, t.handle);
+}
+
+// Draw into `target` from now on — set the viewport to its size.  Dropping the framebuffer that
+// is the target sends the draws back to the window.
+pub fn render_to(self: const Window, target: const Framebuffer) {
+  gg_render_to(self.handle, target.handle);
+}
+
+// Draw into the window again.
+pub fn render_to_window(self: const Window) {
+  gg_render_to(self.handle, 0);
+}
+
+// Two triangles covering the whole target: a `vec2` position at location 0 and a `vec2` texture
+// coordinate at location 1 — for a post-processing pass, or to show a texture.
+pub fn quad(self: const Window) -> GpuMesh {
+  GpuMesh { handle: gg_quad(self.handle) }
+}
+
 // --- Input events (Gap 01): an ordered, drained-per-frame event queue ---
 //
 // The polling API above loses text, key-repeat, per-event modifiers, and event

@@ -1,0 +1,182 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Textures and framebuffers on the C shim against 0.9's (@PLN208 G5).  A comparison, not a test —
+// see window.loft for why and how to run it.  One frame, through the same steps on both paths: a
+// rotated pair of triangles drawn into a 40 x 30 colour + depth texture through a framebuffer,
+// then shown over the left of the window, filtered linearly; and a 16 x 16 canvas texture, a
+// region replaced with `put`, mipmapped, drawn minified over the right — so the render target,
+// the depth attachment, linear and trilinear sampling, the upload and the sub-image all reach
+// the screenshot.
+//
+// The oracle is 0.9 on the INTERPRETER.  Under `--native` 0.9's `gl_texture_subimage` writes the
+// wrong texels — its exported `loft_gl_texture_subimage` is still the raw (pointer, count) form,
+// the class loft-libs-graphics#33 fixed for the other vector-taking calls — so there 215 pixels of
+// the `put` region differ while the 0.10 frame is the same on every backend.
+use graphics::*;
+use imaging::*;
+
+fn display() -> boolean {
+  (env_variable("DISPLAY") ?? "") != ""
+}
+
+const SHOW_V: text = `
+#version 330 core
+layout(location = 0) in vec2 pos;
+layout(location = 1) in vec2 uv;
+uniform vec4 place;
+out vec2 v_uv;
+void main() {{ gl_Position = vec4(pos * place.zw + place.xy, 0.0, 1.0); v_uv = uv; }}
+`;
+
+const SHOW_F: text = `
+#version 330 core
+uniform sampler2D image;
+in vec2 v_uv;
+out vec4 frag;
+void main() {{ frag = texture(image, v_uv); }}
+`;
+
+const FLAT_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(location = 2) in vec4 col;
+uniform float turn;
+out vec4 v_col;
+void main() {{
+  float c = cos(turn); float s = sin(turn);
+  gl_Position = vec4(c * pos.x - s * pos.y, s * pos.x + c * pos.y, pos.z, 1.0);
+  v_col = col;
+}}
+`;
+
+const FLAT_F: text = `
+#version 330 core
+in vec4 v_col;
+out vec4 frag;
+void main() {{ frag = v_col; }}
+`;
+
+fn vertex(x: float, y: float, z: float, r: float, g: float, b: float) -> vector<single> {
+  [
+    x as single, y as single, z as single, 0.0 as single, 0.0 as single, 1.0 as single, r as single,
+    g as single, b as single, 1.0 as single,
+  ]
+}
+
+fn pair() -> vector<single> {
+  v: vector<single> = [];
+  v += vertex(-0.8, -0.7, 0.3, 1.0, 0.2, 0.1);
+  v += vertex(0.8, -0.5, 0.3, 0.1, 0.9, 0.2);
+  v += vertex(0.0, 0.8, 0.3, 0.2, 0.3, 1.0);
+  v += vertex(-0.7, 0.6, -0.2, 0.9, 0.9, 0.1);
+  v += vertex(0.7, 0.7, -0.2, 0.1, 0.8, 0.9);
+  v += vertex(0.1, -0.9, -0.2, 0.8, 0.1, 0.8);
+  v
+}
+
+// A 16 x 16 checker of four colours, and a 6 x 4 patch for `put`.
+fn checker() -> Canvas {
+  c = canvas(16, 16, 0);
+  for y in 0..16 {
+    for x in 0..16 {
+      k = (x / 4 + y / 4) % 4;
+      col = if k == 0 { rgba(250, 40, 30, 255) } else if k == 1 { rgba(30, 200, 60, 255) }
+      else if k == 2 { rgba(40, 60, 230, 255) } else { rgba(240, 230, 220, 255) };
+      c.set_pixel(x, y, col);
+    }
+  }
+  c
+}
+
+fn test_textures_match_0_9() {
+  if !display() { return; }
+  wo = open_window(96, 72, "g5-tex-new");
+  w = wo ?? return assert(false, "no window");
+  show = w.shader(SHOW_V, SHOW_F) ?? return assert(false, "show shader");
+  flat = w.shader(FLAT_V, FLAT_F) ?? return assert(false, "flat shader");
+  scene = w.upload(pair(), 10);
+  colour = w.texture(40, 30);
+  depth = w.depth_texture(40, 30);
+  target = w.framebuffer();
+  target.attach(colour);
+  target.attach(depth);
+  w.render_to(target);
+  w.viewport(0, 0, 40, 30);
+  w.clear(rgba(20, 20, 20, 255));
+  flat.set_float("turn", 0.35);
+  scene.draw(flat);
+  w.render_to_window();
+  w.viewport(0, 0, 96, 72);
+  w.clear(rgba(50, 50, 60, 255));
+  quad = w.quad();
+  colour.bind(0);
+  show.set_int("image", 0);
+  show.set_vec4("place", -0.5, 0.0, 0.45, 0.8);
+  quad.draw(show);
+  pic = w.texture_from(checker());
+  pic.put(5, 6, canvas(6, 4, rgba(255, 255, 0, 255)));
+  pic.mipmaps();
+  pic.bind(0);
+  show.set_vec4("place", 0.55, -0.3, 0.12, 0.16);
+  quad.draw(show);
+  show.set_vec4("place", 0.55, 0.4, 0.4, 0.5);
+  quad.draw(show);
+  got = w.capture();
+  w.close();
+
+  assert(gl_create_window(96, 72, "g5-tex-0.9"), "0.9 opens its window");
+  sp = gl_create_shader(SHOW_V, SHOW_F);
+  fp = gl_create_shader(FLAT_V, FLAT_F);
+  assert(sp != 0 && fp != 0, "0.9 compiles the shaders");
+  vao = gl_upload_vertices(pair(), 10);
+  ct = gl_create_color_texture(40, 30);
+  dt = gl_create_depth_texture(40, 30);
+  fbo = gl_create_framebuffer();
+  gl_framebuffer_texture(fbo, 0, ct);
+  gl_framebuffer_texture(fbo, 1, dt);
+  gl_bind_framebuffer(fbo);
+  gl_viewport(0, 0, 40, 30);
+  gl_clear(rgba(20, 20, 20, 255));
+  gl_use_shader(fp);
+  gl_set_uniform_float(fp, "turn", 0.35);
+  gl_draw(vao, 6);
+  gl_bind_framebuffer(0);
+  gl_viewport(0, 0, 96, 72);
+  gl_clear(rgba(50, 50, 60, 255));
+  gl_use_shader(sp);
+  gl_bind_texture(ct, 0);
+  gl_set_uniform_int(sp, "image", 0);
+  gl_set_uniform_vec4(sp, "place", -0.5, 0.0, 0.45, 0.8);
+  gl_draw_fullscreen_quad();
+  ck = checker();
+  pt = gl_upload_canvas(ck.data, 16, 16);
+  patch = canvas(6, 4, rgba(255, 255, 0, 255));
+  gl_texture_subimage(pt, 5, 6, 6, 4, patch.data);
+  gl_generate_mipmap(pt);
+  gl_bind_texture(pt, 0);
+  gl_set_uniform_vec4(sp, "place", 0.55, -0.3, 0.12, 0.16);
+  gl_draw_fullscreen_quad();
+  gl_set_uniform_vec4(sp, "place", 0.55, 0.4, 0.4, 0.5);
+  gl_draw_fullscreen_quad();
+  shot = "_tmp_gfx_g5_tex_09.png";
+  assert(gl_screenshot(96, 72, shot), "0.9 screenshot");
+  gl_destroy_window();
+  img = file(shot).png() ?? return assert(false, "0.9 screenshot decodes");
+  differ = 0;
+  colours: vector<integer> = [];
+  for i in 0..96 * 72 {
+    q = img.data[i];
+    want = rgba(q.r, q.g, q.b, 255);
+    if (got.data[i] ?? -1) | 0xFF000000 != want { differ += 1; }
+    if len(colours) < 64 {
+      seen = false;
+      for c in colours {
+        if c == want { seen = true; }
+      }
+      if !seen { colours += [want]; }
+    }
+  }
+  assert(len(colours) >= 20, "the frame is rich: {len(colours)} colours");
+  assert(differ == 0, "{differ} of {96 * 72} pixels differ from 0.9");
+}
