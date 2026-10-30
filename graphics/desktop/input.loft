@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 //
 // Prints every event the 0.10 `Window` delivers, one per line, until Escape is released — the
-// 0.10 half of compare/input.sh (@PLN208 G6).
+// program desktop/input.sh drives (@PLN208 G6).
 use graphics::*;
 
 fn main() {
@@ -13,9 +13,10 @@ fn main() {
   }
   w = wo ?? return;
   println("ready");
-  frames = 0;
+  // until Escape is released, or 30 s: a frame count would end before a slow injector starts
+  deadline = ticks() + 30000000;
   done = false;
-  while !done && frames < 3000 && w.poll() {
+  while !done && ticks() < deadline && w.poll() {
     for ev in w.events() {
       match ev {
         KeyDown { key, mods, repeat } => println("KeyDown {key} {mods} {repeat}"),
@@ -33,7 +34,6 @@ fn main() {
       }
     }
     w.swap();
-    frames += 1;
   }
   println(
     "held {w.key_down(KEY_SHIFT)} mouse {w.mouse_x() as integer} {w.mouse_y() as integer} buttons {w.mouse_buttons()}"

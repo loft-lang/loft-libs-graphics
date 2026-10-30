@@ -12,8 +12,12 @@
  * package.  Everything a window needs — the display connection, the context, the function pointers
  * — lives in its own record: nothing is shared between windows, and nothing outlives the last one.
  *
- * Other hosts (Windows, macOS, the wasm targets) open no window yet: `gg_open` answers 0, which
- * the loft side reports as a null `Window`. */
+ * A browser page (`--html`, where loft defines `LOFT_BROWSER`): the page's canvas and WebGL2,
+ * through its `loft_gl` imports (loft's doc/loft-gl-wasm.js) — the GL function table is filled
+ * from them, and everything above it is the same code as on Linux.
+ *
+ * Other hosts (Windows, macOS, a WASI module) open no window yet: `gg_open` answers 0, which the
+ * loft side reports as a null `Window`. */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>

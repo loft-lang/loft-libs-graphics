@@ -2,17 +2,22 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 //
 // A program that draws its own textured quad with a painter's shader (crawler's view) reads the
-// painter's shader and quad VAO, and binds a sprite sheet's texture: those GL handles are `pub`.
-// Building a painter needs a GL context, so the check is that this file COMPILES — outside the
+// painter's textured shader and unit quad, and binds a sprite sheet's texture: those fields are
+// `pub`.  Building a painter needs a window, so the check is that this file COMPILES — outside the
 // file that declares it, a field without `pub` is refused.
 use graphics::*;
 
-fn quad_shader(p: Painter2D) -> integer { p.p2_tex }
-fn quad_vao(p: Painter2D) -> integer { p.p2_vao }
-fn sheet_texture(s: SpriteSheet) -> integer { s.ss_tex }
+fn quad_draw(p: const Painter) {
+  p.tex.set_int("uTex", 0);
+  p.quad.draw(p.tex);
+}
 
-fn test_a_custom_draw_reads_the_painter_and_sheet_handles() {
-  painter_readers = [quad_shader, quad_vao];
-  sheet_readers = [sheet_texture];
-  assert(len(painter_readers) == 2 && len(sheet_readers) == 1, "every reader compiled");
+fn sheet_texture(s: const Sprites) {
+  s.texture.bind(0);
+}
+
+fn test_a_custom_draw_reads_the_painter_and_sheet_objects() {
+  readers = [quad_draw];
+  binders = [sheet_texture];
+  assert(len(readers) == 1 && len(binders) == 1, "every reader compiled");
 }
