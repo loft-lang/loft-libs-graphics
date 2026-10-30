@@ -1182,6 +1182,8 @@ fn gg_mesh(win: integer, data: const vector<single>, stride: integer) -> integer
 #c "gg_mesh" "int64_t(int64_t, const float*, int64_t, int64_t)"
 fn gg_draw(mesh: integer, shader: integer);
 #c "gg_draw" "void(int64_t, int64_t)"
+fn gg_draw_over(mesh: integer, shader: integer);
+#c "gg_draw_over" "void(int64_t, int64_t)"
 fn gg_release(res: integer);
 #c "gg_release" "void(int64_t)"
 
@@ -1340,6 +1342,8 @@ pub fn update(self: const InstanceBuffer, data: const vector<single>) {
 
 fn gg_capability(win: integer, cap: integer, on: integer);
 #c "gg_capability" "void(int64_t, int64_t, int64_t)"
+fn gg_capability_on(win: integer, cap: integer) -> integer;
+#c "gg_capability_on" "int64_t(int64_t, int64_t)"
 fn gg_blend(win: integer, src: integer, dst: integer);
 #c "gg_blend" "void(int64_t, int64_t, int64_t)"
 fn gg_cull(win: integer, face: integer);
@@ -1365,6 +1369,12 @@ pub fn enable(self: const Window, cap: integer) {
 // And off.
 pub fn disable(self: const Window, cap: integer) {
   gg_capability(self.handle, cap, 0);
+}
+
+// Whether `GL_DEPTH_TEST`, `GL_BLEND`, `GL_CULL_FACE` or `GL_SCISSOR_TEST` is on — for a pass that
+// changes one and hands the window back as it found it.  A window opens with depth testing on.
+pub fn enabled(self: const Window, cap: integer) -> boolean {
+  gg_capability_on(self.handle, cap) != 0
 }
 
 // How a blended draw combines with the frame: `w.blend(BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA)`.
@@ -1576,7 +1586,9 @@ pub fn quad(self: const Window) -> GpuMesh {
 //   p.image(icon, 120.0, 10.0, 32.0, 32.0);
 //   for ev in w.events() { match ev { Resize { width, height } => p.resize(width, height), _ => {} } }
 //
-// Each holds its own shaders and quad, released when it dies.
+// Each holds its own shaders and quad, released when it dies.  A painter draws in call order over
+// whatever the frame holds: the depth test is off for each of its draws and as it was after, so a
+// later rectangle covers an earlier one and a HUD is never hidden behind a 3-D scene.
 
 // Shaders and a unit quad for drawing at pixel positions.
 pub struct Painter {
@@ -1637,7 +1649,7 @@ pub fn rect(
   self.flat.set_mat4("uMVP", build_mvp_2d(self.proj, x, y, w, h));
   self.flat.set_vec3("uColor", r, g, b);
   self.flat.set_float("uAlpha", a);
-  self.quad.draw(self.flat);
+  gg_draw_over(self.quad.handle, self.flat.handle);
 }
 
 // A texture stretched over (x, y) of `w` x `h` pixels; fully transparent texels are not drawn.
@@ -1645,7 +1657,7 @@ pub fn image(self: const Painter, t: const Texture, x: float, y: float, w: float
   t.bind(0);
   self.tex.set_int("uTex", 0);
   self.tex.set_mat4("uMVP", build_mvp_2d(self.proj, x, y, w, h));
-  self.quad.draw(self.tex);
+  gg_draw_over(self.quad.handle, self.tex.handle);
 }
 
 // Sprite `index` of `sheet` over (x, y) of `w` x `h` pixels.
@@ -1658,7 +1670,7 @@ pub fn sprite(
   h: float,
   index: integer
 ) {
-  sheet.draw(build_mvp_2d(self.proj, x, y, w, h), index);
+  sheet.draw_cell(build_mvp_2d(self.proj, x, y, w, h), index, true);
 }
 
 // A canvas atlas on the GPU, cut into a grid of `cols` x `rows` sprites; sprite 0 is the top left,
@@ -1687,6 +1699,11 @@ pub fn sprites(self: const Window, atlas: const Canvas, cols: integer, rows: int
 // Draw sprite `index` through `mvp`, which maps the unit quad onto the target (16 floats,
 // column-major).
 pub fn draw(self: const Sprites, mvp: const vector<float>, index: integer) {
+  self.draw_cell(mvp, index, false);
+}
+
+// `draw`, or with `over` the 2-D draw `Painter.sprite` makes: in call order, whatever the depth.
+fn draw_cell(self: const Sprites, mvp: const vector<float>, index: integer, over: boolean) {
   if self.cols <= 0 || self.rows <= 0 { return; }
   // the divisors are positive (checked above), so no `??` default is ever taken
   col = (index % self.cols) ?? 0;
@@ -1700,7 +1717,7 @@ pub fn draw(self: const Sprites, mvp: const vector<float>, index: integer) {
   self.shader.set_float("uU1", ((col + 1) as float / cols) ?? 0.0);
   self.shader.set_float("uV1", ((row + 1) as float / rows) ?? 0.0);
   self.shader.set_mat4("uMVP", mvp);
-  self.quad.draw(self.shader);
+  if over { gg_draw_over(self.quad.handle, self.shader.handle); } else { self.quad.draw(self.shader); }
 }
 
 // A mesh in groups, each re-uploaded on its own: after an edit only the groups whose geometry

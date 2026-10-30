@@ -42,7 +42,7 @@
 //                                //    the camera is already taken back off
 //
 // Then draw: `render_stage(cv)` onto a `graphics::Canvas`, or `batches` +
-// `pack_instances` + `gl_render` for the instanced path.  `compose` is what makes
+// `gl_stage(window)` + `gl_render` for the instanced path on a `graphics::Window`.  `compose` is what makes
 // a frame current — every reader above answers about the last one.
 //
 // The rest of the surface is that loop at more resolutions: P2 the camera, P4
@@ -880,76 +880,89 @@ out vec4 FragColor;
 void main() {{ FragColor = vColor; }}
 `;
 
-// The GL objects a stage needs, built once.
-pub struct Painter {
-    pn_shader: integer,
-    pn_vao: integer,
-    pn_ivbo: integer,
-    pn_cap: integer,          // instances the buffer currently holds
-    pn_light: integer,        // L2's composite shader; 0 until first needed
-    pn_fbo: integer,          // the offscreen target the world pass draws into
-    pn_scene: integer,        // its colour attachment
-    pn_fw: integer,           // what size that target was made at
-    pn_fh: integer,
+// The GL objects a stage draws with on one window: built once by `gl_stage`, released with it.
+pub struct StageGl {
+    shader: Shader,
+    unit: GpuMesh,            // the unit quad every instance stretches
+    inst: InstanceBuffer,
+    uploaded: boolean,        // whether `inst` holds the packed scene yet
+    light: Shader,            // L2's composite shader
+    full: GpuMesh,            // the fullscreen quad it draws with
+    target: Framebuffer,      // the offscreen target the world pass draws into
+    scene: Texture,           // its colour attachment
+    fw: integer,              // what size that target was made at (0: not yet)
+    fh: integer,
 }
 
-// Compile the shader and upload the unit quad.  Call once, after a window exists.
-pub fn painter_new() -> Painter {
+// Compile the shaders and upload the unit quad on `w`; null when a shader does not compile.
+pub fn gl_stage(w: const Window) -> StageGl? {
     quad: vector<single> = [
         0.0f, 0.0f, 0.0f,  1.0f, 0.0f, 0.0f,  1.0f, 1.0f, 0.0f,
         0.0f, 0.0f, 0.0f,  1.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f];
-    sh = graphics::gl_create_shader(VERT_2D, FRAG_2D);
-    vao = graphics::gl_upload_vertices(quad, 3);
-    Painter { pn_shader: sh, pn_vao: vao, pn_ivbo: 0, pn_cap: 0,
-              pn_light: 0, pn_fbo: 0, pn_scene: 0, pn_fw: 0, pn_fh: 0 }
+    none: vector<single> = [];
+    sh = w.shader(VERT_2D, FRAG_2D) ?? return null;
+    lt = w.shader(VERT_LIGHT, FRAG_LIGHT) ?? return null;
+    StageGl { shader: sh, unit: w.upload(quad, 3), inst: w.instances(none), uploaded: false,
+              light: lt, full: w.quad(), target: w.framebuffer(), scene: w.texture(1, 1),
+              fw: 0, fh: 0 }
 }
 
-// Draw the scene, one instanced call per run.  Answers the number of draw calls
+// Draw the scene on `w`, one instanced call per run.  Answers the number of draw calls
 // issued, which is the half of the gate that pixels cannot see: a batch that fell
 // back to one draw per sprite would look identical and cost N.
-pub fn gl_render(self: Stage, p: Painter, screen_w: float, screen_h: float) -> integer {
+//
+// ⚠ IN DRAW ORDER, WHATEVER THE DEPTH.  A window opens with depth testing on, and
+// every instance sits at the same depth — under the test the FIRST of two
+// overlapping nodes would win where the software path lets the last one paint.  So
+// the pass runs with it off, and the window's depth, blend and scissor switches are
+// handed back as they were (the blend FUNCTION is left premultiplied).
+pub fn gl_render(self: Stage, g: StageGl, w: const Window, screen_w: float,
+                 screen_h: float) -> integer {
+    depth = w.enabled(GL_DEPTH_TEST);
+    blending = w.enabled(GL_BLEND);
+    scissoring = w.enabled(GL_SCISSOR_TEST);
+    w.disable(GL_DEPTH_TEST);
+    calls = gl_passes(self, g, w, screen_w, screen_h);
+    if depth { w.enable(GL_DEPTH_TEST); }
+    if !blending { w.disable(GL_BLEND); }
+    if scissoring { w.enable(GL_SCISSOR_TEST); } else { w.disable(GL_SCISSOR_TEST); }
+    calls
+}
+
+fn gl_passes(self: Stage, g: StageGl, w: const Window, screen_w: float,
+             screen_h: float) -> integer {
     floats = pack_instances(self);
     if len(floats) == 0 { return 0; }
     // ⚠ PACKED ONCE, DRAWN PER VIEW.  The upload decision goes through
     // `sync_instances` so there is ONE answer to *when does the buffer get
     // rewritten* — a second view is draw calls, never another upload.
     changed = sync_instances(self);
-    if p.pn_ivbo == 0 {
-        p.pn_ivbo = graphics::gl_upload_instance_buffer(floats);
-        p.pn_cap = len(floats) / INSTANCE_STRIDE ?? 0;
-    } else {
-        if changed { graphics::gl_update_buffer(p.pn_ivbo, floats); }
+    if changed or !g.uploaded {
+        g.inst.update(floats);
+        g.uploaded = true;
     }
     // Premultiplied compositing, to match `pack_instances` and the software path.
-    graphics::gl_enable(graphics::GL_BLEND);
-    graphics::gl_blend_func(graphics::BLEND_ONE, graphics::BLEND_ONE_MINUS_SRC_ALPHA);
-    graphics::gl_use_shader(p.pn_shader);
-    graphics::gl_set_uniform_vec2(p.pn_shader, "uScreen", screen_w, screen_h);
-    graphics::gl_set_uniform_float(p.pn_shader, "uTime", self.st_time);
+    w.enable(GL_BLEND);
+    w.blend(BLEND_ONE, BLEND_ONE_MINUS_SRC_ALPHA);
+    g.shader.set_vec2("uScreen", screen_w, screen_h);
+    g.shader.set_float("uTime", self.st_time);
     calls = 0;
     // ⚠ THE SAME THREE PHASES AS THE SOFTWARE PATH — world, composite, HUD — so
     // the two can be compared rather than merely believed.  With the map off,
     // `st_hud_layer` is the no-HUD sentinel and this is one pass over everything.
     if self.st_light_map {
-        ensure_light_target(p, screen_w as integer, screen_h as integer);
-        graphics::gl_bind_framebuffer(p.pn_fbo);
-        graphics::gl_clear(0);
-        calls = calls + gl_draw_band(self, p, screen_w, screen_h, 0 - HUD_NONE,
+        ensure_light_target(g, w, screen_w as integer, screen_h as integer);
+        w.render_to(g.target);
+        w.clear(0);
+        calls = calls + gl_draw_band(self, g, w, screen_w, screen_h, 0 - HUD_NONE,
                                      self.st_hud_layer);
-        graphics::gl_bind_framebuffer(0);
-        gl_composite(self, p, screen_w, screen_h);
+        w.render_to_window();
+        gl_composite(self, g, w, screen_w, screen_h);
         calls = calls + 1;
-        graphics::gl_use_shader(p.pn_shader);
-        graphics::gl_set_uniform_vec2(p.pn_shader, "uScreen", screen_w, screen_h);
-        graphics::gl_set_uniform_float(p.pn_shader, "uTime", self.st_time);
-        calls = calls + gl_draw_band(self, p, screen_w, screen_h, self.st_hud_layer,
-                                     HUD_NONE);
-        graphics::gl_disable(graphics::GL_SCISSOR_TEST);
-        return calls;
+        return calls + gl_draw_band(self, g, w, screen_w, screen_h, self.st_hud_layer,
+                                    HUD_NONE);
     }
-    calls = gl_draw_band(self, p, screen_w, screen_h, 0 - HUD_NONE, HUD_NONE);
-    graphics::gl_disable(graphics::GL_SCISSOR_TEST);
-    calls
+    gl_draw_band(self, g, w, screen_w, screen_h, 0 - HUD_NONE, HUD_NONE)
 }
 
 // Draw every run whose layer is in `[lo, hi)`, for every view.
@@ -960,7 +973,7 @@ pub fn gl_render(self: Stage, p: Painter, screen_w: float, screen_h: float) -> i
 // sibling `gl_composite` uses both, so *(screen_w, screen_h)* is the shape this
 // family of helpers takes; dropping one of two symmetric floats would leave a
 // bare positional float at three call sites that could take either dimension.
-fn gl_draw_band(self: const Stage, p: const Painter, _screen_w: float,
+fn gl_draw_band(self: const Stage, g: const StageGl, w: const Window, _screen_w: float,
                 screen_h: float, lo: integer, hi: integer) -> integer {
     calls = 0;
     for v in 0..len(self.st_views) {
@@ -968,41 +981,39 @@ fn gl_draw_band(self: const Stage, p: const Painter, _screen_w: float,
         for b in batches(self) {
             if b.b_layer < lo or b.b_layer >= hi { continue; }
             // ⚠ A RUN STARTS PART-WAY INTO THE BUFFER, and there is no first-instance
-            // parameter to say so: `gl_draw_instanced` takes a count and nothing else,
+            // parameter to say so: `draw_instanced` takes a count and nothing else,
             // and the base-instance form that would (glDrawArraysInstancedBaseInstance)
             // is GL 4.2 and is NOT in WebGL 2.  So the offset moves into the ATTRIBUTE
             // POINTERS — re-bound per run at `b_first * INSTANCE_STRIDE` — which is the
             // portable way and costs four calls per run rather than a wider draw call.
             // One uniform pair per run, rather than N rewritten positions.
             coff = view_offset(self, v, b.b_layer);
-            graphics::gl_set_uniform_vec2(p.pn_shader, "uCam", coff.p_x, coff.p_y);
+            g.shader.set_vec2("uCam", coff.p_x, coff.p_y);
             base = b.b_first * INSTANCE_STRIDE;
-            graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 1, 4, INSTANCE_STRIDE, base + OFF_AFFINE);
-            graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 2, 2, INSTANCE_STRIDE, base + OFF_AFFINE + 4);
-            graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 3, 4, INSTANCE_STRIDE, base + OFF_CELL);
-            graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 4, 4, INSTANCE_STRIDE, base + OFF_RGBA);
-            graphics::gl_instance_attrib(p.pn_vao, p.pn_ivbo, 5, 2, INSTANCE_STRIDE, base + OFF_SWAY);
+            g.unit.instance_attrib(g.inst, 1, 4, INSTANCE_STRIDE, base + OFF_AFFINE);
+            g.unit.instance_attrib(g.inst, 2, 2, INSTANCE_STRIDE, base + OFF_AFFINE + 4);
+            g.unit.instance_attrib(g.inst, 3, 4, INSTANCE_STRIDE, base + OFF_CELL);
+            g.unit.instance_attrib(g.inst, 4, 4, INSTANCE_STRIDE, base + OFF_RGBA);
+            g.unit.instance_attrib(g.inst, 5, 2, INSTANCE_STRIDE, base + OFF_SWAY);
             // The scissor is the view's rect intersected with the batch's clip —
             // computed in one place so a view boundary and a clip boundary cannot
             // be enforced by two different rules.
             sc = scissor_of(self, v, b, coff);
             if sc.b_x1 > sc.b_x0 and sc.b_y1 > sc.b_y0 {
-                graphics::gl_enable(graphics::GL_SCISSOR_TEST);
+                w.enable(GL_SCISSOR_TEST);
                 // Scissor is measured from the BOTTOM, the screen from the top.
-                graphics::gl_scissor(sc.b_x0 as integer,
-                                     (screen_h - sc.b_y1) as integer,
-                                     (sc.b_x1 - sc.b_x0) as integer,
-                                     (sc.b_y1 - sc.b_y0) as integer);
+                w.scissor(sc.b_x0 as integer, (screen_h - sc.b_y1) as integer,
+                          (sc.b_x1 - sc.b_x0) as integer, (sc.b_y1 - sc.b_y0) as integer);
             } else {
                 if vp.vw_w > 0 or b.b_clipped {
                     // Nothing of this run is visible in this view.
-                    graphics::gl_enable(graphics::GL_SCISSOR_TEST);
-                    graphics::gl_scissor(0, 0, 0, 0);
+                    w.enable(GL_SCISSOR_TEST);
+                    w.scissor(0, 0, 0, 0);
                 } else {
-                    graphics::gl_disable(graphics::GL_SCISSOR_TEST);
+                    w.disable(GL_SCISSOR_TEST);
                 }
             }
-            graphics::gl_draw_instanced(p.pn_vao, 6, b.b_count);
+            g.unit.draw_instanced(g.shader, b.b_count);
             calls = calls + 1;
         }
     }
@@ -1011,18 +1022,14 @@ fn gl_draw_band(self: const Stage, p: const Painter, _screen_w: float,
 
 // Make (or remake) the offscreen colour target the world pass draws into.
 //
-// ⚠ It takes no `Stage`: an offscreen target is a Painter and a size, and
-// nothing about the scene changes it.  The parameter was there and unread.
-fn ensure_light_target(p: Painter, w: integer, h: integer) {
-    if p.pn_light == 0 {
-        p.pn_light = graphics::gl_create_shader(VERT_LIGHT, FRAG_LIGHT);
-    }
-    if p.pn_fbo != 0 and p.pn_fw == w and p.pn_fh == h { return; }
-    p.pn_scene = graphics::gl_create_color_texture(w, h);
-    if p.pn_fbo == 0 { p.pn_fbo = graphics::gl_create_framebuffer(); }
-    graphics::gl_framebuffer_texture(p.pn_fbo, 0, p.pn_scene);
-    p.pn_fw = w;
-    p.pn_fh = h;
+// ⚠ It takes no `Stage`: an offscreen target is the GL objects and a size, and
+// nothing about the scene changes it.
+fn ensure_light_target(g: StageGl, w: const Window, width: integer, height: integer) {
+    if g.fw == width and g.fh == height { return; }
+    g.scene = w.texture(width, height);
+    g.target.attach(g.scene);
+    g.fw = width;
+    g.fh = height;
 }
 
 // One fullscreen multiply: the world pass times the light standing at each pixel.
@@ -1030,31 +1037,29 @@ fn ensure_light_target(p: Painter, w: integer, h: integer) {
 // ⚠ THE CURVE AND THE FLOOR GO IN AS UNIFORMS, from the same `LIGHT_FALLOFF` and
 // ambient the software path and every gate read.  Nothing about the falloff is
 // written in the shader's text.
-fn gl_composite(self: const Stage, p: const Painter, screen_w: float, screen_h: float) {
-    graphics::gl_disable(graphics::GL_SCISSOR_TEST);
-    graphics::gl_disable(graphics::GL_BLEND);
-    graphics::gl_use_shader(p.pn_light);
-    graphics::gl_bind_texture(p.pn_scene, 0);
-    graphics::gl_set_uniform_int(p.pn_light, "uScene", 0);
-    graphics::gl_set_uniform_vec2(p.pn_light, "uScreenL", screen_w, screen_h);
+fn gl_composite(self: const Stage, g: const StageGl, w: const Window, screen_w: float,
+                screen_h: float) {
+    w.disable(GL_SCISSOR_TEST);
+    w.disable(GL_BLEND);
+    g.scene.bind(0);
+    g.light.set_int("uScene", 0);
+    g.light.set_vec2("uScreenL", screen_w, screen_h);
     off = view_offset(self, 0, 0);
-    graphics::gl_set_uniform_vec2(p.pn_light, "uCamL", 0.0 - off.p_x, 0.0 - off.p_y);
-    graphics::gl_set_uniform_float(p.pn_light, "uFloor", self.st_ambient);
-    graphics::gl_set_uniform_float(p.pn_light, "uFalloff", LIGHT_FALLOFF);
+    g.light.set_vec2("uCamL", 0.0 - off.p_x, 0.0 - off.p_y);
+    g.light.set_float("uFloor", self.st_ambient);
+    g.light.set_float("uFalloff", LIGHT_FALLOFF);
     n = len(self.st_lights);
     if n > 32 { n = 32; }
-    graphics::gl_set_uniform_int(p.pn_light, "uCount", n);
+    g.light.set_int("uCount", n);
     for i in 0..n {
         l = self.st_lights[i];
-        graphics::gl_set_uniform_vec4(p.pn_light, "uLights[{i}]", l.lt_x, l.lt_y,
-                                      l.lt_r, l.lt_power);
-        graphics::gl_set_uniform_vec3(p.pn_light, "uLightCol[{i}]",
-                                      ((l.lt_colour >> 16) & 255) as float / 255.0,
-                                      ((l.lt_colour >> 8) & 255) as float / 255.0,
-                                      (l.lt_colour & 255) as float / 255.0);
+        g.light.set_vec4("uLights[{i}]", l.lt_x, l.lt_y, l.lt_r, l.lt_power);
+        g.light.set_vec3("uLightCol[{i}]", ((l.lt_colour >> 16) & 255) as float / 255.0,
+                         ((l.lt_colour >> 8) & 255) as float / 255.0,
+                         (l.lt_colour & 255) as float / 255.0);
     }
-    graphics::gl_draw_fullscreen_quad();
-    graphics::gl_enable(graphics::GL_BLEND);
+    g.full.draw(g.light);
+    w.enable(GL_BLEND);
 }
 
 // The screen rect a run may paint in: the view's own rect, intersected with the

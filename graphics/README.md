@@ -46,8 +46,11 @@ while w.poll() {
   (`upload`, `draw`, `draw_mode`, `indices` + `draw_indexed`, `update`, instancing through an
   `InstanceBuffer`), `Texture` (`texture`, `depth_texture`, `texture_from(canvas)`,
   `load_texture(png)`, `text_texture`), `Framebuffer` (`attach`, `render_to`), `quad`.
-- `Painter` (`rect`, `image`, `sprite` at pixel positions), `Sprites` (a sheet of sprites),
-  `GroupMeshes` (a mesh in groups re-uploaded one at a time).
+- `Painter` (`rect`, `image`, `sprite` at pixel positions, in call order over whatever the frame
+  holds — a HUD is never hidden behind 3-D), `Sprites` (a sheet of sprites), `GroupMeshes` (a
+  mesh in groups re-uploaded one at a time).
+- `Window.enabled(cap)` answers whether a switch is on (a window opens with depth testing on), so
+  a pass can hand the window back as it found it.
 - `Font` — `load_font`, `measure`, `ascent`, `line_height`, `rasterize` (a glyph's coverage).
 
 The 3-D maths, meshes and scenes are the [`mesh3d`](https://github.com/loft-lang/loft-libs-assets/tree/main/mesh3d)

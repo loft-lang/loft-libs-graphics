@@ -44,6 +44,8 @@ int64_t gg_mesh(int64_t win, const float *data, int64_t n, int64_t stride);
 void gg_draw(int64_t mesh, int64_t shader);
 void gg_release(int64_t res);
 void gg_capability(int64_t win, int64_t cap, int64_t on);
+int64_t gg_capability_on(int64_t win, int64_t cap);
+void gg_draw_over(int64_t mesh, int64_t shader);
 void gg_blend(int64_t win, int64_t src, int64_t dst);
 void gg_cull(int64_t win, int64_t face);
 void gg_depth_write(int64_t win, int64_t on);
@@ -428,6 +430,8 @@ typedef struct {
     int width, height, should_close;
     int closed; /* `gg_close` ran: the context and the X window are gone */
     unsigned target; /* the framebuffer draws go to, 0 for the window */
+    unsigned caps; /* which of GL_DEPTH_TEST … GL_SCISSOR_TEST (bits 1-4) are on: every change
+                    * comes through this file, so the record is the context's state */
     int64_t refs; /* the shaders and meshes still holding this window */
     int64_t *events;
     int64_t event_count, event_cap;
@@ -984,6 +988,7 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
 
     /* 0.9's first frames: depth test on, both buffers opaque black before anything is shown. */
     w->api.glEnable(GL_DEPTH_TEST);
+    w->caps = 1u << 1;
     w->api.glViewport(0, 0, w->width, w->height);
     w->api.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     w->api.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -1078,6 +1083,7 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
     w->height = gg_js_size(1);
     /* 0.9's first state: depth test on, the frame opaque black */
     w->api.glEnable(GL_DEPTH_TEST);
+    w->caps = 1u << 1;
     w->api.glViewport(0, 0, w->width, w->height);
     w->api.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     w->api.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -1396,6 +1402,19 @@ void gg_draw(int64_t mesh, int64_t shader) {
     gg_draw_as(mesh, shader, 0, 0, 0);
 }
 
+/* A 2-D draw: over whatever the frame holds, in call order — the depth test is off for this one
+ * draw and back as it was after it, so a HUD neither hides behind a 3-D scene nor loses to an
+ * earlier rectangle at the same depth. */
+void gg_draw_over(int64_t mesh, int64_t shader) {
+    gg_res *m = gg_res_of(mesh);
+    unsigned depth;
+    if (!m || m->kind != GG_MESH || !gg_use(m->w, "Painter")) return;
+    depth = (m->w->caps >> 1) & 1u;
+    if (depth) m->w->api.glDisable(GL_DEPTH_TEST);
+    gg_draw_as(mesh, shader, 0, 0, 0);
+    if (depth) m->w->api.glEnable(GL_DEPTH_TEST);
+}
+
 static gg_res *gg_mesh_of(int64_t h, const char *what) {
     gg_res *r = gg_res_of(h);
     if (!r || r->kind != GG_MESH || !gg_use(r->w, what)) return NULL;
@@ -1515,6 +1534,15 @@ void gg_capability(int64_t win, int64_t cap, int64_t on) {
     if (cap < 1 || cap > 4 || !gg_use(w, on ? "Window.enable" : "Window.disable")) return;
     if (on) w->api.glEnable(caps[cap]);
     else w->api.glDisable(caps[cap]);
+    if (on) w->caps |= 1u << cap;
+    else w->caps &= ~(1u << cap);
+}
+
+/* Whether capability `cap` is on: read from the record, so asking costs no GL call. */
+int64_t gg_capability_on(int64_t win, int64_t cap) {
+    gg_window *w = gg_of(win);
+    if (cap < 1 || cap > 4 || !w || w->closed) return 0;
+    return (w->caps >> cap) & 1u;
 }
 
 /* BLEND_ZERO = 0 … BLEND_ONE_MINUS_DST_ALPHA = 5; anything else is ONE, as in 0.9. */
@@ -1847,6 +1875,10 @@ int64_t gg_mesh(int64_t win, const float *data, int64_t n, int64_t stride) {
     (void) stride;
     return 0;
 }
+void gg_draw_over(int64_t mesh, int64_t shader) {
+    (void) mesh;
+    (void) shader;
+}
 void gg_draw(int64_t mesh, int64_t shader) {
     (void) mesh;
     (void) shader;
@@ -1858,6 +1890,11 @@ void gg_capability(int64_t win, int64_t cap, int64_t on) {
     (void) win;
     (void) cap;
     (void) on;
+}
+int64_t gg_capability_on(int64_t win, int64_t cap) {
+    (void) win;
+    (void) cap;
+    return 0;
 }
 void gg_blend(int64_t win, int64_t src, int64_t dst) {
     (void) win;

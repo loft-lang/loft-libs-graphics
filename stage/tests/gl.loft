@@ -1,0 +1,112 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The GL path draws the picture the software path draws: one scene through `render_stage` onto a
+// canvas and through `gl_render` onto a window, compared pixel by pixel.  Every rectangle sits on
+// whole pixels, so the two have no rounding to disagree about; every expected count is worked out
+// by hand.  Without a display `open_window` answers null and these return early — run them under
+// Xvfb (`xvfb-run -a -s '-noreset -screen 0 800x600x24' loft --tests tests`).
+use stage::*;
+use graphics::*;
+
+fn count_of(cv: const graphics::Canvas, want: integer) -> integer {
+  n = 0;
+  for v in cv.data { if v == want { n = n + 1; } }
+  n
+}
+
+// The scene through both paths on a `width` x `height` window; answers the GL frame, and checks
+// it against the software canvas and the draw-call count against the batches.
+fn both_ways(st: stage::Stage, width: integer, height: integer) -> graphics::Canvas? {
+  w = open_window(width, height, "stage gl") ?? return null;
+  g = stage::gl_stage(w) ?? return null;
+  st.compose();
+  soft = graphics::canvas(width, height, 0xff000000);
+  st.render_stage(soft);
+  w.clear(0xff000000);
+  calls = st.gl_render(g, w, width as float, height as float);
+  assert(calls == len(st.batches()), "one draw call per batch: {calls} for {len(st.batches())}");
+  frame = w.capture();
+  differ = 0;
+  for i in 0..len(soft.data) { if soft.data[i] != frame.data[i] { differ = differ + 1; } }
+  assert(differ == 0, "{differ} pixels differ between the GL frame and the software canvas");
+  frame
+}
+
+// Two overlapping rectangles: green (2,2)-(22,12) = 200 pixels, red (12,6)-(32,16) = 200 drawn
+// after it, so the overlap (12,6)-(22,12) = 60 is red: 140 green, 200 red.
+fn test_overlapping_rectangles_match_the_software_canvas() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_x: 2.0, pl_y: 2.0, pl_w: 20.0, pl_h: 10.0,
+                                     pl_colour: 0x00ff00 });
+  _ = st.node_add(-1, stage::Place { pl_x: 12.0, pl_y: 6.0, pl_w: 20.0, pl_h: 10.0,
+                                     pl_colour: 0xff0000 });
+  frame = both_ways(st, 48, 32) ?? return;
+  assert(count_of(frame, 0xff00ff00) == 140, "140 green, got {count_of(frame, 0xff00ff00)}");
+  assert(count_of(frame, 0xffff0000) == 200, "200 red, got {count_of(frame, 0xffff0000)}");
+}
+
+// A clipping parent: the scissor cuts the child at (5,5)-(10,10) = 25 pixels — and on GL the
+// scissor's y is measured from the bottom, the one flip the software path does not share.
+fn test_a_clipped_child_matches_the_software_canvas() {
+  st = stage::stage_new();
+  p = st.node_add(-1, stage::Place { pl_w: 10.0, pl_h: 10.0, pl_clips: true });
+  _ = st.node_add(p, stage::Place { pl_x: 5.0, pl_y: 5.0, pl_w: 20.0, pl_h: 20.0,
+                                    pl_colour: 0x00ff00 });
+  frame = both_ways(st, 32, 32) ?? return;
+  assert(count_of(frame, 0xff00ff00) == 25, "5x5 survives the clip, got {count_of(frame, 0xff00ff00)}");
+}
+
+// ⚠ THE WINDOW IS HANDED BACK AS IT WAS.  The pass turns depth testing off and blending and the
+// scissor on; a program that draws 3-D after it must find its own switches where it left them —
+// whichever way they were set.
+fn test_the_window_is_handed_back_as_it_was() {
+  st = stage::stage_new();
+  _ = st.node_add(-1, stage::Place { pl_x: 2.0, pl_y: 2.0, pl_w: 10.0, pl_h: 10.0,
+                                     pl_colour: 0x00ff00, pl_clips: true });
+  st.compose();
+  w = open_window(32, 32, "stage state") ?? return;
+  g = stage::gl_stage(w) ?? return;
+  _ = st.gl_render(g, w, 32.0, 32.0);
+  assert(w.enabled(GL_DEPTH_TEST) && !w.enabled(GL_BLEND) && !w.enabled(GL_SCISSOR_TEST),
+         "as opened: depth on, blending and the scissor off");
+  w.disable(GL_DEPTH_TEST);
+  w.enable(GL_BLEND);
+  w.enable(GL_SCISSOR_TEST);
+  _ = st.gl_render(g, w, 32.0, 32.0);
+  assert(!w.enabled(GL_DEPTH_TEST) && w.enabled(GL_BLEND) && w.enabled(GL_SCISSOR_TEST),
+         "and the other way round");
+}
+
+// The light map: the world pass into an offscreen target, then the fullscreen multiply.  The GL
+// composite works in floats and the software path in its own arithmetic, so they meet within a
+// few levels per channel (4 of 255 measured on Mesa's llvmpipe), never exactly; 6 leaves a
+// driver room, and a composite that is wrong — a light misplaced, the floor or the curve
+// dropped — misses by tens.
+fn test_the_light_map_matches_the_software_canvas() {
+  st = stage::stage_new();
+  st.set_ambient(0.1);
+  st.set_light_map(true);
+  _ = st.add_light(20.0, 16.0, 40.0, 0xffffff, 1.0);
+  _ = st.node_add(-1, stage::Place { pl_x: 4.0, pl_y: 4.0, pl_w: 40.0, pl_h: 20.0,
+                                     pl_colour: 0xc08040 });
+  st.compose();
+  soft = graphics::canvas(64, 32, 0xff000000);
+  st.render_stage(soft);
+  w = open_window(64, 32, "stage light") ?? return;
+  g = stage::gl_stage(w) ?? return;
+  w.clear(0xff000000);
+  calls = st.gl_render(g, w, 64.0, 32.0);
+  assert(calls == 2, "the world pass and the composite: {calls} calls");
+  f = w.capture();
+  worst = 0;
+  for i in 0..len(soft.data) {
+    for sh in [16, 8, 0] {
+      d = ((soft.data[i] >> sh) & 255) - ((f.data[i] >> sh) & 255);
+      if d < 0 { d = 0 - d; }
+      if d > worst { worst = d; }
+    }
+  }
+  assert(worst <= 6, "the GL light map is {worst} levels from the software one");
+  assert(f.get_pixel(20, 16) == 0xffc08040, "full at the light: {f.get_pixel(20, 16):x}");
+}

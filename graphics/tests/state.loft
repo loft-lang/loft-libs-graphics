@@ -130,3 +130,21 @@ fn test_depth_write() {
   q.draw(s);
   assert(pixel(w, 16, 24) == GREEN, "with depth writes the near quad wins");
 }
+
+// `enabled` answers what the window's switches are: depth testing on at open and the rest off,
+// then whatever `enable` / `disable` set last; a closed window answers false.
+fn test_enabled_answers_the_switches() {
+  wo = open_window(64, 48, "g9-enabled");
+  if !display() { return; }
+  w = wo ?? return assert(false, "no window");
+  assert(w.enabled(GL_DEPTH_TEST), "depth testing is on at open");
+  assert(!w.enabled(GL_BLEND) && !w.enabled(GL_CULL_FACE) && !w.enabled(GL_SCISSOR_TEST), "the rest off");
+  w.enable(GL_BLEND);
+  w.enable(GL_SCISSOR_TEST);
+  w.disable(GL_DEPTH_TEST);
+  assert(w.enabled(GL_BLEND) && w.enabled(GL_SCISSOR_TEST), "on once enabled");
+  assert(!w.enabled(GL_DEPTH_TEST) && !w.enabled(GL_CULL_FACE), "off once disabled, or never on");
+  assert(!w.enabled(0) && !w.enabled(5), "not a capability: false");
+  w.close();
+  assert(!w.enabled(GL_BLEND), "a closed window answers false");
+}

@@ -137,3 +137,41 @@ fn test_a_text_texture_holds_its_text() {
   assert(t.width() == f.measure("AV", 18.0) as integer + 5, "width {t.width()}");
   assert(t.height() == f.line_height(18.0)+4, "height {t.height()}");
 }
+
+// The whole window at depth -0.9 (near), white through FLAT_V / FLAT_F.
+fn near_quad() -> vector<single> {
+  xy = [-1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, 1.0];
+  out: vector<single> = [];
+  for i in 0..6 { out += [xy[2 * i] as single, xy[2 * i + 1] as single, -0.9 as single]; }
+  out
+}
+
+// ⚠ A PAINTER DRAWS IN CALL ORDER.  The window opens with depth testing on and every painter quad
+// sits at one depth, so under the test the FIRST of two overlapping rectangles would stay on top,
+// and a HUD would hide behind any 3-D drawn nearer.  Over a frame whose depth holds a near quad:
+// green (8, 4)-(24, 14), then red (16, 4)-(32, 14), then sprite 1 (green) at (40, 20)-(56, 36).
+fn test_a_painter_draws_in_call_order_over_a_3d_frame() {
+  wo = open_window(64, 48, "g9-order");
+  if !display() { return; }
+  w = wo ?? return assert(false, "no window");
+  p = w.painter() ?? return assert(false, "painter");
+  near = w.shader(FLAT_V, FLAT_F) ?? return assert(false, "the near quad's shader compiles");
+  full = w.upload(near_quad(), 3);
+  atlas = canvas(4, 2, RED);
+  for y in 0..2 {
+    atlas.set_pixel(2, y, GREEN); atlas.set_pixel(3, y, GREEN);
+  }
+  sheet = w.sprites(atlas, 2, 1) ?? return assert(false, "sprite shader");
+  assert(w.enabled(GL_DEPTH_TEST), "the window opened with depth testing on");
+  w.clear(BLACK);
+  full.draw(near);
+  p.rect(8.0, 4.0, 16.0, 10.0, 0.0, 1.0, 0.0, 1.0);
+  p.rect(16.0, 4.0, 16.0, 10.0, 1.0, 0.0, 0.0, 1.0);
+  p.sprite(sheet, 40.0, 20.0, 16.0, 16.0, 1);
+  c = w.capture();
+  assert(at(c, 10, 8) == GREEN, "the rectangle is not hidden behind the 3-D quad: {at(c, 10, 8):x}");
+  assert(at(c, 20, 8) == RED, "the later rectangle covers the earlier: {at(c, 20, 8):x}");
+  assert(at(c, 48, 28) == GREEN, "the sprite is not hidden either: {at(c, 48, 28):x}");
+  assert(at(c, 4, 40) == WHITE, "and the 3-D quad shows around them: {at(c, 4, 40):x}");
+  assert(w.enabled(GL_DEPTH_TEST), "the painter handed depth testing back on");
+}

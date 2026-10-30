@@ -41,6 +41,8 @@ loft install stage
   `facing_of` / `action_of` / `rotation_of` / `mirrored` · `facing_name(angle)`
 - `batches() -> vector<Batch>` · `pack_instances() -> vector<single>` ·
   `INSTANCE_STRIDE` / `OFF_AFFINE` / `OFF_CELL` / `OFF_RGBA` / `OFF_SWAY`
+- On a `graphics::Window`: `gl_stage(window) -> StageGl?` (its shaders and quad, built once) ·
+  `gl_render(g, window, screen_w, screen_h) -> integer` (the draw calls issued)
 - `prop_of(idx, prop)` / `set_prop(idx, prop, v)` · `tween_prop(idx, prop, to, dur_us,
   curve, shape)` · `prop_tweening(idx, prop)` / `cancel_prop_tween` / `cancel_node_tweens` /
   `tween_count()` · `Prop.` `X` `Y` `Rot` `ScaleX` `ScaleY` `OriginX` `OriginY` `Alpha` `Depth`
@@ -300,8 +302,8 @@ stays well-formed on its own and only the correspondence goes wrong.
 ⚠ **This is the runtime blur.** The plan's default is a **baked** blur, where the asset
 packer pre-blurs a static layer so it costs nothing at run time; that belongs to the asset
 pipeline, not here. Runtime blur is what a radius that actually changes needs — a focus pull.
-And the **GL runtime blur is not implemented**: it needs a ping-pong pass that nothing here
-can gate, and shipping it unverified would be worse than its absence. GL fog and the
+And the **GL runtime blur is not implemented**: it needs a ping-pong pass, and shipping it
+unverified would be worse than its absence. GL fog and the
 software path are complete.
 
 ## The light-map pass
@@ -338,10 +340,11 @@ as a **uniform** rather than a number baked into its text. Retuning the curve is
 parallaxed background is lit as though it stood on that plane. Per-layer atmosphere is L3's
 question, not this pass's.
 
-⚠ **The GL half is reviewed, not gated**: these tests have no GL context, so the FBO pass is
-proved only by the arithmetic and layer split it shares with the software path, which is
-gated in full. The shape is the same in both — world band, composite, HUD band — so the two
-can be compared rather than merely believed.
+The shape is the same in both paths — world band, composite, HUD band — so the two are
+compared rather than believed: `tests/gl.loft` draws one scene through each on a window
+(under Xvfb) and checks the GL frame against the software canvas — exact for plain and
+clipped nodes, within 6 levels per channel for the light map, whose composite works in
+floats.
 
 ## Several views over one stage
 
@@ -445,7 +448,7 @@ same string would be five chances to count wrong.
 ⚠⚠ **The modifier problem this phase was warned about does not exist.**  `input`'s `Bindings`
 cannot express a modifier — an `ActionBinding` is a name and a list of key codes — but a text
 field does not want *actions*.  It wants *this keystroke, with these modifiers, in this order*,
-and `graphics`'s event queue already delivers exactly that through `gl_event_mods()`.  So
+and `graphics` already delivers exactly that: each `KeyDown` event carries its `mods`.  So
 `key_event` takes the mods that arrived **with** the key, and Shift+Left selects where Left
 merely moves.
 
@@ -469,7 +472,10 @@ takes text that is already committed, which is what `EV_TEXT` delivers.
 
 **Premultiplied throughout.** `pack_instances` multiplies rgb by alpha and `gl_render` blends
 with `(ONE, ONE_MINUS_SRC_ALPHA)`; `render_stage` does the same arithmetic on a software
-canvas. Straight alpha darkens every anti-aliased edge under linear filtering, and this stack
+canvas.  **In draw order:** `gl_render` turns depth testing off for its pass, since every node
+sits at one depth and the test would keep the first of two overlapping nodes where the software
+path paints the last.  It hands the window's depth, blend and scissor switches back as it found
+them; the blend function stays premultiplied. Straight alpha darkens every anti-aliased edge under linear filtering, and this stack
 is made of overlapping soft-edged sprites.
 
 `render(list, canvas)` stays the path for a `lavition_ui` command list, which carries
