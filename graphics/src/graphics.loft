@@ -1447,6 +1447,97 @@ pub fn close(self: Window) {
   }
 }
 
+// --- Shaders and GPU meshes: a window's GL objects, deleted when they die ---
+//
+//   s = w.shader(VERTEX, FRAGMENT) ?? return;
+//   m = w.upload(triangle, 6);                   // position + normal per vertex
+//   s.set_mat4("mvp", camera);
+//   m.draw(s);
+//
+// Each belongs to the window that made it.  Dying after that window closed does nothing — closing
+// the window freed it — so the order in which they and the window die never matters.
+
+fn gg_shader(win: integer, vertex: text, fragment: text) -> integer;
+#c "gg_shader" "int64_t(int64_t, const char*, const char*)"
+fn gg_uniform_f(sh: integer, name: text, v: const vector<float>);
+#c "gg_uniform_f" "void(int64_t, const char*, const double*, int64_t)"
+fn gg_uniform_i(sh: integer, name: text, v: integer);
+#c "gg_uniform_i" "void(int64_t, const char*, int64_t)"
+fn gg_mesh(win: integer, data: const vector<single>, stride: integer) -> integer;
+#c "gg_mesh" "int64_t(int64_t, const float*, int64_t, int64_t)"
+fn gg_draw(mesh: integer, shader: integer);
+#c "gg_draw" "void(int64_t, int64_t)"
+fn gg_release(res: integer);
+#c "gg_release" "void(int64_t)"
+
+// A linked GLSL program.
+pub struct Shader {
+  handle: integer,
+}
+
+fn OpDrop(self: Shader) {
+  if self.handle != 0 { gg_release(self.handle); }
+}
+
+// Compile and link a GLSL 3.30 program for this window.  Null when either stage does not compile
+// or the program does not link; the driver's log says why, on stderr.
+pub fn shader(self: Window, vertex: text, fragment: text) -> Shader? {
+  h = gg_shader(self.handle, vertex, fragment);
+  if h == 0 { return null; }
+  Shader { handle: h }
+}
+
+// Set uniform `name` of this shader; a name the program does not use is ignored.
+pub fn set_float(self: Shader, name: text, v: float) {
+  gg_uniform_f(self.handle, name, [v]);
+}
+
+// A `vec2` uniform.
+pub fn set_vec2(self: Shader, name: text, x: float, y: float) {
+  gg_uniform_f(self.handle, name, [x, y]);
+}
+
+// A `vec3` uniform.
+pub fn set_vec3(self: Shader, name: text, x: float, y: float, z: float) {
+  gg_uniform_f(self.handle, name, [x, y, z]);
+}
+
+// A `vec4` uniform.
+pub fn set_vec4(self: Shader, name: text, x: float, y: float, z: float, w: float) {
+  gg_uniform_f(self.handle, name, [x, y, z, w]);
+}
+
+// A `mat4` uniform from 16 floats, column-major; fewer than 16 is ignored.
+pub fn set_mat4(self: Shader, name: text, m: const vector<float>) {
+  if len(m) >= 16 { gg_uniform_f(self.handle, name, m); }
+}
+
+// An `int` (or sampler) uniform.
+pub fn set_int(self: Shader, name: text, v: integer) {
+  gg_uniform_i(self.handle, name, v);
+}
+
+// Vertices on the GPU, `stride` floats each: position (location 0); from 6 floats a normal (1);
+// at exactly 8 a texture coordinate (2); from 10 a colour, RGBA (2); from 14 an anchor (3) and a
+// birth time (4).
+pub struct GpuMesh {
+  handle: integer,
+}
+
+fn OpDrop(self: GpuMesh) {
+  if self.handle != 0 { gg_release(self.handle); }
+}
+
+// Upload `data` as a mesh of `len(data) / stride` vertices.
+pub fn upload(self: Window, data: const vector<single>, stride: integer) -> GpuMesh {
+  GpuMesh { handle: gg_mesh(self.handle, data, stride) }
+}
+
+// Draw every vertex of this mesh as triangles with `shader`.
+pub fn draw(self: GpuMesh, shader: const Shader) {
+  gg_draw(self.handle, shader.handle);
+}
+
 // --- Input events (Gap 01): an ordered, drained-per-frame event queue ---
 //
 // The polling API above loses text, key-repeat, per-event modifiers, and event

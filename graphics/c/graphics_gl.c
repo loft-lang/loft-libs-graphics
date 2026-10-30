@@ -3,7 +3,9 @@
  *
  * The graphics library's window and GL context, in C99: a `[c] shim` loft builds itself, bound by
  * the `#c` declarations in src/graphics.loft.  A window is a handle (its record's address as an
- * integer, 0 for none) that the loft `Window` holds and closes when it dies.
+ * integer, 0 for none) that the loft `Window` holds and closes when it dies.  A shader or a mesh
+ * is a handle too, holding a counted reference to its window: released after the window closed it
+ * is a no-op (closing the context freed it), and the window's record lives until the last one.
  *
  * Linux: X11 and GLX, opened at run time (`libX11.so.6`, `libGL.so.1`) with the few types and
  * constants this file uses declared here, so it builds with loft's fixed flags and no development
@@ -27,6 +29,12 @@ int64_t gg_height(int64_t h);
 int64_t gg_event_count(int64_t h);
 void gg_events(int64_t h, int64_t *out, int64_t n);
 void gg_read_pixels(int64_t h, int64_t *out, int64_t n);
+int64_t gg_shader(int64_t win, const char *vertex, const char *fragment);
+void gg_uniform_f(int64_t sh, const char *name, const double *v, int64_t n);
+void gg_uniform_i(int64_t sh, const char *name, int64_t v);
+int64_t gg_mesh(int64_t win, const float *data, int64_t n, int64_t stride);
+void gg_draw(int64_t mesh, int64_t shader);
+void gg_release(int64_t res);
 
 /* One queued input event: an EV_* tag (src/graphics.loft) and up to four integer fields. */
 #define GG_EVENT_WORDS 5
@@ -153,6 +161,15 @@ typedef struct {
 #define GL_BACK 0x0405
 #define GL_RGBA 0x1908
 #define GL_UNSIGNED_BYTE 0x1401
+#define GL_TRIANGLES 0x0004
+#define GL_FLOAT 0x1406
+#define GL_ARRAY_BUFFER 0x8892
+#define GL_STATIC_DRAW 0x88E4
+#define GL_FRAGMENT_SHADER 0x8B30
+#define GL_VERTEX_SHADER 0x8B31
+#define GL_COMPILE_STATUS 0x8B81
+#define GL_LINK_STATUS 0x8B82
+#define GL_INFO_LOG_LENGTH 0x8B84
 
 typedef void *gx_fbconfig;
 typedef void *gx_context;
@@ -200,6 +217,37 @@ typedef struct {
     void (*glReadBuffer)(unsigned);
     void (*glPixelStorei)(unsigned, int);
     void (*glReadPixels)(int, int, int, int, unsigned, unsigned, void *);
+
+    unsigned (*glCreateShader)(unsigned);
+    void (*glShaderSource)(unsigned, int, const char *const *, const int *);
+    void (*glCompileShader)(unsigned);
+    void (*glGetShaderiv)(unsigned, unsigned, int *);
+    void (*glGetShaderInfoLog)(unsigned, int, int *, char *);
+    void (*glDeleteShader)(unsigned);
+    unsigned (*glCreateProgram)(void);
+    void (*glAttachShader)(unsigned, unsigned);
+    void (*glLinkProgram)(unsigned);
+    void (*glGetProgramiv)(unsigned, unsigned, int *);
+    void (*glGetProgramInfoLog)(unsigned, int, int *, char *);
+    void (*glDeleteProgram)(unsigned);
+    void (*glUseProgram)(unsigned);
+    int (*glGetUniformLocation)(unsigned, const char *);
+    void (*glUniform1f)(int, float);
+    void (*glUniform2f)(int, float, float);
+    void (*glUniform3f)(int, float, float, float);
+    void (*glUniform4f)(int, float, float, float, float);
+    void (*glUniform1i)(int, int);
+    void (*glUniformMatrix4fv)(int, int, unsigned char, const float *);
+    void (*glGenVertexArrays)(int, unsigned *);
+    void (*glBindVertexArray)(unsigned);
+    void (*glDeleteVertexArrays)(int, const unsigned *);
+    void (*glGenBuffers)(int, unsigned *);
+    void (*glBindBuffer)(unsigned, unsigned);
+    void (*glBufferData)(unsigned, intptr_t, const void *, unsigned);
+    void (*glDeleteBuffers)(int, const unsigned *);
+    void (*glVertexAttribPointer)(unsigned, int, unsigned, unsigned char, int, const void *);
+    void (*glEnableVertexAttribArray)(unsigned);
+    void (*glDrawArrays)(unsigned, int, int);
 } gg_api;
 
 typedef struct {
@@ -210,21 +258,50 @@ typedef struct {
     gx_context context;
     pthread_t thread;
     int width, height, should_close;
+    int closed; /* `gg_close` ran: the context and the X window are gone */
+    int64_t refs; /* the shaders and meshes still holding this window */
     int64_t *events;
     int64_t event_count, event_cap;
 } gg_window;
+
+/* A shader or a mesh: its GL names and the window whose context made them. */
+enum { GG_SHADER = 1, GG_MESH = 2 };
+typedef struct {
+    gg_window *w;
+    int kind;
+    unsigned id, buffer; /* program; or vertex array and its buffer */
+    int vertices;
+} gg_res;
 
 static gg_window *gg_of(int64_t h) {
     return (gg_window *) (intptr_t) h;
 }
 
+static gg_res *gg_res_of(int64_t h) {
+    return (gg_res *) (intptr_t) h;
+}
+
+/* The window whose context is current on this thread, so a call on another window's resource
+ * rebinds only when the window changes.  Speed only: every call names its own window. */
+static __thread gg_window *gg_current;
+
 /* A GL call from another thread than the window's finds no current context there: it would draw
  * nothing, or into another window.  Refused, and said so. */
 static int gg_on_thread(gg_window *w, const char *what) {
     if (pthread_equal(w->thread, pthread_self())) return 1;
-    fprintf(stderr, "graphics: Window.%s called from a thread other than the one that opened the "
+    fprintf(stderr, "graphics: %s called from a thread other than the one that opened the "
                     "window; a window is used on its own thread only\n", what);
     return 0;
+}
+
+/* Ready `w` for a GL call named `what`: open, on its thread, its context current. */
+static int gg_use(gg_window *w, const char *what) {
+    if (!w || w->closed || !gg_on_thread(w, what)) return 0;
+    if (gg_current != w) {
+        w->api.glXMakeCurrent(w->display, w->window, w->context);
+        gg_current = w;
+    }
+    return 1;
 }
 
 #define GG_SYM(lib, name)                                                                         \
@@ -266,7 +343,18 @@ static int gg_bind_gl(gg_window *w) {
     (void) GG_PROC(glXSwapIntervalEXT); /* optional */
     return GG_PROC(glClearColor) && GG_PROC(glClear) && GG_PROC(glColorMask) &&
            GG_PROC(glViewport) && GG_PROC(glEnable) && GG_PROC(glReadBuffer) &&
-           GG_PROC(glPixelStorei) && GG_PROC(glReadPixels);
+           GG_PROC(glPixelStorei) && GG_PROC(glReadPixels) && GG_PROC(glCreateShader) &&
+           GG_PROC(glShaderSource) && GG_PROC(glCompileShader) && GG_PROC(glGetShaderiv) &&
+           GG_PROC(glGetShaderInfoLog) && GG_PROC(glDeleteShader) && GG_PROC(glCreateProgram) &&
+           GG_PROC(glAttachShader) && GG_PROC(glLinkProgram) && GG_PROC(glGetProgramiv) &&
+           GG_PROC(glGetProgramInfoLog) && GG_PROC(glDeleteProgram) && GG_PROC(glUseProgram) &&
+           GG_PROC(glGetUniformLocation) && GG_PROC(glUniform1f) && GG_PROC(glUniform2f) &&
+           GG_PROC(glUniform3f) && GG_PROC(glUniform4f) && GG_PROC(glUniform1i) &&
+           GG_PROC(glUniformMatrix4fv) && GG_PROC(glGenVertexArrays) &&
+           GG_PROC(glBindVertexArray) && GG_PROC(glDeleteVertexArrays) && GG_PROC(glGenBuffers) &&
+           GG_PROC(glBindBuffer) && GG_PROC(glBufferData) && GG_PROC(glDeleteBuffers) &&
+           GG_PROC(glVertexAttribPointer) && GG_PROC(glEnableVertexAttribArray) &&
+           GG_PROC(glDrawArrays);
 }
 
 /* An X protocol error while the context is made (a config the server refuses, a context the
@@ -311,7 +399,8 @@ static gx_fbconfig gg_pick_config(gg_window *w, int screen) {
     return pick;
 }
 
-static void gg_free(gg_window *w) {
+/* Close the window: the context (and every GL object in it), the X window, the connection. */
+static void gg_teardown(gg_window *w) {
     if (w->display) {
         if (w->context) {
             w->api.glXMakeCurrent(w->display, 0, NULL);
@@ -321,10 +410,22 @@ static void gg_free(gg_window *w) {
         if (w->colormap) w->api.XFreeColormap(w->display, w->colormap);
         w->api.XCloseDisplay(w->display);
     }
+    if (gg_current == w) gg_current = NULL;
     if (w->libgl) dlclose(w->libgl);
     if (w->libx11) dlclose(w->libx11);
+    w->closed = 1;
+}
+
+/* The record goes once the window is closed and no shader or mesh holds it. */
+static void gg_forget(gg_window *w) {
+    if (!w->closed || w->refs > 0) return;
     free(w->events);
     free(w);
+}
+
+static void gg_free(gg_window *w) {
+    gg_teardown(w);
+    gg_forget(w);
 }
 
 static void gg_push(gg_window *w, int64_t tag, int64_t a, int64_t b, int64_t c, int64_t d) {
@@ -428,6 +529,7 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
     if (!w->api.glXMakeCurrent(w->display, w->window, w->context)) goto fail;
     w->api.XSync(w->display, 0);
     if (gg_x_failed) goto fail;
+    gg_current = w;
     w->api.XSetErrorHandler(previous);
     trapped = 0;
     if (!gg_bind_gl(w)) goto fail;
@@ -464,7 +566,7 @@ fail:
 int64_t gg_poll(int64_t h) {
     gg_window *w = gg_of(h);
     int width, height;
-    if (!w || !gg_on_thread(w, "poll")) return 0;
+    if (!gg_use(w, "Window.poll")) return 0;
     width = w->width;
     height = w->height;
     while (w->api.XPending(w->display) > 0) {
@@ -498,14 +600,14 @@ int64_t gg_poll(int64_t h) {
 
 void gg_swap(int64_t h) {
     gg_window *w = gg_of(h);
-    if (w && gg_on_thread(w, "swap")) gg_present(w);
+    if (gg_use(w, "Window.swap")) gg_present(w);
 }
 
 /* `color` is packed 0xAARRGGBB, as `rgba()` packs it. */
 void gg_clear(int64_t h, int64_t color) {
     gg_window *w = gg_of(h);
     uint32_t c = (uint32_t) color;
-    if (!w || !gg_on_thread(w, "clear")) return;
+    if (!gg_use(w, "Window.clear")) return;
     w->api.glClearColor((float) ((c >> 16) & 0xFF) / 255.0f, (float) ((c >> 8) & 0xFF) / 255.0f,
                         (float) (c & 0xFF) / 255.0f, (float) ((c >> 24) & 0xFF) / 255.0f);
     w->api.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -513,8 +615,7 @@ void gg_clear(int64_t h, int64_t color) {
 
 void gg_close(int64_t h) {
     gg_window *w = gg_of(h);
-    if (!w) return;
-    if (!gg_on_thread(w, "close")) return;
+    if (!w || w->closed || !gg_on_thread(w, "Window.close")) return;
     gg_free(w);
 }
 
@@ -550,7 +651,7 @@ void gg_read_pixels(int64_t h, int64_t *out, int64_t n) {
     gg_window *w = gg_of(h);
     unsigned char *rgba;
     int64_t x, y;
-    if (!w || !gg_on_thread(w, "capture")) return;
+    if (!gg_use(w, "Window.capture")) return;
     if (n != (int64_t) w->width * w->height || n <= 0) return;
     rgba = (unsigned char *) malloc((size_t) n * 4u);
     if (!rgba) return;
@@ -566,6 +667,180 @@ void gg_read_pixels(int64_t h, int64_t *out, int64_t n) {
         }
     }
     free(rgba);
+}
+
+static gg_res *gg_new_res(gg_window *w, int kind) {
+    gg_res *r = (gg_res *) calloc(1, sizeof(gg_res));
+    if (!r) return NULL;
+    r->w = w;
+    r->kind = kind;
+    w->refs++;
+    return r;
+}
+
+static unsigned gg_compile(gg_window *w, unsigned type, const char *source, const char *what) {
+    unsigned id = w->api.glCreateShader(type);
+    int ok = 0;
+    w->api.glShaderSource(id, 1, &source, NULL);
+    w->api.glCompileShader(id);
+    w->api.glGetShaderiv(id, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[2048];
+        log[0] = 0;
+        w->api.glGetShaderInfoLog(id, (int) sizeof log, NULL, log);
+        fprintf(stderr, "graphics: the %s shader does not compile:\n%s\n", what, log);
+        w->api.glDeleteShader(id);
+        return 0;
+    }
+    return id;
+}
+
+/* Compile and link a program; 0, with the driver's log on stderr, when either fails. */
+int64_t gg_shader(int64_t win, const char *vertex, const char *fragment) {
+    gg_window *w = gg_of(win);
+    unsigned vs, fs, program;
+    int ok = 0;
+    gg_res *r;
+    if (!gg_use(w, "Window.shader")) return 0;
+    vs = gg_compile(w, GL_VERTEX_SHADER, vertex, "vertex");
+    if (!vs) return 0;
+    fs = gg_compile(w, GL_FRAGMENT_SHADER, fragment, "fragment");
+    if (!fs) {
+        w->api.glDeleteShader(vs);
+        return 0;
+    }
+    program = w->api.glCreateProgram();
+    w->api.glAttachShader(program, vs);
+    w->api.glAttachShader(program, fs);
+    w->api.glLinkProgram(program);
+    w->api.glDeleteShader(vs);
+    w->api.glDeleteShader(fs);
+    w->api.glGetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[2048];
+        log[0] = 0;
+        w->api.glGetProgramInfoLog(program, (int) sizeof log, NULL, log);
+        fprintf(stderr, "graphics: the shader program does not link:\n%s\n", log);
+        w->api.glDeleteProgram(program);
+        return 0;
+    }
+    r = gg_new_res(w, GG_SHADER);
+    if (!r) {
+        w->api.glDeleteProgram(program);
+        return 0;
+    }
+    r->id = program;
+    return (int64_t) (intptr_t) r;
+}
+
+/* Bind shader `sh` and answer the location of its uniform `name`, -1 for none. */
+static int gg_uniform_at(gg_res *r, const char *name, const char *what) {
+    if (!r || r->kind != GG_SHADER || !gg_use(r->w, what)) return -1;
+    r->w->api.glUseProgram(r->id);
+    return r->w->api.glGetUniformLocation(r->id, name);
+}
+
+/* A float uniform of `n` components: 1 to 4 a float or vector, 16 a column-major mat4. */
+void gg_uniform_f(int64_t sh, const char *name, const double *v, int64_t n) {
+    gg_res *r = gg_res_of(sh);
+    int at = gg_uniform_at(r, name, "Shader.set");
+    gg_api *gl;
+    if (at < 0) return;
+    gl = &r->w->api;
+    if (n == 1) gl->glUniform1f(at, (float) v[0]);
+    else if (n == 2) gl->glUniform2f(at, (float) v[0], (float) v[1]);
+    else if (n == 3) gl->glUniform3f(at, (float) v[0], (float) v[1], (float) v[2]);
+    else if (n == 4) gl->glUniform4f(at, (float) v[0], (float) v[1], (float) v[2], (float) v[3]);
+    else if (n >= 16) {
+        float m[16];
+        int i;
+        for (i = 0; i < 16; i++) m[i] = (float) v[i];
+        gl->glUniformMatrix4fv(at, 1, 0, m);
+    }
+}
+
+void gg_uniform_i(int64_t sh, const char *name, int64_t v) {
+    gg_res *r = gg_res_of(sh);
+    int at = gg_uniform_at(r, name, "Shader.set_int");
+    if (at >= 0) r->w->api.glUniform1i(at, (int) v);
+}
+
+/* A vertex array over `n` floats, `stride` per vertex, laid out as 0.9 laid it: position at 0;
+ * a normal at 1 from 6 floats; a UV at 2 at exactly 8; a colour at 2 from 10; an anchor at 3 and
+ * a birth time at 4 from 14. */
+int64_t gg_mesh(int64_t win, const float *data, int64_t n, int64_t stride) {
+    gg_window *w = gg_of(win);
+    gg_api *gl;
+    gg_res *r;
+    int bytes;
+    if (stride < 3 || !gg_use(w, "Window.mesh")) return 0;
+    r = gg_new_res(w, GG_MESH);
+    if (!r) return 0;
+    gl = &w->api;
+    bytes = (int) stride * 4;
+    r->vertices = (int) (n / stride);
+    gl->glGenVertexArrays(1, &r->id);
+    gl->glGenBuffers(1, &r->buffer);
+    gl->glBindVertexArray(r->id);
+    gl->glBindBuffer(GL_ARRAY_BUFFER, r->buffer);
+    gl->glBufferData(GL_ARRAY_BUFFER, (intptr_t) r->vertices * bytes, data, GL_STATIC_DRAW);
+    gl->glVertexAttribPointer(0, 3, GL_FLOAT, 0, bytes, (const void *) 0);
+    gl->glEnableVertexAttribArray(0);
+    if (stride >= 6) {
+        gl->glVertexAttribPointer(1, 3, GL_FLOAT, 0, bytes, (const void *) 12);
+        gl->glEnableVertexAttribArray(1);
+    }
+    if (stride == 8) {
+        gl->glVertexAttribPointer(2, 2, GL_FLOAT, 0, bytes, (const void *) 24);
+        gl->glEnableVertexAttribArray(2);
+    }
+    if (stride >= 10) {
+        gl->glVertexAttribPointer(2, 4, GL_FLOAT, 0, bytes, (const void *) 24);
+        gl->glEnableVertexAttribArray(2);
+    }
+    if (stride >= 14) {
+        gl->glVertexAttribPointer(3, 3, GL_FLOAT, 0, bytes, (const void *) 40);
+        gl->glEnableVertexAttribArray(3);
+        gl->glVertexAttribPointer(4, 1, GL_FLOAT, 0, bytes, (const void *) 52);
+        gl->glEnableVertexAttribArray(4);
+    }
+    gl->glBindVertexArray(0);
+    return (int64_t) (intptr_t) r;
+}
+
+/* Draw all of `mesh`'s vertices as triangles with `shader`. */
+void gg_draw(int64_t mesh, int64_t shader) {
+    gg_res *m = gg_res_of(mesh), *s = gg_res_of(shader);
+    if (!m || !s || m->kind != GG_MESH || s->kind != GG_SHADER) return;
+    if (m->w != s->w) {
+        fprintf(stderr, "graphics: Mesh.draw with a shader of another window\n");
+        return;
+    }
+    if (!gg_use(m->w, "Mesh.draw")) return;
+    m->w->api.glUseProgram(s->id);
+    m->w->api.glBindVertexArray(m->id);
+    m->w->api.glDrawArrays(GL_TRIANGLES, 0, m->vertices);
+    m->w->api.glBindVertexArray(0);
+}
+
+/* Release a shader or a mesh.  After its window closed there is nothing left to delete. */
+void gg_release(int64_t res) {
+    gg_res *r = gg_res_of(res);
+    gg_window *w;
+    if (!r) return;
+    w = r->w;
+    if (!w->closed) {
+        if (!gg_use(w, r->kind == GG_SHADER ? "Shader drop" : "Mesh drop")) return;
+        if (r->kind == GG_SHADER) {
+            w->api.glDeleteProgram(r->id);
+        } else {
+            w->api.glDeleteVertexArrays(1, &r->id);
+            w->api.glDeleteBuffers(1, &r->buffer);
+        }
+    }
+    w->refs--;
+    free(r);
+    gg_forget(w);
 }
 
 #else /* no window on this host yet */
@@ -612,6 +887,37 @@ void gg_read_pixels(int64_t h, int64_t *out, int64_t n) {
     (void) h;
     (void) out;
     (void) n;
+}
+int64_t gg_shader(int64_t win, const char *vertex, const char *fragment) {
+    (void) win;
+    (void) vertex;
+    (void) fragment;
+    return 0;
+}
+void gg_uniform_f(int64_t sh, const char *name, const double *v, int64_t n) {
+    (void) sh;
+    (void) name;
+    (void) v;
+    (void) n;
+}
+void gg_uniform_i(int64_t sh, const char *name, int64_t v) {
+    (void) sh;
+    (void) name;
+    (void) v;
+}
+int64_t gg_mesh(int64_t win, const float *data, int64_t n, int64_t stride) {
+    (void) win;
+    (void) data;
+    (void) n;
+    (void) stride;
+    return 0;
+}
+void gg_draw(int64_t mesh, int64_t shader) {
+    (void) mesh;
+    (void) shader;
+}
+void gg_release(int64_t res) {
+    (void) res;
 }
 
 #endif
