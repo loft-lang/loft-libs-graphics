@@ -18,7 +18,9 @@
  *
  * Orientation, as Tiled defines it: a tile is transposed (the diagonal flip) first, then
  * mirrored horizontally, then vertically.  `flags`: bit 0 horizontal, bit 1 vertical, bit 2
- * diagonal.  A map cell is 0 for empty, else `(tile + 1) | flags << 24`.
+ * diagonal; bits 8..11 the shade; bit 12 a ghost (every other pixel, in a checkerboard fixed to
+ * the surface, so what is behind shows through).  A map cell is 0 for empty, else
+ * `(tile + 1) | flags << 24`.
  *
  * Handles are indices + 1 into a table per kind; 0 is "none" (loft null). */
 #include <stddef.h>
@@ -258,7 +260,7 @@ void tl_pixels(int64_t surf, int32_t *out) {
  * skipped, and so is a transparent pixel. */
 static void tl_blit(tl_surf *d, const tl_set *s, int32_t tile, int32_t x, int32_t y, int32_t flags) {
     int32_t fh = flags & 1, fv = (flags >> 1) & 1, fd = (flags >> 2) & 1;
-    int32_t level = (flags >> 8) & 15;
+    int32_t level = (flags >> 8) & 15, ghost = (flags >> 12) & 1;
     const uint16_t *pal = s->pal[level < TL_SHADES ? level : TL_SHADES - 1];
     int32_t ow = fd ? s->th : s->tw, oh = fd ? s->tw : s->th;
     int32_t u0 = x < 0 ? -x : 0, v0 = y < 0 ? -y : 0;
@@ -278,7 +280,7 @@ static void tl_blit(tl_surf *d, const tl_set *s, int32_t tile, int32_t x, int32_
         uint16_t *q = d->px + (size_t) (y + v) * (size_t) d->w + (size_t) (x + u0);
         for (u = u0; u < u1; u++) {
             uint8_t i = *p;
-            if (i) *q = pal[i];
+            if (i && !(ghost && ((x + u + y + v) & 1))) *q = pal[i];
             q++;
             p += step;
         }
@@ -290,7 +292,7 @@ void tl_draw(int64_t surf, int64_t set, int32_t tile, int32_t x, int32_t y, int3
 void tl_draw(int64_t surf, int64_t set, int32_t tile, int32_t x, int32_t y, int32_t flags) {
     tl_surf *d = (tl_surf *) tl_get(&tl_surfs, surf);
     tl_set *s = (tl_set *) tl_get(&tl_sets, set);
-    if (d && s) tl_blit(d, s, tile, x, y, flags & 0xF07);
+    if (d && s) tl_blit(d, s, tile, x, y, flags & 0x1F07);
 }
 
 /* ── Ground: a tile bent to a surface and lit across it ── */
@@ -519,7 +521,7 @@ void tl_draw_turned(int64_t surf, int64_t set, int32_t tile, int32_t x, int32_t 
     tl_surf *d = (tl_surf *) tl_get(&tl_surfs, surf);
     tl_set *s = (tl_set *) tl_get(&tl_sets, set);
     int32_t fh = flags & 1, fv = (flags >> 1) & 1, fd = (flags >> 2) & 1;
-    int32_t level = (flags >> 8) & 15;
+    int32_t level = (flags >> 8) & 15, ghost = (flags >> 12) & 1;
     int32_t ow, oh, turn, quarters, rest, a, b, i, k, x0 = 0, x1 = 0, y0 = 0, y1 = 0, dx, dy, m;
     int32_t lo_u = 0, hi_u = 0, lo_v = 0, hi_v = 0, at[3];
     /* The shears' shifts, round(a * t) and round(b * t) for t = -m .. m, made once: then a
@@ -616,7 +618,7 @@ void tl_draw_turned(int64_t surf, int64_t set, int32_t tile, int32_t x, int32_t 
             }
             if (u < lo_u || u > hi_u || v < lo_v || v > hi_v) continue;
             c = src[at[0] + u * at[1] + v * at[2]];
-            if (c) row[sx] = pal[c];
+            if (c && !(ghost && ((sx + sy) & 1))) row[sx] = pal[c];
         }
     }
 }
