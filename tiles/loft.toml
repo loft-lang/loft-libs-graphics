@@ -1,6 +1,6 @@
 [package]
 name = "tiles"
-version = "0.4.0"
+version = "0.5.0"
 loft = ">=2026.10.0"
 repository = "loft-libs-graphics"
 description = "Tile sheets, map layers and sprites on a small 16-bit surface, scaled up once per frame"

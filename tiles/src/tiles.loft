@@ -46,6 +46,9 @@ fn tl_draw_ground(surf: integer, set: integer, tile: integer, x: integer, y: int
                   lift_tl: integer, lift_tr: integer, lift_bl: integer, lift_br: integer,
                   dark_tl: integer, dark_tr: integer, dark_bl: integer, dark_br: integer, flags: integer);
 #c "tl_draw_ground" "void(int64_t, int64_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t)"
+fn tl_draw_turned(surf: integer, set: integer, tile: integer, x: integer, y: integer, degrees: integer,
+                  pivot_x: integer, pivot_y: integer, flags: integer);
+#c "tl_draw_turned" "void(int64_t, int64_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t)"
 fn tl_map_new(cells: const vector<i32>, cols: integer, rows: integer) -> integer;
 #c "tl_map_new" "int64_t(const int32_t*, int64_t, int32_t, int32_t)"
 fn tl_map_free(map: integer);
@@ -159,6 +162,20 @@ pub fn draw(surface: integer, sheet: integer, tile: integer, x: integer, y: inte
             shade: integer = 0) {
   s = if shade < 0 { 0 } else if shade >= SHADES { SHADES - 1 } else { shade };
   tl_draw(surface, sheet, tile, x, y, flags(flip_h, flip_v, flip_d) + s * 256);
+}
+
+/// Draw tile `tile` of `sheet` turned `degrees` clockwise about its pixel `pivot` (x, y within
+/// the tile): placed as `draw` places it at (x, y), oriented by the flips first, then turned —
+/// a character's slight lean as it walks, a weapon held at an angle or swung.  Every pixel of
+/// the tile lands on exactly one pixel of the surface (the turn is whole quarter turns and three
+/// shears of whole rows and columns), so the pixel art keeps its pixels and colours at any angle;
+/// 0 degrees is `draw`, and 90, 180 and 270 are its quarter turns.  The shade, transparency
+/// and clipping are `draw`'s.
+pub fn draw_turned(surface: integer, sheet: integer, tile: integer, x: integer, y: integer,
+                   degrees: integer, pivot: (integer, integer), flip_h: boolean = false,
+                   flip_v: boolean = false, flip_d: boolean = false, shade: integer = 0) {
+  s = if shade < 0 { 0 } else if shade >= SHADES { SHADES - 1 } else { shade };
+  tl_draw_turned(surface, sheet, tile, x, y, degrees, pivot.0, pivot.1, flags(flip_h, flip_v, flip_d) + s * 256);
 }
 
 /// How finely `draw_ground` shades: its darkness is counted in sixteenths of a shade.
