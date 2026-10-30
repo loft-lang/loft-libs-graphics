@@ -1,24 +1,21 @@
-// @P340/#252 regression: gl_text_height must report the font's real line
-// height (fontdue's new_line_size = ascent + descent + line gap), not the old
-// `size * 1.2` approximation baked into loft_text_height.  Paired with
-// gl_font_ascent — a font's line height is sensibly larger than its ascent and
-// scales with the requested size.
+// @P340/#252 regression: a font's line height is its real one (ascent + descent + line gap,
+// rounded up to whole pixels), not a `size * 1.2` guess.  Paired with its ascent — a line is
+// sensibly taller than the ascent and grows with the requested size.
 use graphics::*;
 
 fn test_text_height_uses_real_metrics() {
-  f = graphics::gl_load_font("examples/DejaVuSans-Bold.ttf");
-  // Skip gracefully if the bundled font isn't found in this run dir (keeps the
-  // package suite green where the cwd differs) — mirrors font_ascent.loft.
-  if f >= 0 {
-    h_small = graphics::gl_text_height(f, 20.0);
-    h_large = graphics::gl_text_height(f, 40.0);
-    assert(h_small > 0, "line height at 20px should be positive ({h_small})");
-    assert(h_large > h_small, "line height grows with size ({h_large} vs {h_small})");
-    // Line height = ascent + descent + line gap, so it exceeds the ascent.
-    a_large = graphics::gl_font_ascent(f, 40.0);
-    assert((h_large as float) > a_large,
-      "line height should exceed ascent ({h_large} vs {a_large})");
-    // …and stay within a sane band of the em (not the loose size*1.2 guess).
-    assert(h_large < 60, "line height at 40px should be well under 1.5em ({h_large})");
-  }
+  // The bundled fixture, program-relative (#255), and NOT a graceful skip — see font_ascent.loft.
+  loaded = graphics::load_font("../examples/LiberationSansNarrow-Bold.ttf");
+  assert(loaded != null, "the bundled fixture font must load");
+  f = loaded ?? return;
+  h_small = f.line_height(20.0);
+  h_large = f.line_height(40.0);
+  assert(h_small > 0, "line height at 20px should be positive ({h_small})");
+  assert(h_large > h_small, "line height grows with size ({h_large} vs {h_small})");
+  // Line height = ascent + descent + line gap, so it exceeds the ascent.
+  a_large = f.ascent(40.0);
+  assert((h_large as float) > a_large,
+    "line height should exceed ascent ({h_large} vs {a_large})");
+  // …and stay within a sane band of the em (not the loose size*1.2 guess).
+  assert(h_large < 60, "line height at 40px should be well under 1.5em ({h_large})");
 }

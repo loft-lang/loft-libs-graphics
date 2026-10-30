@@ -1461,6 +1461,219 @@ pub fn draw_text(self: Canvas, font: integer, content: text, size: float,
   }
 }
 
+// --- Fonts: a TrueType face as a value the caller holds ---
+//
+// `load_font` reads a TrueType file and answers a `Font`: the tables the metrics need, parsed
+// once, held by the caller and gone when the caller lets it go.  No table hides behind a
+// number, so a font works the same on every target, the browser included.  The metrics are the
+// font's own: `ascent` and `line_height` from OS/2's typographic metrics when the font asks for
+// them (its USE_TYPO_METRICS flag), else from `hhea`; `measure` adds each glyph's advance and the
+// `kern` table's adjustment between neighbours.
+
+// One run of the character map: `first..=last` maps to `glyph`, `glyph + 1`, ….
+struct CmapRange {
+  first: integer,
+  last: integer,
+  glyph: integer
+}
+
+// One kerning pair, keyed by `(left glyph << 16) | right glyph`, its value in font units.
+struct KernPair {
+  key: integer,
+  value: integer
+}
+
+// A TrueType face.  Obtain one from `load_font`; its fields are the font's own numbers, in font
+// units (`units_per_em` of them to the em).
+pub struct Font {
+  pub units_per_em: integer,
+  pub ascender: integer,
+  pub descender: integer,
+  pub line_gap: integer,
+  advances: vector<integer>,
+  cmap: vector<CmapRange>,
+  kern: hash<KernPair[key]>,
+  // The whole file, kept for the glyph outlines a rasterizer reads.
+  data: vector<u8>
+}
+
+fn tt_u8(b: const vector<u8>, at: integer) -> integer { (b[at] ?? 0) as integer }
+fn tt_u16(b: const vector<u8>, at: integer) -> integer { tt_u8(b, at) * 256 + tt_u8(b, at + 1) }
+fn tt_i16(b: const vector<u8>, at: integer) -> integer {
+  v = tt_u16(b, at);
+  if v >= 32768 { v - 65536 } else { v }
+}
+fn tt_u32(b: const vector<u8>, at: integer) -> integer { tt_u16(b, at) * 65536 + tt_u16(b, at + 2) }
+
+// The offset of table `tag` in the file, or -1 when the font has none.
+fn tt_table(b: const vector<u8>, tag: text) -> integer {
+  want = 0;
+  for i in 0..4 { want = want * 256 + tag.byte_at(i); }
+  for i in 0..tt_u16(b, 4) {
+    rec = 12 + 16 * i;
+    if tt_u32(b, rec) == want { return tt_u32(b, rec + 8); }
+  }
+  -1
+}
+
+// The ranges of one `cmap` subtable at `sub` (formats 4 and 12); empty for any other format.
+fn tt_cmap_ranges(b: const vector<u8>, sub: integer) -> vector<CmapRange> {
+  out: vector<CmapRange> = [];
+  format = tt_u16(b, sub);
+  if format == 12 {
+    for i in 0..tt_u32(b, sub + 12) {
+      g = sub + 16 + 12 * i;
+      out += [CmapRange { first: tt_u32(b, g), last: tt_u32(b, g + 4), glyph: tt_u32(b, g + 8) }];
+    }
+  } else if format == 4 {
+    seg_x2 = tt_u16(b, sub + 6);
+    ends = sub + 14;
+    starts = ends + seg_x2 + 2;
+    deltas = starts + seg_x2;
+    offsets = deltas + seg_x2;
+    for i in 0..seg_x2 / 2 {
+      last = tt_u16(b, ends + 2 * i);
+      first = tt_u16(b, starts + 2 * i);
+      delta = tt_u16(b, deltas + 2 * i);
+      ro = tt_u16(b, offsets + 2 * i);
+      if first > last || first == 65535 { continue; }
+      if ro == 0 {
+        // glyph = (c + delta) mod 65536: one run, split where the sum wraps.
+        g0 = (first + delta) % 65536;
+        wrap_at = first + (65536 - g0);
+        if wrap_at <= last {
+          out += [CmapRange { first: first, last: wrap_at - 1, glyph: g0 }];
+          out += [CmapRange { first: wrap_at, last: last, glyph: 0 }];
+        } else {
+          out += [CmapRange { first: first, last: last, glyph: g0 }];
+        }
+      } else {
+        for c in first..last + 1 {
+          g = tt_u16(b, offsets + 2 * i + ro + 2 * (c - first));
+          if g != 0 { out += [CmapRange { first: c, last: c, glyph: (g + delta) % 65536 }]; }
+        }
+      }
+    }
+  }
+  out
+}
+
+// Read a TrueType font file.  Null when the file is missing or is not a TrueType font.
+// A relative path resolves against the program's own directory (`source_dir()`), as
+// `gl_load_font` does, so a bundled font travels with the program.
+pub fn load_font(path: text) -> Font? {
+  full = path;
+  if !path.starts_with("/") {
+    dir = source_dir();
+    if dir != "" { full = "{dir}/{path}"; }
+  }
+  b = read_bytes(full) ?? return null;
+  head = tt_table(b, "head");
+  hhea = tt_table(b, "hhea");
+  hmtx = tt_table(b, "hmtx");
+  cmap = tt_table(b, "cmap");
+  if head < 0 || hhea < 0 || hmtx < 0 || cmap < 0 { return null; }
+  upem = tt_u16(b, head + 18);
+  if upem == 0 { return null; }
+  f = Font { units_per_em: upem, ascender: tt_i16(b, hhea + 4), descender: tt_i16(b, hhea + 6),
+             line_gap: tt_i16(b, hhea + 8) };
+  os2 = tt_table(b, "OS/2");
+  if os2 >= 0 && (tt_u16(b, os2 + 62) & 128) != 0 {
+    f.ascender = tt_i16(b, os2 + 68);
+    f.descender = tt_i16(b, os2 + 70);
+    f.line_gap = tt_i16(b, os2 + 72);
+  }
+  for i in 0..tt_u16(b, hhea + 34) { f.advances += [tt_u16(b, hmtx + 4 * i)]; }
+  // The best Unicode map: a full-range format 12 if the font has one, else a BMP format 4.
+  best = -1;
+  best_rank = 0;
+  for i in 0..tt_u16(b, cmap + 2) {
+    rec = cmap + 4 + 8 * i;
+    platform = tt_u16(b, rec);
+    encoding = tt_u16(b, rec + 2);
+    sub = cmap + tt_u32(b, rec + 4);
+    unicode = platform == 0 || (platform == 3 && (encoding == 1 || encoding == 10));
+    format = tt_u16(b, sub);
+    rank = if !unicode { 0 } else if format == 12 { 2 } else if format == 4 { 1 } else { 0 };
+    if rank > best_rank { best = sub; best_rank = rank; }
+  }
+  if best >= 0 { f.cmap = tt_cmap_ranges(b, best); }
+  kern = tt_table(b, "kern");
+  if kern >= 0 && tt_u16(b, kern) == 0 {
+    at = kern + 4;
+    for _ in 0..tt_u16(b, kern + 2) {
+      length = tt_u16(b, at + 2);
+      coverage = tt_u16(b, at + 4);
+      // A horizontal format 0 subtable that adjusts advances (no minimum, no cross-stream).
+      if coverage / 256 == 0 && (coverage & 7) == 1 {
+        for p in 0..tt_u16(b, at + 6) {
+          e = at + 14 + 6 * p;
+          f.kern += [KernPair { key: tt_u16(b, e) * 65536 + tt_u16(b, e + 2), value: tt_i16(b, e + 4) }];
+        }
+      }
+      at += length;
+    }
+  }
+  f.data = b;
+  f
+}
+
+// The glyph `c` maps to; 0 (the missing-glyph box) when the font has no glyph for it.
+fn glyph_of(self: const Font, c: character) -> integer {
+  code = c as integer;
+  lo = 0;
+  hi = len(self.cmap) - 1;
+  while lo <= hi {
+    mid = (lo + hi) / 2;
+    r = self.cmap[mid];
+    if code < r.first { hi = mid - 1; }
+    else if code > r.last { lo = mid + 1; }
+    else { return (r.glyph + (code - r.first)) ?? 0; }
+  }
+  0
+}
+
+// The advance of glyph `g` in font units: glyphs past the metrics table share its last advance.
+fn advance_of(self: const Font, g: integer) -> integer {
+  n = len(self.advances);
+  if n == 0 { return 0; }
+  self.advances[if g < n { g } else { n - 1 }] ?? 0
+}
+
+// The kerning between glyphs `left` and `right` in font units; 0 when the pair has none.
+fn kern_of(self: const Font, left: integer, right: integer) -> integer {
+  p = self.kern[left * 65536 + right];
+  if p == null { 0 } else { p.value }
+}
+
+// The width of `content` in pixels at `size` pixels to the em: each glyph's advance plus the
+// kerning between neighbours, as text drawn at that size lays out.
+pub fn measure(self: const Font, content: text, size: float) -> float {
+  scale = (size / self.units_per_em as float) ?? 0.0;
+  width = 0.0;
+  prev = -1;
+  for c in content {
+    g = self.glyph_of(c);
+    if prev >= 0 { width += self.kern_of(prev, g) as float * scale; }
+    width += self.advance_of(g) as float * scale;
+    prev = g;
+  }
+  width ?? 0.0
+}
+
+// The distance in pixels from the baseline up to the top of the glyphs at `size` pixels to the
+// em.  Text drawn top-anchored at `y` has its baseline at `y + ascent(size)`.
+pub fn ascent(self: const Font, size: float) -> float {
+  (self.ascender as float * size / self.units_per_em as float) ?? 0.0
+}
+
+// The distance in pixels from one baseline to the next at `size` pixels to the em: ascent,
+// descent and line gap, rounded up to whole pixels.
+pub fn line_height(self: const Font, size: float) -> integer {
+  h = (self.ascender - self.descender + self.line_gap) as float * size / self.units_per_em as float;
+  (h.ceil() ?? 0.0) as integer
+}
+
 // --- Textures (GL5.5) ---
 
 // Load an image file (PNG, JPG) and upload it as a GL texture.
