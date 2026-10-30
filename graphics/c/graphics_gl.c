@@ -1464,6 +1464,8 @@ static void gc_pump(void) {
         if (!ev) break;
         type = gc_l(ev, "type");
         target = gc_o(ev, "window");
+        if (!target && (type == GC_KEY_DOWN || type == GC_KEY_UP || type == GC_FLAGS_CHANGED))
+            target = gc_o(gc.app, "keyWindow"); /* keys go to the key window, as AppKit sends them */
         for (w = gc.open; w; w = (gg_window *) w->next_open)
             if (w->window == target) {
                 gc_event(w, ev, type);
