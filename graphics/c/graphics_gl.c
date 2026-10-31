@@ -261,6 +261,7 @@ typedef struct {
 #include <dlfcn.h>
 #include <math.h>
 #include <pthread.h>
+#include <unistd.h>
 
 /* ── The Objective-C runtime and AppKit, as much as this file uses ───────────────────────────── */
 typedef void *gc_id;
@@ -699,6 +700,9 @@ static struct {
     void (*pool_pop)(void *);
     void (*dispatch_sync_f)(void *, void *, void (*)(void *));
     void *main_queue; /* dispatch_get_main_queue(): `_dispatch_main_q`'s address */
+    void *(*run_loop_main)(void);
+    unsigned char (*run_loop_waiting)(void *);
+    int main_served; /* 1 once the main thread was seen in its run loop */
     gc_id app, run_loop_mode, full_class;
     gg_window *open; /* the open windows, each event routed to its own */
 } gc;
@@ -787,20 +791,50 @@ static int gc_load(void) {
 #endif
     *(void **) (&gc.dispatch_sync_f) = dlsym(RTLD_DEFAULT, "dispatch_sync_f");
     gc.main_queue = dlsym(RTLD_DEFAULT, "_dispatch_main_q");
+    *(void **) (&gc.run_loop_main) = dlsym(RTLD_DEFAULT, "CFRunLoopGetMain");
+    *(void **) (&gc.run_loop_waiting) = dlsym(RTLD_DEFAULT, "CFRunLoopIsWaiting");
     mode = (void **) dlsym(RTLD_DEFAULT, "NSDefaultRunLoopMode");
-    if (!gc.dispatch_sync_f || !gc.main_queue || !mode || !*mode) return 0;
+    if (!gc.dispatch_sync_f || !gc.main_queue || !gc.run_loop_main || !gc.run_loop_waiting ||
+        !mode || !*mode)
+        return 0;
     gc.run_loop_mode = *mode;
     gc.loaded = 1;
     return 1;
 }
 
-/* Run `job` on the main thread, where AppKit makes and drives windows, and wait for it.  On the
- * main thread already (the interpreter, the C backend) it runs here; from another thread (a
- * `--native` program runs on a big-stack thread) it is sent to the main queue, which loft's
- * native `main` serves on macOS (`run_beside_main_queue`). */
-static void gc_on_main(void (*job)(void *), void *arg) {
-    if (pthread_main_np()) job(arg);
-    else gc.dispatch_sync_f(gc.main_queue, arg, job);
+/* Whether the main thread runs its run loop, which drains the main queue there: seen waiting in
+ * it once within two seconds (a program's first call can come before `main` reaches the loop),
+ * then remembered.  A main thread that never waits there — blocked joining the program, as a loft
+ * from before 2026-10-31 leaves it — would never run a job sent to it. */
+static int gc_main_served(void) {
+    int i;
+    for (i = 0; !gc.main_served && i < 200; i++) {
+        if (gc.run_loop_waiting(gc.run_loop_main())) gc.main_served = 1;
+        else usleep(10000);
+    }
+    return gc.main_served;
+}
+
+/* Run `job` on the main thread, where AppKit makes and drives windows, and wait for it: here when
+ * this is the main thread (the interpreter, the C backend), else through the main queue, which
+ * loft's native `main` drains on macOS (`run_beside_main_queue`).  0 when no thread would run it
+ * — said, never waited on forever. */
+static int gc_on_main(void (*job)(void *), void *arg) {
+    if (pthread_main_np()) {
+        job(arg);
+        return 1;
+    }
+    if (!gc_main_served()) {
+        static int said;
+        if (!said)
+            fprintf(stderr, "graphics: a window off the main thread needs the main thread in its run "
+                            "loop, which this program's main does not run (a --native program needs "
+                            "a loft from 2026-10-31 on)\n");
+        said = 1;
+        return 0;
+    }
+    gc.dispatch_sync_f(gc.main_queue, arg, (void (*)(void *)) job);
+    return 1;
 }
 
 /* The application, once, on the main thread: a regular app (a Dock icon, key windows), launched,
@@ -884,7 +918,7 @@ static void gg_teardown(gg_window *w) {
         gc_v(gc_class("NSOpenGLContext"), "clearCurrentContext");
         gg_current = NULL;
     }
-    gc_on_main(gc_teardown_main, w);
+    gc_on_main(gc_teardown_main, w); /* unserved: the window stays on screen until the exit */
 }
 
 #else /* GG_BROWSER: the page's canvas and WebGL2 context, through its `loft_gl` imports */
@@ -1628,7 +1662,10 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
     job.title = title;
     job.fullscreen = (int) fullscreen;
     job.ok = 0;
-    gc_on_main(gc_open_main, &job);
+    if (!gc_on_main(gc_open_main, &job)) {
+        free(w);
+        return 0;
+    }
     if (!job.ok) goto fail;
     gc_v(w->context, "makeCurrentContext"); /* on the thread that draws */
     gg_current = w;
@@ -1682,7 +1719,7 @@ int64_t gg_poll(int64_t h) {
     if (!gg_use(w, "Window.poll")) return 0;
     width = w->width;
     height = w->height;
-    gc_on_main(gc_poll_main, w);
+    if (!gc_on_main(gc_poll_main, w)) return 0;
     if (w->width != width || w->height != height)
         w->api.glViewport(0, 0, w->width, w->height);
     return !w->should_close;
