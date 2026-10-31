@@ -17,9 +17,20 @@ fn count_of(cv: const graphics::Canvas, want: integer) -> integer {
 
 // The scene through both paths on a `width` x `height` window; answers the GL frame, and checks
 // it against the software canvas and the draw-call count against the batches.
+// Whether a window must open here: `DISPLAY` on X11, `GRAPHICS_TEST_WINDOW=1` where nothing in
+// the environment says (a Mac).  Elsewhere these tests have nothing to measure.
+fn display() -> boolean {
+  (env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1"
+}
+
 fn both_ways(st: stage::Stage, width: integer, height: integer) -> graphics::Canvas? {
-  w = open_window(width, height, "stage gl") ?? return null;
-  g = stage::gl_stage(w) ?? return null;
+  wo = open_window(width, height, "stage gl");
+  if !display() { return null; }
+  if !wo { assert(false, "a display is set and no window opened"); }
+  w = wo ?? return null;
+  gl = stage::gl_stage(w);
+  if !gl { assert(false, "the stage's shaders compile"); }
+  g = gl ?? return null;
   st.compose();
   soft = graphics::canvas(width, height, 0xff000000);
   st.render_stage(soft);
@@ -65,7 +76,9 @@ fn test_the_window_is_handed_back_as_it_was() {
   _ = st.node_add(-1, stage::Place { pl_x: 2.0, pl_y: 2.0, pl_w: 10.0, pl_h: 10.0,
                                      pl_colour: 0x00ff00, pl_clips: true });
   st.compose();
-  w = open_window(32, 32, "stage state") ?? return;
+  wo = open_window(32, 32, "stage state");
+  if !display() { return; }
+  w = wo ?? return assert(false, "a display is set and no window opened");
   g = stage::gl_stage(w) ?? return;
   _ = st.gl_render(g, w, 32.0, 32.0);
   assert(w.enabled(GL_DEPTH_TEST) && !w.enabled(GL_BLEND) && !w.enabled(GL_SCISSOR_TEST),
@@ -93,7 +106,9 @@ fn test_the_light_map_matches_the_software_canvas() {
   st.compose();
   soft = graphics::canvas(64, 32, 0xff000000);
   st.render_stage(soft);
-  w = open_window(64, 32, "stage light") ?? return;
+  wo = open_window(64, 32, "stage light");
+  if !display() { return; }
+  w = wo ?? return assert(false, "a display is set and no window opened");
   g = stage::gl_stage(w) ?? return;
   w.clear(0xff000000);
   calls = st.gl_render(g, w, 64.0, 32.0);

@@ -7,9 +7,11 @@
 use graphics::*;
 
 // Where there is a display the window must open: a null there is the failure this file exists to
-// catch, not a skip.  Without one (a CI runner with no X server) there is nothing to measure.
+// catch, not a skip.  Without one (a CI runner with no X server) there is nothing to measure.  A
+// display is `DISPLAY` on X11; on a Mac nothing in the environment says whether a window server
+// is reachable (over ssh it is not), so a run that has one says so: `GRAPHICS_TEST_WINDOW=1`.
 fn display() -> boolean {
-  (env_variable("DISPLAY") ?? "") != ""
+  (env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1"
 }
 
 fn test_clear_reads_back() {

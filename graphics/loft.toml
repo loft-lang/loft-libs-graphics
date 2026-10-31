@@ -1,6 +1,6 @@
 [package]
 name = "graphics"
-version = "0.10.0"
+version = "0.11.0"
 loft = ">=2026.10.0"
 # 0.10 is a declared break: the integer-handle API of 0.9 (`gl_*`, `audio_*`, `Painter2D`,
 # `SpriteSheet`, `group_vbos_*`, `gl_load_font`) is gone for objects the caller holds — `Window`,
