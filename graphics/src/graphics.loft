@@ -81,37 +81,14 @@ pub struct Canvas {
   pub const data: vector<integer>
 }
 
-// `count` copies of `value`, built by doubling rather than one element
-// at a time.
-//
-// A comprehension — `[for _ in 0..count { value }]` — emits three
-// bytecodes per element (allocate the slot, write it, bump the length),
-// so a 960x720 pixel buffer costs about 2.07 million dispatches.
-// Appending a vector to ITSELF is a single block copy, so doubling
-// reaches `count` in roughly log2(count) of them.
-//
-// Walking the bits of `count` from the top — double, then append one
-// element where that bit is set — lands on `count` EXACTLY, which is
-// what makes this usable: no overshoot to trim, and no tail loop.
-// A prefix-slice variant was measured too and is both slower (51 ms)
-// and wrong at count = 0.
-//
-// Measured on the interpreter, count = 691 200 (one 960x720 frame):
-// 177 ms -> 10 ms, a factor of 17.  Sizes 0, 1, 9 216, 65 537 and
-// 691 200 all match the comprehension element for element.
+// `count` copies of `value`: the repeat literal, which every backend builds as one
+// allocation and one fill (the C writes each slot once).  It is element for element
+// what the earlier doubling built, at sizes 0, 1, 9 216, 65 537 and 691 200, and no
+// slower anywhere: a 691 200-pixel frame 393 us interpreted against the doubling's 437,
+// and a 1920x1080 canvas -19 % in the C.
 fn filled(count: integer, value: integer) -> vector<integer> {
-  fi_out: vector<integer> = [];
-  if count <= 0 { return fi_out; }
-  // Highest set bit of `count`.
-  fi_top = 0;
-  while (count >> (fi_top + 1)) != 0 { fi_top = fi_top + 1; }
-  fi_i = fi_top;
-  while fi_i >= 0 {
-    fi_out += fi_out;
-    if ((count >> fi_i) & 1) == 1 { fi_out += [value]; }
-    fi_i = fi_i - 1;
-  }
-  fi_out
+  if count <= 0 { return []; }
+  [value; count]
 }
 
 // Create a canvas filled with a solid color.
