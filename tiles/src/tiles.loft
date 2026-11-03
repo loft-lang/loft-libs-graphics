@@ -1,14 +1,15 @@
 // Copyright (c) 2026 Jurjen Stellingwerff
 // SPDX-License-Identifier: LGPL-3.0-or-later
 //
-// tiles — tile sheets, map layers and sprites on a small 16-bit surface, scaled up once per
-// frame.  Built for a handheld (the Tanmatsu: a 32-bit core, 768 KB of fast SRAM, an 800x480
-// panel whose framebuffer is in slower PSRAM), and the same on every target.
+// tiles — tile sheets, map layers and sprites on a 16-bit surface, the same on every target.
 //
-// The shape of a frame: compose it at 1x on a `Surface` (200x120 for a 4x scale on 800x480 is
-// 48 KB), drawing map layers and sprites, then `present` it scaled — and on the device, rotated
-// a quarter turn into the portrait panel's framebuffer.  Only that last step touches the large
-// buffer, once per pixel.
+// A surface is drawn at its own resolution.  Its camera (`camera`) says how many of its pixels
+// one unit is and which point is at its top-left; every primitive — a sprite placed, turned and
+// stretched by fractions of a unit, a filled rectangle, a piece of sloping ground, a map layer —
+// is placed in units and rasterised at the surface's pixels, each pixel showing what lies under
+// its centre.  So a surface the size of the display draws a game of 16 px tiles at the
+// display's full resolution, and zooming is a change of camera.  Without a camera a surface is
+// one pixel per unit: the small frame `present` scales up whole (200x120 at 4x for 800x480).
 //
 // A sheet is converted once, when it is made: one byte per pixel (index 0 transparent, 1..255
 // RGB565 colours), tile after tile.  A Kenney 16 px pack of 132 tiles is 34 KB that way, where
@@ -49,6 +50,13 @@ fn tl_draw_ground(surf: integer, set: integer, tile: integer, x: integer, y: int
 fn tl_draw_turned(surf: integer, set: integer, tile: integer, x: integer, y: integer, degrees: integer,
                   pivot_x: integer, pivot_y: integer, flags: integer);
 #c "tl_draw_turned" "void(int64_t, int64_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t)"
+fn tl_camera(surf: integer, zoom: integer, cam_x: integer, cam_y: integer);
+#c "tl_camera" "void(int64_t, int64_t, int64_t, int64_t)"
+fn tl_sprite(surf: integer, set: integer, tile: integer, x: integer, y: integer, turn: integer,
+             pivot_x: integer, pivot_y: integer, scale_x: integer, scale_y: integer, flags: integer);
+#c "tl_sprite" "void(int64_t, int64_t, int32_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int32_t)"
+fn tl_fill(surf: integer, x: integer, y: integer, w: integer, h: integer, colour: integer);
+#c "tl_fill" "void(int64_t, int64_t, int64_t, int64_t, int64_t, int32_t)"
 fn tl_map_new(cells: const vector<i32>, cols: integer, rows: integer) -> integer;
 #c "tl_map_new" "int64_t(const int32_t*, int64_t, int32_t, int32_t)"
 fn tl_map_free(map: integer);
@@ -119,7 +127,8 @@ pub fn free_sheet(sheet: integer) {
 
 // --- Surfaces ---
 
-/// A 1x RGB565 surface to compose a frame on, cleared to black.
+/// An RGB565 surface of `width` x `height` pixels, cleared to black, its camera at one pixel per
+/// unit (`camera` changes it).
 pub fn surface(width: integer, height: integer) -> integer? {
   handle(tl_surf_new(width, height))
 }
@@ -169,13 +178,54 @@ pub fn draw(surface: integer, sheet: integer, tile: integer, x: integer, y: inte
 // The flags bit of a ghost (c/tiles.c).
 const GHOST = 4096;
 
+// A value in 256ths, rounded to the nearest.
+fn q8(v: float) -> integer {
+  round(v * 256.0) as integer
+}
+
+/// Point the surface's camera: `zoom` surface pixels per unit, with the point (x, y), in units,
+/// at the surface's top-left.  Everything drawn after it is placed in units and rasterised at
+/// the surface's own pixels, so a surface the size of the display draws a game at the display's
+/// resolution: a sprite placed between pixels, turned and stretched lands where it is put, and
+/// zooming in on two figures or out over the land is a change of camera.  A new surface's
+/// camera is 1 pixel per unit at (0, 0), where every call draws as it does without one.
+/// A zoom outside 1/256 .. 4096 is ignored.
+pub fn camera(surface: integer, zoom: float, x: float = 0.0, y: float = 0.0) {
+  tl_camera(surface, round(zoom * 65536.0) as integer, q8(x), q8(y));
+}
+
+/// Draw tile `tile` of `sheet` as a sprite: its top-left at (x, y) units, stretched by
+/// (`scale_x`, `scale_y`) and turned `turn` degrees clockwise, both about its point
+/// (`pivot_x`, `pivot_y`) — in the tile's own pixels, so (8.0, 16.0) is the middle of a 16 px
+/// tile's bottom edge.  Every value may be fractional: under a camera the sprite is drawn at
+/// the surface's resolution, each pixel showing the tile's pixel under its centre, so pixel
+/// art stays crisp at every zoom and angle.  Flips, shade and ghost are `draw`'s; a ghost leaves
+/// out every other pixel of the tile, so it turns and stretches with it.
+pub fn sprite(surface: integer, sheet: integer, tile: integer, x: float, y: float,
+              turn: float = 0.0, pivot_x: float = 0.0, pivot_y: float = 0.0,
+              scale_x: float = 1.0, scale_y: float = 1.0,
+              flip_h: boolean = false, flip_v: boolean = false, flip_d: boolean = false,
+              shade: integer = 0, ghost: boolean = false) {
+  s = if shade < 0 { 0 } else if shade >= SHADES { SHADES - 1 } else { shade };
+  tl_sprite(surface, sheet, tile, q8(x), q8(y), q8(turn), q8(pivot_x), q8(pivot_y), q8(scale_x),
+            q8(scale_y), flags(flip_h, flip_v, flip_d) + s * 256 + (if ghost { GHOST } else { 0 }));
+}
+
+/// Fill the rectangle with its top-left at (x, y) and `w` x `h` units in one RGB565 colour, at
+/// the surface's resolution: the pixels whose centres lie inside it.
+pub fn fill(surface: integer, x: float, y: float, w: float, h: float, colour: integer) {
+  tl_fill(surface, q8(x), q8(y), q8(w), q8(h), colour);
+}
+
 /// Draw tile `tile` of `sheet` turned `degrees` clockwise about its pixel `pivot` (x, y within
 /// the tile): placed as `draw` places it at (x, y), oriented by the flips first, then turned —
-/// a character's slight lean as it walks, a weapon held at an angle or swung.  Every pixel of
-/// the tile lands on exactly one pixel of the surface (the turn is whole quarter turns and three
-/// shears of whole rows and columns), so the pixel art keeps its pixels and colours at any angle;
-/// 0 degrees is `draw`, and 90, 180 and 270 are its quarter turns.  The shade, the ghost,
-/// transparency and clipping are `draw`'s.
+/// a character's slight lean as it walks, a weapon held at an angle or swung.  Under a camera it
+/// is `sprite` turned about the pivot pixel's centre: a true rotation at the surface's
+/// resolution.  At one pixel per unit every pixel of the tile lands on exactly one pixel of the
+/// surface instead (the turn is whole quarter turns and three shears of whole rows and
+/// columns), so the pixel art keeps its pixels and colours where there are no finer pixels to
+/// turn it with.  0 degrees is `draw`, and 90, 180 and 270 are its quarter turns.  The shade,
+/// the ghost, transparency and clipping are `draw`'s.
 pub fn draw_turned(surface: integer, sheet: integer, tile: integer, x: integer, y: integer,
                    degrees: integer, pivot: (integer, integer), flip_h: boolean = false,
                    flip_v: boolean = false, flip_d: boolean = false, shade: integer = 0,

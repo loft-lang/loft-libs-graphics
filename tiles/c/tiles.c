@@ -1,9 +1,10 @@
 /* Copyright (c) 2026 Jurjen Stellingwerff
  * SPDX-License-Identifier: LGPL-3.0-or-later
  *
- * The tiles library's core, in C99: tile sheets as 8-bit palette indices, a 1x RGB565 surface
- * to compose a frame on, map layers drawn in one call, and an integer upscale (optionally
- * rotated a quarter turn for a portrait panel) into a framebuffer.  Built by loft itself as a
+ * The tiles library's core, in C99: tile sheets as 8-bit palette indices, RGB565 surfaces drawn
+ * at their own resolution through a camera (§ Drawing at the surface's resolution), map layers
+ * drawn in one call, and an integer upscale (optionally rotated a quarter turn for a portrait
+ * panel) into a framebuffer.  Built by loft itself as a
  * `[c] shim`, bound by the `#c` declarations in src/tiles.loft.  Pure computation: a
  * platform's present (the Tanmatsu's DSI framebuffer) is a layer that calls `tl_present565`
  * with its own buffer.
@@ -44,6 +45,7 @@ typedef struct {
 typedef struct {
     uint16_t *px;
     int32_t w, h;
+    int64_t zoom, cam_x, cam_y;   /* the camera: pixels per unit (Q16), the top-left point (units, Q8) */
 } tl_surf;
 
 typedef struct {
@@ -184,6 +186,15 @@ void tl_set_free(int64_t set) {
 
 /* ── Surfaces ── */
 
+/* Under a camera other than one pixel per unit at (0, 0), each call below is rasterised at the
+ * surface's resolution (§ Drawing at the surface's resolution). */
+static int tl_plain(const tl_surf *d);
+static void tl_fill_at(tl_surf *d, int64_t x, int64_t y, int64_t w, int64_t h, uint16_t c);
+static void tl_sprite_at(tl_surf *d, const tl_set *s, int32_t tile, int64_t x, int64_t y, int64_t turn,
+                         int64_t px, int64_t py, int64_t sx, int64_t sy, int32_t flags);
+static void tl_ground_at(tl_surf *d, const tl_set *s, int32_t tile, int64_t x, int64_t y,
+                         const int32_t lift[4], const int32_t dark[4], int32_t flags);
+
 int64_t tl_surf_new(int32_t w, int32_t h);
 void tl_surf_free(int64_t surf);
 void tl_clear(int64_t surf, int32_t c565);
@@ -203,6 +214,8 @@ int64_t tl_surf_new(int32_t w, int32_t h) {
     }
     s->w = w;
     s->h = h;
+    s->zoom = 65536;
+    s->cam_x = s->cam_y = 0;
     handle = tl_put(&tl_surfs, s);
     if (handle == 0) {
         free(s->px);
@@ -235,6 +248,13 @@ void tl_rect(int64_t surf, int64_t x, int64_t y, int64_t w, int64_t h, int32_t c
     tl_surf *s = (tl_surf *) tl_get(&tl_surfs, surf);
     int64_t x0, y0, x1, y1, u, v;
     if (!s || w <= 0 || h <= 0) return;
+    if (!tl_plain(s)) {
+        if (w > ((int64_t) 1 << 32)) w = (int64_t) 1 << 32;
+        if (h > ((int64_t) 1 << 32)) h = (int64_t) 1 << 32;
+        if (x < -((int64_t) 1 << 32) || x > ((int64_t) 1 << 32) || y < -((int64_t) 1 << 32) || y > ((int64_t) 1 << 32)) return;
+        tl_fill_at(s, x * 65536, y * 65536, w * 65536, h * 65536, (uint16_t) c565);
+        return;
+    }
     x0 = x < 0 ? 0 : x;
     y0 = y < 0 ? 0 : y;
     x1 = x > s->w - w ? s->w : x + w;
@@ -254,6 +274,7 @@ void tl_pixels(int64_t surf, int32_t *out) {
 }
 
 /* ── Drawing ── */
+
 
 /* Tile `tile` of `set` with its top-left at (x, y) on `surf`, oriented by `flags`.  Its
  * footprint is tw x th, or th x tw when transposed; whatever falls outside the surface is
@@ -292,7 +313,12 @@ void tl_draw(int64_t surf, int64_t set, int32_t tile, int32_t x, int32_t y, int3
 void tl_draw(int64_t surf, int64_t set, int32_t tile, int32_t x, int32_t y, int32_t flags) {
     tl_surf *d = (tl_surf *) tl_get(&tl_surfs, surf);
     tl_set *s = (tl_set *) tl_get(&tl_sets, set);
-    if (d && s) tl_blit(d, s, tile, x, y, flags & 0x1F07);
+    if (!d || !s) return;
+    if (!tl_plain(d)) {
+        tl_sprite_at(d, s, tile, (int64_t) x * 256, (int64_t) y * 256, 0, 0, 0, 256, 256, flags & 0x1F07);
+        return;
+    }
+    tl_blit(d, s, tile, x, y, flags & 0x1F07);
 }
 
 /* ── Ground: a tile bent to a surface and lit across it ── */
@@ -368,6 +394,13 @@ void tl_draw_ground(int64_t surf, int64_t set, int32_t tile, int32_t x, int32_t 
     dark_tr = dark_tr < 0 ? 0 : (dark_tr > darkest ? darkest : dark_tr);
     dark_bl = dark_bl < 0 ? 0 : (dark_bl > darkest ? darkest : dark_bl);
     dark_br = dark_br < 0 ? 0 : (dark_br > darkest ? darkest : dark_br);
+    if (!tl_plain(d)) {
+        int32_t lift[4], dark[4];
+        lift[0] = lift_tl; lift[1] = lift_tr; lift[2] = lift_bl; lift[3] = lift_br;
+        dark[0] = dark_tl; dark[1] = dark_tr; dark[2] = dark_bl; dark[3] = dark_br;
+        tl_ground_at(d, s, tile, x, y, lift, dark, flags & 7);
+        return;
+    }
     /* Nothing bends and one whole shade: the plain draw, the same pixels. */
     if ((lift_tl | lift_tr | lift_bl | lift_br) == 0 && dark_tl == dark_tr && dark_tl == dark_bl &&
         dark_tl == dark_br && (dark_tl & 15) == 0) {
@@ -530,6 +563,12 @@ void tl_draw_turned(int64_t surf, int64_t set, int32_t tile, int32_t x, int32_t 
     const uint16_t *pal;
     const uint8_t *src;
     if (!d || !s || tile < 0 || tile >= s->count) return;
+    if (!tl_plain(d)) {
+        /* At the surface's resolution a turn is a true rotation, about the pivot pixel's centre. */
+        tl_sprite_at(d, s, tile, (int64_t) x * 256, (int64_t) y * 256, (int64_t) degrees * 256,
+                     (int64_t) pivot_x * 256 + 128, (int64_t) pivot_y * 256 + 128, 256, 256, flags & 0x1F07);
+        return;
+    }
     pal = s->pal[level < TL_SHADES ? level : TL_SHADES - 1];
     ow = fd ? s->th : s->tw;
     oh = fd ? s->tw : s->th;
@@ -623,6 +662,283 @@ void tl_draw_turned(int64_t surf, int64_t set, int32_t tile, int32_t x, int32_t 
     }
 }
 
+/* ── Drawing at the surface's resolution ──
+ *
+ * A surface has a camera: `zoom` surface pixels per unit (Q16) and the point, in units (Q8),
+ * at its top-left.  A new surface's camera is one pixel per unit at (0, 0), where every call
+ * draws exactly what it always drew.  Under any other camera a primitive is rasterised at the
+ * surface's own pixels: a pixel shows what lies under its centre, mapped back through the
+ * camera into units and from there into the tile (turned, stretched, flipped) — nearest texel,
+ * so pixel art stays crisp at every zoom and angle.  Integer arithmetic only, so every target
+ * draws the same pixels for the same calls and the same surface size. */
+
+/* sin(d) for d = 0 .. 90 degrees, times 2^30, rounded. */
+static const int32_t TL_SIN90[91] = {
+    0, 18739379, 37473049, 56195305, 74900443, 93582766, 112236583, 130856211,
+    149435979, 167970228, 186453311, 204879599, 223243478, 241539355, 259761657, 277904834,
+    295963357, 313931728, 331804471, 349576144, 367241333, 384794656, 402230767, 419544355,
+    436730145, 453782903, 470697435, 487468587, 504091252, 520560366, 536870912, 553017922,
+    568996477, 584801711, 600428808, 615873009, 631129609, 646193961, 661061475, 675727625,
+    690187940, 704438018, 718473518, 732290163, 745883746, 759250125, 772385229, 785285058,
+    797945680, 810363241, 822533958, 834454122, 846120104, 857528349, 868675383, 879557810,
+    890172315, 900515665, 910584710, 920376381, 929887697, 939115760, 948057759, 956710970,
+    965072759, 973140576, 980911966, 988384560, 995556083, 1002424350, 1008987269, 1015242840,
+    1021189159, 1026824413, 1032146887, 1037154959, 1041847103, 1046221891, 1050277989, 1054014162,
+    1057429273, 1060522280, 1063292242, 1065738315, 1067859754, 1069655912, 1071126243, 1072270298,
+    1073087729, 1073578288, 1073741824
+};
+
+#define TL_TURN (360 * 256)
+
+/* sin of `a` 256ths of a degree, times 2^24: the table at whole degrees, linear between. */
+static int64_t tl_sin24(int64_t a) {
+    int64_t sign = 1, d, f, v;
+    a %= TL_TURN;
+    if (a < 0) a += TL_TURN;
+    if (a >= 180 * 256) {
+        a -= 180 * 256;
+        sign = -1;
+    }
+    if (a > 90 * 256) a = 180 * 256 - a;
+    d = a >> 8;
+    f = a & 255;
+    v = TL_SIN90[d];
+    if (f) v += ((int64_t) (TL_SIN90[d + 1] - TL_SIN90[d]) * f) >> 8;
+    return sign * ((v + 32) >> 6);
+}
+
+static int tl_plain(const tl_surf *d) {
+    return d->zoom == 65536 && d->cam_x == 0 && d->cam_y == 0;
+}
+
+/* The point, in units (Q16), under the centre of surface pixel column (or row) `i`. */
+static int64_t tl_centre(int64_t cam, int64_t zoom, int64_t i) {
+    return cam * 256 + (((int64_t) 2 * i + 1) << 31) / zoom;
+}
+
+/* The whole unit a Q16 value lies in: floor(v / 65536). */
+static int32_t tl_unit(int64_t v) {
+    return (int32_t) (v >= 0 ? v / 65536 : -((-v + 65535) / 65536));
+}
+
+/* The first of the `n` columns (or rows) whose centre is at `at` (Q16 units) or past it. */
+static int32_t tl_first(int64_t cam, int64_t zoom, int64_t at, int32_t n) {
+    int64_t off = at - cam * 256, i;
+    if (off <= 0) i = 0;
+    else if (off >= ((int64_t) n << 16) * 65536 / zoom + 65536) i = n;
+    else i = (off * zoom) >> 32;
+    if (i > n) i = n;
+    while (i > 0 && tl_centre(cam, zoom, i - 1) >= at) i--;
+    while (i < n && tl_centre(cam, zoom, i) < at) i++;
+    return (int32_t) i;
+}
+
+/* Where the oriented tile's texels (0, 0), (1, 0) and (0, 1) are in its sheet tile: texel
+ * (u, v) is at at[0] + u * at[1] + v * at[2]. */
+static void tl_orient(const tl_set *s, int32_t flags, int32_t at[3]) {
+    int32_t fh = flags & 1, fv = (flags >> 1) & 1, fd = (flags >> 2) & 1, k;
+    int32_t ow = fd ? s->th : s->tw, oh = fd ? s->tw : s->th;
+    for (k = 0; k < 3; k++) {
+        int32_t u = k == 1, v = k == 2;
+        int32_t vv = fv ? oh - 1 - v : v, uu = fh ? ow - 1 - u : u;
+        at[k] = (fd ? uu : vv) * s->tw + (fd ? vv : uu);
+    }
+    at[1] -= at[0];
+    at[2] -= at[0];
+}
+
+/* Scratch for a primitive's column table, grown as a surface needs (one thread). */
+static int32_t *tl_cols = NULL;
+static int32_t tl_cols_cap = 0;
+
+static int tl_cols_fit(int32_t n) {
+    if (n > tl_cols_cap) {
+        int32_t *p = (int32_t *) realloc(tl_cols, (size_t) n * sizeof(int32_t));
+        if (!p) return 0;
+        tl_cols = p;
+        tl_cols_cap = n;
+    }
+    return 1;
+}
+
+/* The rectangle of units (x, y) .. (x + w, y + h), Q16, in one colour. */
+static void tl_fill_at(tl_surf *d, int64_t x, int64_t y, int64_t w, int64_t h, uint16_t c) {
+    int32_t i0 = tl_first(d->cam_x, d->zoom, x, d->w), i1 = tl_first(d->cam_x, d->zoom, x + w, d->w);
+    int32_t j0 = tl_first(d->cam_y, d->zoom, y, d->h), j1 = tl_first(d->cam_y, d->zoom, y + h, d->h);
+    int32_t i, j;
+    for (j = j0; j < j1; j++) {
+        uint16_t *q = d->px + (size_t) j * (size_t) d->w;
+        for (i = i0; i < i1; i++) q[i] = c;
+    }
+}
+
+/* Tile `tile` with its top-left at (x, y) units (Q8), oriented by `flags`, stretched by
+ * (sx, sy) (Q8, 256 = its own size) about its point (px, py) (texels, Q8) and turned `turn`
+ * 256ths of a degree clockwise about it.  The shade and the ghost are `flags`'; a ghost leaves
+ * every other texel out, so it turns and stretches with the tile. */
+static void tl_sprite_at(tl_surf *d, const tl_set *s, int32_t tile, int64_t x, int64_t y, int64_t turn,
+                         int64_t px, int64_t py, int64_t sx, int64_t sy, int32_t flags) {
+    int32_t fd = (flags >> 2) & 1, level = (flags >> 8) & 15, ghost = (flags >> 12) & 1;
+    int32_t ow = fd ? s->th : s->tw, oh = fd ? s->tw : s->th, at[3], i, j;
+    const uint16_t *pal = s->pal[level < TL_SHADES ? level : TL_SHADES - 1];
+    const uint8_t *src;
+    int64_t z = d->zoom, cx, cy;
+    if (tile < 0 || tile >= s->count || sx <= 0 || sy <= 0) return;
+    src = s->px + (size_t) tile * (size_t) s->tw * (size_t) s->th;
+    tl_orient(s, flags, at);
+    /* The pivot in units, Q16. */
+    cx = x * 256 + px * 256;
+    cy = y * 256 + py * 256;
+    turn %= TL_TURN;
+    if (turn < 0) turn += TL_TURN;
+    if (turn == 0) {
+        /* Upright: which texel a pixel shows depends on its column alone across and its row
+         * alone down, so each is worked out once. */
+        int64_t left = cx - px * sx, top = cy - py * sy, tw = sx * 256, th = sy * 256;
+        int32_t i0 = tl_first(d->cam_x, z, left, d->w), i1 = tl_first(d->cam_x, z, left + ow * tw, d->w);
+        int32_t j0 = tl_first(d->cam_y, z, top, d->h), j1 = tl_first(d->cam_y, z, top + oh * th, d->h);
+        if (i0 >= i1 || j0 >= j1 || !tl_cols_fit(i1 - i0)) return;
+        for (i = i0; i < i1; i++) {
+            int64_t u = (tl_centre(d->cam_x, z, i) - left) / tw;
+            tl_cols[i - i0] = (int32_t) (u < ow ? u : ow - 1);
+        }
+        for (j = j0; j < j1; j++) {
+            int64_t v = (tl_centre(d->cam_y, z, j) - top) / th;
+            int32_t row = (int32_t) (v < oh ? v : oh - 1);
+            const uint8_t *p = src + at[0] + row * at[2];
+            uint16_t *q = d->px + (size_t) j * (size_t) d->w;
+            for (i = i0; i < i1; i++) {
+                int32_t col = tl_cols[i - i0];
+                uint8_t c = p[col * at[1]];
+                if (c && !(ghost && ((col + row) & 1))) q[i] = pal[c];
+            }
+        }
+        return;
+    }
+    {
+        /* Turned: the texel under a pixel's centre is the pivot plus the pixel's offset from it
+         * turned back and un-stretched.  Along a row it moves by a fixed step, in 2^-32 texels. */
+        int64_t c = tl_sin24(turn + 90 * 256), sn = tl_sin24(turn);
+        int64_t step_u = (c << 32) / (z * sx), step_v = -(sn << 32) / (z * sy);
+        int64_t pu = px << 24, pv = py << 24, ou = (int64_t) ow << 32, ov = (int64_t) oh << 32;
+        int64_t lo_x = 0, hi_x = 0, lo_y = 0, hi_y = 0;
+        int32_t i0, i1, j0, j1, k;
+        /* The turned tile's corners, in surface pixels: the box to visit. */
+        for (k = 0; k < 4; k++) {
+            int64_t lx = (((k & 1) ? (int64_t) ow * 256 : 0) - px) * sx;   /* Q16 units */
+            int64_t ly = (((k & 2) ? (int64_t) oh * 256 : 0) - py) * sy;
+            int64_t ux = cx + ((c * lx - sn * ly) >> 24) - d->cam_x * 256;
+            int64_t uy = cy + ((sn * lx + c * ly) >> 24) - d->cam_y * 256;
+            int64_t qx = (ux * z) >> 32, qy = (uy * z) >> 32;
+            if (k == 0 || qx < lo_x) lo_x = qx;
+            if (k == 0 || qx > hi_x) hi_x = qx;
+            if (k == 0 || qy < lo_y) lo_y = qy;
+            if (k == 0 || qy > hi_y) hi_y = qy;
+        }
+        i0 = (int32_t) (lo_x - 1 < 0 ? 0 : lo_x - 1);
+        j0 = (int32_t) (lo_y - 1 < 0 ? 0 : lo_y - 1);
+        i1 = (int32_t) (hi_x + 2 > d->w ? d->w : hi_x + 2);
+        j1 = (int32_t) (hi_y + 2 > d->h ? d->h : hi_y + 2);
+        for (j = j0; j < j1; j++) {
+            int64_t dx = tl_centre(d->cam_x, z, i0) - cx, dy = tl_centre(d->cam_y, z, j) - cy;
+            int64_t u = pu + (c * dx + sn * dy) / sx, v = pv + (c * dy - sn * dx) / sy;
+            uint16_t *q = d->px + (size_t) j * (size_t) d->w;
+            for (i = i0; i < i1; i++, u += step_u, v += step_v) {
+                int32_t col, row;
+                uint8_t t;
+                if (u < 0 || v < 0 || u >= ou || v >= ov) continue;
+                col = (int32_t) (u >> 32);
+                row = (int32_t) (v >> 32);
+                t = src[at[0] + col * at[1] + row * at[2]];
+                if (t && !(ghost && ((col + row) & 1))) q[i] = pal[t];
+            }
+        }
+    }
+}
+
+/* A value between `a` and `b` at the centre of step i of w, rounded half up: tl_lerp's value. */
+static int32_t tl_mix(int32_t a, int32_t b, int32_t w, int32_t i) {
+    return tl_floor_div(a * (2 * w - 2 * i - 1) + b * (2 * i + 1) + w, 2 * w);
+}
+
+/* tl_draw_ground under a camera: (x, y) and the lifts in units.  The tile's top and bottom edges
+ * run straight between their corners' lifts, at the surface's resolution; each pixel between
+ * them shows the texel under its centre, and each texel keeps tl_draw_ground's darkness (its
+ * corners' interpolated at the texel's centre, dithered by its place in the tile), so the light
+ * stays with the art while the edges are as fine as the surface. */
+static void tl_ground_at(tl_surf *d, const tl_set *s, int32_t tile, int64_t x, int64_t y,
+                         const int32_t lift[4], const int32_t dark[4], int32_t flags) {
+    int32_t fd = (flags >> 2) & 1, ow = fd ? s->th : s->tw, oh = fd ? s->tw : s->th, at[3];
+    int32_t i, i0, i1, col = -1, shade[64];
+    int64_t z = d->zoom, left = x * 65536, top0 = y * 65536, w16 = (int64_t) ow * 65536;
+    const uint8_t *src;
+    if (tile < 0 || tile >= s->count || oh > 64) return;
+    src = s->px + (size_t) tile * (size_t) s->tw * (size_t) s->th;
+    tl_orient(s, flags, at);
+    i0 = tl_first(d->cam_x, z, left, d->w);
+    i1 = tl_first(d->cam_x, z, left + w16, d->w);
+    for (i = i0; i < i1; i++) {
+        int64_t a = tl_centre(d->cam_x, z, i) - left, top, bottom, n;
+        int32_t u = (int32_t) (a >> 16), j, j0, j1, k;
+        if (u >= ow) u = ow - 1;
+        if (u != col) {
+            /* The darkness of each texel of this tile column, as tl_draw_ground lights it. */
+            int32_t dt = tl_mix(dark[0], dark[1], ow, u), db = tl_mix(dark[2], dark[3], ow, u);
+            col = u;
+            for (k = 0; k < oh; k++) shade[k] = (tl_mix(dt, db, oh, k) + 15 - TL_BAYER[k & 3][u & 3]) >> 4;
+        }
+        top = top0 - (int64_t) lift[0] * 65536 - (int64_t) (lift[1] - lift[0]) * a / ow;
+        bottom = top0 + (int64_t) oh * 65536 - (int64_t) lift[2] * 65536 - (int64_t) (lift[3] - lift[2]) * a / ow;
+        n = bottom - top;
+        if (n <= 0) continue;
+        j0 = tl_first(d->cam_y, z, top, d->h);
+        j1 = tl_first(d->cam_y, z, bottom, d->h);
+        for (j = j0; j < j1; j++) {
+            int64_t v = (tl_centre(d->cam_y, z, j) - top) * oh / n;
+            int32_t row = (int32_t) (v < oh ? v : oh - 1);
+            uint8_t t = src[at[0] + u * at[1] + row * at[2]];
+            if (t) d->px[(size_t) j * (size_t) d->w + (size_t) i] = s->pal[shade[row]][t];
+        }
+    }
+}
+
+void tl_camera(int64_t surf, int64_t zoom, int64_t cam_x, int64_t cam_y);
+void tl_sprite(int64_t surf, int64_t set, int32_t tile, int64_t x, int64_t y, int64_t turn, int64_t pivot_x,
+               int64_t pivot_y, int64_t scale_x, int64_t scale_y, int32_t flags);
+void tl_fill(int64_t surf, int64_t x, int64_t y, int64_t w, int64_t h, int32_t c565);
+
+/* Set the camera: `zoom` pixels per unit (Q16, 1/256 .. 4096) with the point (cam_x, cam_y)
+ * (units, Q8) at the surface's top-left. */
+void tl_camera(int64_t surf, int64_t zoom, int64_t cam_x, int64_t cam_y) {
+    tl_surf *d = (tl_surf *) tl_get(&tl_surfs, surf);
+    if (!d || zoom < 256 || zoom > ((int64_t) 4096 << 16)) return;
+    if (cam_x < -((int64_t) 1 << 40) || cam_x > ((int64_t) 1 << 40)) return;
+    if (cam_y < -((int64_t) 1 << 40) || cam_y > ((int64_t) 1 << 40)) return;
+    d->zoom = zoom;
+    d->cam_x = cam_x;
+    d->cam_y = cam_y;
+}
+
+/* A sprite: see tl_sprite_at.  Positions and sizes Q8 units, the turn 256ths of a degree. */
+void tl_sprite(int64_t surf, int64_t set, int32_t tile, int64_t x, int64_t y, int64_t turn, int64_t pivot_x,
+               int64_t pivot_y, int64_t scale_x, int64_t scale_y, int32_t flags) {
+    tl_surf *d = (tl_surf *) tl_get(&tl_surfs, surf);
+    tl_set *s = (tl_set *) tl_get(&tl_sets, set);
+    if (!d || !s || scale_x > 65536 || scale_y > 65536) return;
+    if (x < -((int64_t) 1 << 40) || x > ((int64_t) 1 << 40) || y < -((int64_t) 1 << 40) || y > ((int64_t) 1 << 40)) return;
+    tl_sprite_at(d, s, tile, x, y, turn, pivot_x, pivot_y, scale_x, scale_y, flags & 0x1F07);
+}
+
+/* The rectangle (x, y, w, h), Q8 units, filled in one colour at the surface's resolution. */
+void tl_fill(int64_t surf, int64_t x, int64_t y, int64_t w, int64_t h, int32_t c565) {
+    tl_surf *d = (tl_surf *) tl_get(&tl_surfs, surf);
+    if (!d || w <= 0 || h <= 0) return;
+    if (w > ((int64_t) 1 << 40)) w = (int64_t) 1 << 40;
+    if (h > ((int64_t) 1 << 40)) h = (int64_t) 1 << 40;
+    if (x < -((int64_t) 1 << 40) || x > ((int64_t) 1 << 40) || y < -((int64_t) 1 << 40) || y > ((int64_t) 1 << 40)) return;
+    tl_fill_at(d, x * 256, y * 256, w * 256, h * 256, (uint16_t) c565);
+}
+
 /* ── Maps ── */
 
 int64_t tl_map_new(const int32_t *cells, int64_t n, int32_t cols, int32_t rows);
@@ -680,10 +996,22 @@ void tl_draw_map(int64_t surf, int64_t map, int64_t set, int32_t cam_x, int32_t 
     tl_set *s = (tl_set *) tl_get(&tl_sets, set);
     int32_t cx0, cy0, cx1, cy1, cx, cy;
     if (!d || !m || !s) return;
-    cx0 = tl_floor_div(cam_x, s->tw);
-    cy0 = tl_floor_div(cam_y, s->th);
-    cx1 = tl_floor_div(cam_x + d->w - 1, s->tw);
-    cy1 = tl_floor_div(cam_y + d->h - 1, s->th);
+    if (!tl_plain(d)) {
+        /* The cells under the surface's first and last pixel centres, and each drawn as a sprite. */
+        int32_t u0 = tl_unit(tl_centre(d->cam_x, d->zoom, 0)) + cam_x;
+        int32_t u1 = tl_unit(tl_centre(d->cam_x, d->zoom, d->w - 1)) + cam_x;
+        int32_t v0 = tl_unit(tl_centre(d->cam_y, d->zoom, 0)) + cam_y;
+        int32_t v1 = tl_unit(tl_centre(d->cam_y, d->zoom, d->h - 1)) + cam_y;
+        cx0 = tl_floor_div(u0, s->tw);
+        cy0 = tl_floor_div(v0, s->th);
+        cx1 = tl_floor_div(u1, s->tw);
+        cy1 = tl_floor_div(v1, s->th);
+    } else {
+        cx0 = tl_floor_div(cam_x, s->tw);
+        cy0 = tl_floor_div(cam_y, s->th);
+        cx1 = tl_floor_div(cam_x + d->w - 1, s->tw);
+        cy1 = tl_floor_div(cam_y + d->h - 1, s->th);
+    }
     if (cx0 < 0) cx0 = 0;
     if (cy0 < 0) cy0 = 0;
     if (cx1 >= m->cols) cx1 = m->cols - 1;
@@ -692,6 +1020,11 @@ void tl_draw_map(int64_t surf, int64_t map, int64_t set, int32_t cam_x, int32_t 
         for (cx = cx0; cx <= cx1; cx++) {
             int32_t cell = m->cells[cy * m->cols + cx];
             if (cell == 0) continue;
+            if (!tl_plain(d)) {
+                tl_sprite_at(d, s, (cell & 0xFFFFFF) - 1, (int64_t) (cx * s->tw - cam_x) * 256,
+                             (int64_t) (cy * s->th - cam_y) * 256, 0, 0, 0, 256, 256, (cell >> 24) & 7);
+                continue;
+            }
             tl_blit(d, s, (cell & 0xFFFFFF) - 1, cx * s->tw - cam_x, cy * s->th - cam_y,
                     (cell >> 24) & 7);
         }

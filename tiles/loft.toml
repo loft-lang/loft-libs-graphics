@@ -1,9 +1,9 @@
 [package]
 name = "tiles"
-version = "0.6.0"
+version = "0.7.0"
 loft = ">=2026.10.0"
 repository = "loft-libs-graphics"
-description = "Tile sheets, map layers and sprites on a small 16-bit surface, scaled up once per frame"
+description = "Tile sheets, map layers and sprites drawn at a surface's own resolution through a camera"
 categories  = ["graphics", "game"]
 
 # ⚠ FIRST release, so both floors are this release itself.
