@@ -40,12 +40,16 @@ typedef struct {
     uint8_t *px;        /* count tiles of tw * th indices, tile after tile */
     int32_t tw, th, count, colours;
     uint16_t pal[TL_SHADES][256];  /* pal[level][0] unused: index 0 is transparent */
+    unsigned tex, pal_tex;         /* a display surface's GPU copies, made when first drawn */
+    int32_t across;                /* tiles per row of `tex` */
 } tl_set;
 
 typedef struct {
     uint16_t *px;
     int32_t w, h;
     int64_t zoom, cam_x, cam_y;   /* the camera: pixels per unit (Q16), the top-left point (units, Q8) */
+    int32_t display;              /* 1: a display surface, always drawn through its camera;
+                                   * 2: one the GPU draws, straight onto the display */
 } tl_surf;
 
 typedef struct {
@@ -194,6 +198,12 @@ static void tl_sprite_at(tl_surf *d, const tl_set *s, int32_t tile, int64_t x, i
                          int64_t px, int64_t py, int64_t sx, int64_t sy, int32_t flags);
 static void tl_ground_at(tl_surf *d, const tl_set *s, int32_t tile, int64_t x, int64_t y,
                          const int32_t lift[4], const int32_t dark[4], int32_t flags);
+#if defined(__wasm__) && defined(LOFT_BROWSER)
+/* A page: a display surface is drawn by the GPU, straight onto the canvas (§ The GPU). */
+#define TL_GL 1
+static void tl_gl_clear(tl_surf *d, uint16_t c);
+static void tl_gl_pixels(tl_surf *d, int32_t *out);
+#endif
 
 int64_t tl_surf_new(int32_t w, int32_t h);
 void tl_surf_free(int64_t surf);
@@ -216,6 +226,7 @@ int64_t tl_surf_new(int32_t w, int32_t h) {
     s->h = h;
     s->zoom = 65536;
     s->cam_x = s->cam_y = 0;
+    s->display = 0;
     handle = tl_put(&tl_surfs, s);
     if (handle == 0) {
         free(s->px);
@@ -236,6 +247,12 @@ void tl_clear(int64_t surf, int32_t c565) {
     tl_surf *s = (tl_surf *) tl_get(&tl_surfs, surf);
     int64_t i, n;
     if (!s) return;
+#if defined(TL_GL)
+    if (s->display == 2) {
+        tl_gl_clear(s, (uint16_t) c565);
+        return;
+    }
+#endif
     n = (int64_t) s->w * s->h;
     for (i = 0; i < n; i++) s->px[i] = (uint16_t) c565;
 }
@@ -269,6 +286,12 @@ void tl_pixels(int64_t surf, int32_t *out) {
     tl_surf *s = (tl_surf *) tl_get(&tl_surfs, surf);
     int64_t i, n;
     if (!s) return;
+#if defined(TL_GL)
+    if (s->display == 2) {
+        tl_gl_pixels(s, out);
+        return;
+    }
+#endif
     n = (int64_t) s->w * s->h;
     for (i = 0; i < n; i++) out[i] = s->px[i];
 }
@@ -708,7 +731,7 @@ static int64_t tl_sin24(int64_t a) {
 }
 
 static int tl_plain(const tl_surf *d) {
-    return d->zoom == 65536 && d->cam_x == 0 && d->cam_y == 0;
+    return !d->display && d->zoom == 65536 && d->cam_x == 0 && d->cam_y == 0;
 }
 
 /* The point, in units (Q16), under the centre of surface pixel column (or row) `i`. */
@@ -747,6 +770,276 @@ static void tl_orient(const tl_set *s, int32_t flags, int32_t at[3]) {
     at[2] -= at[0];
 }
 
+#if defined(TL_GL)
+/* ── The GPU: a page's display surface ──
+ *
+ * Each primitive is one quad over the box of pixels it can reach, and the fragment shader
+ * colours a pixel by tl_sprite_at's and tl_ground_at's rule: the pixel's centre mapped back
+ * through the camera into the tile, the nearest texel, its colour from the sheet's palette at
+ * the shade.  The ground's darkness and dither are the same integer formulas.  The arithmetic is
+ * the GPU's floating point, so a pixel whose centre lies within a hair of a texel edge may show
+ * the neighbouring texel; everything else is the CPU's picture.  The sheet goes up once, as its
+ * palette indices (in the red channel) and its palette at every shade, both read texel-exact. */
+#define TL_IMPORT(name) __attribute__((import_module("loft_gl"), import_name(#name)))
+TL_IMPORT(gg_js_size) int tl_js_size(int which);
+TL_IMPORT(gg_glViewport) void tl_glViewport(int, int, int, int);
+TL_IMPORT(gg_glClearColor) void tl_glClearColor(float, float, float, float);
+TL_IMPORT(gg_glClear) void tl_glClear(unsigned);
+TL_IMPORT(gg_glDisable) void tl_glDisable(unsigned);
+TL_IMPORT(gg_glCreateShader) unsigned tl_glCreateShader(unsigned);
+TL_IMPORT(gg_glShaderSource) void tl_glShaderSource(unsigned, int, const char *const *, const int *);
+TL_IMPORT(gg_glCompileShader) void tl_glCompileShader(unsigned);
+TL_IMPORT(gg_glCreateProgram) unsigned tl_glCreateProgram(void);
+TL_IMPORT(gg_glAttachShader) void tl_glAttachShader(unsigned, unsigned);
+TL_IMPORT(gg_glLinkProgram) void tl_glLinkProgram(unsigned);
+TL_IMPORT(gg_glUseProgram) void tl_glUseProgram(unsigned);
+TL_IMPORT(gg_glGetUniformLocation) int tl_glGetUniformLocation(unsigned, const char *);
+TL_IMPORT(gg_glUniform1i) void tl_glUniform1i(int, int);
+TL_IMPORT(gg_glUniform2f) void tl_glUniform2f(int, float, float);
+TL_IMPORT(gg_glUniform3f) void tl_glUniform3f(int, float, float, float);
+TL_IMPORT(gg_glUniform4f) void tl_glUniform4f(int, float, float, float, float);
+TL_IMPORT(gg_glGenTextures) void tl_glGenTextures(int, unsigned *);
+TL_IMPORT(gg_glBindTexture) void tl_glBindTexture(unsigned, unsigned);
+TL_IMPORT(gg_glActiveTexture) void tl_glActiveTexture(unsigned);
+TL_IMPORT(gg_glTexImage2D) void tl_glTexImage2D(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+TL_IMPORT(gg_glTexParameteri) void tl_glTexParameteri(unsigned, unsigned, int);
+TL_IMPORT(gg_glGenVertexArrays) void tl_glGenVertexArrays(int, unsigned *);
+TL_IMPORT(gg_glBindVertexArray) void tl_glBindVertexArray(unsigned);
+TL_IMPORT(gg_glDrawArrays) void tl_glDrawArrays(unsigned, int, int);
+TL_IMPORT(gg_glReadPixels) void tl_glReadPixels(int, int, int, int, unsigned, unsigned, void *);
+TL_IMPORT(gg_glBindFramebuffer) void tl_glBindFramebuffer(unsigned, unsigned);
+
+#define TL_GL_TEXTURE_2D 0x0DE1
+#define TL_GL_TEXTURE0 0x84C0
+#define TL_GL_RGBA 0x1908
+#define TL_GL_UNSIGNED_BYTE 0x1401
+#define TL_GL_NEAREST 0x2600
+#define TL_GL_CLAMP_TO_EDGE 0x812F
+#define TL_GL_MAG_FILTER 0x2800
+#define TL_GL_MIN_FILTER 0x2801
+#define TL_GL_WRAP_S 0x2802
+#define TL_GL_WRAP_T 0x2803
+#define TL_GL_COLOR_BUFFER_BIT 0x4000
+#define TL_GL_TRIANGLE_STRIP 0x0005
+#define TL_GL_VERTEX_SHADER 0x8B31
+#define TL_GL_FRAGMENT_SHADER 0x8B30
+#define TL_GL_DEPTH_TEST 0x0B71
+#define TL_GL_BLEND 0x0BE2
+#define TL_GL_SCISSOR_TEST 0x0C11
+#define TL_GL_CULL_FACE 0x0B44
+#define TL_GL_FRAMEBUFFER 0x8D40
+
+/* The quad: the box (left, top, right, bottom) of surface pixels, the surface's first row at
+ * the top. */
+static const char *const tl_vs =
+    "#version 330 core\n"
+    "uniform vec2 u_size;\n"
+    "uniform vec4 u_box;\n"
+    "void main() {\n"
+    "  vec2 c = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));\n"
+    "  vec2 p = mix(u_box.xy, u_box.zw, c);\n"
+    "  gl_Position = vec4(p.x / u_size.x * 2.0 - 1.0, 1.0 - p.y / u_size.y * 2.0, 0.0, 1.0);\n"
+    "}\n";
+/* u_kind 0 a fill, 1 an upright sprite, 2 a turned one, 3 ground.  u_cam: zoom, then the
+ * top-left point in units.  The tile: u_t (its first texel in u_sheet, the oriented width and
+ * height), u_at (the oriented tile's texel (u, v) is at at.x + u at.y + v at.z of the sheet's
+ * tile, whose width is at.w), u_f (the shade, the ghost). */
+static const char *const tl_fs =
+    "#version 330 core\n"
+    "uniform sampler2D u_sheet;\n"
+    "uniform sampler2D u_pal;\n"
+    "uniform vec2 u_size;\n"
+    "uniform vec3 u_cam;\n"
+    "uniform int u_kind;\n"
+    "uniform vec4 u_colour, u_a, u_b, u_d, u_t, u_at, u_f;\n"
+    "out vec4 o_color;\n"
+    "const int BAYER[16] = int[16](0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5);\n"
+    "int mixat(int a, int b, int w, int i) { return (a * (2 * w - 2 * i - 1) + b * (2 * i + 1) + w) / (2 * w); }\n"
+    "void main() {\n"
+    "  if (u_kind == 0) { o_color = u_colour; return; }\n"
+    "  float i = floor(gl_FragCoord.x), j = u_size.y - 1.0 - floor(gl_FragCoord.y);\n"
+    "  vec2 p = u_cam.yz + (vec2(i, j) + 0.5) / u_cam.x;\n"
+    "  int ow = int(u_t.z), oh = int(u_t.w), col, row, level = int(u_f.x);\n"
+    "  if (u_kind == 1) {\n"
+    "    col = min(int(floor((p.x - u_a.x) / u_a.z)), ow - 1);\n"
+    "    row = min(int(floor((p.y - u_a.y) / u_a.w)), oh - 1);\n"
+    "  } else if (u_kind == 2) {\n"
+    "    vec2 d = p - u_a.xy;\n"
+    "    float u = u_a.z + (u_b.x * d.x + u_b.y * d.y) / u_b.z, v = u_a.w + (u_b.x * d.y - u_b.y * d.x) / u_b.w;\n"
+    "    if (u < 0.0 || v < 0.0 || u >= float(ow) || v >= float(oh)) discard;\n"
+    "    col = int(floor(u));\n"
+    "    row = int(floor(v));\n"
+    "  } else {\n"
+    "    float a = p.x - u_a.x;\n"
+    "    float top = u_a.y - u_a.z - (u_a.w - u_a.z) * a / float(ow);\n"
+    "    float bottom = u_a.y + float(oh) - u_b.x - (u_b.y - u_b.x) * a / float(ow);\n"
+    "    if (bottom <= top || p.y < top || p.y >= bottom) discard;\n"
+    "    col = min(int(floor(a)), ow - 1);\n"
+    "    row = min(int(floor((p.y - top) * float(oh) / (bottom - top))), oh - 1);\n"
+    "    int dt = mixat(int(u_d.x), int(u_d.y), ow, col), db = mixat(int(u_d.z), int(u_d.w), ow, col);\n"
+    "    level = (mixat(dt, db, oh, row) + 15 - BAYER[(row & 3) * 4 + (col & 3)]) >> 4;\n"
+    "  }\n"
+    "  if (u_f.y > 0.5 && ((col + row) & 1) == 1) discard;\n"
+    "  int at = int(u_at.x) + col * int(u_at.y) + row * int(u_at.z), tw = int(u_at.w);\n"
+    "  int idx = int(texelFetch(u_sheet, ivec2(int(u_t.x) + at % tw, int(u_t.y) + at / tw), 0).r * 255.0 + 0.5);\n"
+    "  if (idx == 0) discard;\n"
+    "  o_color = texelFetch(u_pal, ivec2(idx, level), 0);\n"
+    "}\n";
+
+static unsigned tl_prog = 0, tl_vao = 0;
+static int tl_u_size, tl_u_box, tl_u_cam, tl_u_kind, tl_u_colour, tl_u_a, tl_u_b, tl_u_d, tl_u_t, tl_u_at, tl_u_f;
+static tl_surf *tl_gl_bound = NULL;    /* the surface whose camera the uniforms hold */
+static int64_t tl_gl_zoom = 0, tl_gl_cx = 0, tl_gl_cy = 0;
+
+static unsigned tl_shader(unsigned kind, const char *src) {
+    unsigned sh = tl_glCreateShader(kind);
+    tl_glShaderSource(sh, 1, &src, NULL);
+    tl_glCompileShader(sh);
+    return sh;
+}
+
+/* An RGB565 colour widened as `screen` widens it. */
+static void tl_widen(uint16_t c, uint8_t *out) {
+    out[0] = (uint8_t) (((c >> 11) & 31) * 255 / 31);
+    out[1] = (uint8_t) (((c >> 5) & 63) * 255 / 63);
+    out[2] = (uint8_t) ((c & 31) * 255 / 31);
+    out[3] = 255;
+}
+
+static void tl_gl_texture(unsigned *tex, int w, int h, const uint8_t *rgba) {
+    tl_glGenTextures(1, tex);
+    tl_glBindTexture(TL_GL_TEXTURE_2D, *tex);
+    tl_glTexParameteri(TL_GL_TEXTURE_2D, TL_GL_MAG_FILTER, TL_GL_NEAREST);
+    tl_glTexParameteri(TL_GL_TEXTURE_2D, TL_GL_MIN_FILTER, TL_GL_NEAREST);
+    tl_glTexParameteri(TL_GL_TEXTURE_2D, TL_GL_WRAP_S, TL_GL_CLAMP_TO_EDGE);
+    tl_glTexParameteri(TL_GL_TEXTURE_2D, TL_GL_WRAP_T, TL_GL_CLAMP_TO_EDGE);
+    tl_glTexImage2D(TL_GL_TEXTURE_2D, 0, TL_GL_RGBA, w, h, 0, TL_GL_RGBA, TL_GL_UNSIGNED_BYTE, rgba);
+}
+
+/* The sheet on the GPU, made the first time a display surface draws from it. */
+static int tl_gl_sheet(tl_set *s) {
+    int32_t rows, w, h, t, i;
+    uint8_t *rgba;
+    if (s->tex) return 1;
+    s->across = 4096 / s->tw < 1 ? 1 : 4096 / s->tw;
+    if (s->across > s->count) s->across = s->count;
+    rows = (s->count + s->across - 1) / s->across;
+    w = s->across * s->tw;
+    h = rows * s->th;
+    rgba = (uint8_t *) calloc((size_t) w * (size_t) h, 4);
+    if (!rgba) return 0;
+    for (t = 0; t < s->count; t++) {
+        int32_t x0 = (t % s->across) * s->tw, y0 = (t / s->across) * s->th;
+        for (i = 0; i < s->tw * s->th; i++) {
+            rgba[(((size_t) (y0 + i / s->tw)) * (size_t) w + (size_t) (x0 + i % s->tw)) * 4] =
+                s->px[(size_t) t * (size_t) s->tw * (size_t) s->th + (size_t) i];
+        }
+    }
+    tl_gl_texture(&s->tex, w, h, rgba);
+    free(rgba);
+    rgba = (uint8_t *) calloc(256 * TL_SHADES, 4);
+    if (!rgba) return 0;
+    for (t = 0; t < TL_SHADES; t++) {
+        for (i = 1; i < 256; i++) tl_widen(s->pal[t][i], rgba + ((size_t) t * 256 + (size_t) i) * 4);
+    }
+    tl_gl_texture(&s->pal_tex, 256, TL_SHADES, rgba);
+    free(rgba);
+    return 1;
+}
+
+/* Ready to draw on `d`: the program, the canvas as the target, the surface's camera. */
+static int tl_gl_begin(tl_surf *d) {
+    if (!tl_prog) {
+        tl_prog = tl_glCreateProgram();
+        tl_glAttachShader(tl_prog, tl_shader(TL_GL_VERTEX_SHADER, tl_vs));
+        tl_glAttachShader(tl_prog, tl_shader(TL_GL_FRAGMENT_SHADER, tl_fs));
+        tl_glLinkProgram(tl_prog);
+        tl_glGenVertexArrays(1, &tl_vao);
+        tl_u_size = tl_glGetUniformLocation(tl_prog, "u_size");
+        tl_u_box = tl_glGetUniformLocation(tl_prog, "u_box");
+        tl_u_cam = tl_glGetUniformLocation(tl_prog, "u_cam");
+        tl_u_kind = tl_glGetUniformLocation(tl_prog, "u_kind");
+        tl_u_colour = tl_glGetUniformLocation(tl_prog, "u_colour");
+        tl_u_a = tl_glGetUniformLocation(tl_prog, "u_a");
+        tl_u_b = tl_glGetUniformLocation(tl_prog, "u_b");
+        tl_u_d = tl_glGetUniformLocation(tl_prog, "u_d");
+        tl_u_t = tl_glGetUniformLocation(tl_prog, "u_t");
+        tl_u_at = tl_glGetUniformLocation(tl_prog, "u_at");
+        tl_u_f = tl_glGetUniformLocation(tl_prog, "u_f");
+        tl_glUseProgram(tl_prog);
+        tl_glUniform1i(tl_glGetUniformLocation(tl_prog, "u_sheet"), 0);
+        tl_glUniform1i(tl_glGetUniformLocation(tl_prog, "u_pal"), 1);
+        tl_gl_bound = NULL;
+    }
+    tl_glUseProgram(tl_prog);
+    tl_glBindVertexArray(tl_vao);
+    if (tl_gl_bound != d || tl_gl_zoom != d->zoom || tl_gl_cx != d->cam_x || tl_gl_cy != d->cam_y) {
+        tl_glBindFramebuffer(TL_GL_FRAMEBUFFER, 0);
+        tl_glViewport(0, 0, d->w, d->h);
+        tl_glDisable(TL_GL_DEPTH_TEST);
+        tl_glDisable(TL_GL_BLEND);
+        tl_glDisable(TL_GL_SCISSOR_TEST);
+        tl_glDisable(TL_GL_CULL_FACE);
+        tl_glUniform2f(tl_u_size, (float) d->w, (float) d->h);
+        tl_glUniform3f(tl_u_cam, (float) ((double) d->zoom / 65536.0), (float) ((double) d->cam_x / 256.0),
+                       (float) ((double) d->cam_y / 256.0));
+        tl_gl_bound = d;
+        tl_gl_zoom = d->zoom;
+        tl_gl_cx = d->cam_x;
+        tl_gl_cy = d->cam_y;
+    }
+    return 1;
+}
+
+static void tl_gl_quad(int32_t i0, int32_t j0, int32_t i1, int32_t j1) {
+    if (i0 >= i1 || j0 >= j1) return;
+    tl_glUniform4f(tl_u_box, (float) i0, (float) j0, (float) i1, (float) j1);
+    tl_glDrawArrays(TL_GL_TRIANGLE_STRIP, 0, 4);
+}
+
+/* The tile's uniforms: where it is in the sheet's texture and how it is oriented. */
+static void tl_gl_tile(const tl_set *s, int32_t tile, int32_t flags, int32_t ow, int32_t oh, int32_t level) {
+    int32_t at[3];
+    tl_orient(s, flags, at);
+    tl_glActiveTexture(TL_GL_TEXTURE0);
+    tl_glBindTexture(TL_GL_TEXTURE_2D, s->tex);
+    tl_glActiveTexture(TL_GL_TEXTURE0 + 1);
+    tl_glBindTexture(TL_GL_TEXTURE_2D, s->pal_tex);
+    tl_glUniform4f(tl_u_t, (float) ((tile % s->across) * s->tw), (float) ((tile / s->across) * s->th), (float) ow,
+                   (float) oh);
+    tl_glUniform4f(tl_u_at, (float) at[0], (float) at[1], (float) at[2], (float) s->tw);
+    tl_glUniform4f(tl_u_f, (float) level, (float) ((flags >> 12) & 1), 0.0f, 0.0f);
+}
+
+static void tl_gl_clear(tl_surf *d, uint16_t c) {
+    uint8_t rgba[4];
+    tl_gl_begin(d);
+    tl_widen(c, rgba);
+    tl_glClearColor(rgba[0] / 255.0f, rgba[1] / 255.0f, rgba[2] / 255.0f, 1.0f);
+    tl_glClear(TL_GL_COLOR_BUFFER_BIT);
+}
+
+/* The canvas read back, RGB565 as the CPU surface keeps it: a widened channel narrows back
+ * exactly (ceil(v * 31 / 255) undoes floor(c * 255 / 31)). */
+static void tl_gl_pixels(tl_surf *d, int32_t *out) {
+    size_t n = (size_t) d->w * (size_t) d->h, k;
+    int32_t y, x;
+    uint8_t *rgba = (uint8_t *) malloc(n * 4);
+    if (!rgba) return;
+    tl_glBindFramebuffer(TL_GL_FRAMEBUFFER, 0);
+    tl_glReadPixels(0, 0, d->w, d->h, TL_GL_RGBA, TL_GL_UNSIGNED_BYTE, rgba);
+    for (y = 0; y < d->h; y++) {
+        for (x = 0; x < d->w; x++) {
+            const uint8_t *p = rgba + ((size_t) (d->h - 1 - y) * (size_t) d->w + (size_t) x) * 4;
+            k = (size_t) y * (size_t) d->w + (size_t) x;
+            out[k] = (int32_t) ((((p[0] * 31 + 254) / 255) << 11) | (((p[1] * 63 + 254) / 255) << 5) |
+                                ((p[2] * 31 + 254) / 255));
+        }
+    }
+    free(rgba);
+}
+#endif
+
 /* Scratch for a primitive's column table, grown as a surface needs (one thread). */
 static int32_t *tl_cols = NULL;
 static int32_t tl_cols_cap = 0;
@@ -766,6 +1059,17 @@ static void tl_fill_at(tl_surf *d, int64_t x, int64_t y, int64_t w, int64_t h, u
     int32_t i0 = tl_first(d->cam_x, d->zoom, x, d->w), i1 = tl_first(d->cam_x, d->zoom, x + w, d->w);
     int32_t j0 = tl_first(d->cam_y, d->zoom, y, d->h), j1 = tl_first(d->cam_y, d->zoom, y + h, d->h);
     int32_t i, j;
+#if defined(TL_GL)
+    if (d->display == 2) {
+        uint8_t rgba[4];
+        tl_gl_begin(d);
+        tl_widen(c, rgba);
+        tl_glUniform1i(tl_u_kind, 0);
+        tl_glUniform4f(tl_u_colour, rgba[0] / 255.0f, rgba[1] / 255.0f, rgba[2] / 255.0f, 1.0f);
+        tl_gl_quad(i0, j0, i1, j1);
+        return;
+    }
+#endif
     for (j = j0; j < j1; j++) {
         uint16_t *q = d->px + (size_t) j * (size_t) d->w;
         for (i = i0; i < i1; i++) q[i] = c;
@@ -797,7 +1101,19 @@ static void tl_sprite_at(tl_surf *d, const tl_set *s, int32_t tile, int64_t x, i
         int64_t left = cx - px * sx, top = cy - py * sy, tw = sx * 256, th = sy * 256;
         int32_t i0 = tl_first(d->cam_x, z, left, d->w), i1 = tl_first(d->cam_x, z, left + ow * tw, d->w);
         int32_t j0 = tl_first(d->cam_y, z, top, d->h), j1 = tl_first(d->cam_y, z, top + oh * th, d->h);
-        if (i0 >= i1 || j0 >= j1 || !tl_cols_fit(i1 - i0)) return;
+        if (i0 >= i1 || j0 >= j1) return;
+#if defined(TL_GL)
+        if (d->display == 2) {
+            if (!tl_gl_sheet((tl_set *) s) || !tl_gl_begin(d)) return;
+            tl_glUniform1i(tl_u_kind, 1);
+            tl_glUniform4f(tl_u_a, (float) ((double) left / 65536.0), (float) ((double) top / 65536.0),
+                           (float) ((double) tw / 65536.0), (float) ((double) th / 65536.0));
+            tl_gl_tile(s, tile, flags, ow, oh, level < TL_SHADES ? level : TL_SHADES - 1);
+            tl_gl_quad(i0, j0, i1, j1);
+            return;
+        }
+#endif
+        if (!tl_cols_fit(i1 - i0)) return;
         for (i = i0; i < i1; i++) {
             int64_t u = (tl_centre(d->cam_x, z, i) - left) / tw;
             tl_cols[i - i0] = (int32_t) (u < ow ? u : ow - 1);
@@ -839,6 +1155,19 @@ static void tl_sprite_at(tl_surf *d, const tl_set *s, int32_t tile, int64_t x, i
         j0 = (int32_t) (lo_y - 1 < 0 ? 0 : lo_y - 1);
         i1 = (int32_t) (hi_x + 2 > d->w ? d->w : hi_x + 2);
         j1 = (int32_t) (hi_y + 2 > d->h ? d->h : hi_y + 2);
+#if defined(TL_GL)
+        if (d->display == 2) {
+            if (!tl_gl_sheet((tl_set *) s) || !tl_gl_begin(d)) return;
+            tl_glUniform1i(tl_u_kind, 2);
+            tl_glUniform4f(tl_u_a, (float) ((double) cx / 65536.0), (float) ((double) cy / 65536.0),
+                           (float) ((double) px / 256.0), (float) ((double) py / 256.0));
+            tl_glUniform4f(tl_u_b, (float) ((double) c / 16777216.0), (float) ((double) sn / 16777216.0),
+                           (float) ((double) sx / 256.0), (float) ((double) sy / 256.0));
+            tl_gl_tile(s, tile, flags, ow, oh, level < TL_SHADES ? level : TL_SHADES - 1);
+            tl_gl_quad(i0, j0, i1, j1);
+            return;
+        }
+#endif
         for (j = j0; j < j1; j++) {
             int64_t dx = tl_centre(d->cam_x, z, i0) - cx, dy = tl_centre(d->cam_y, z, j) - cy;
             int64_t u = pu + (c * dx + sn * dy) / sx, v = pv + (c * dy - sn * dx) / sy;
@@ -877,6 +1206,22 @@ static void tl_ground_at(tl_surf *d, const tl_set *s, int32_t tile, int64_t x, i
     tl_orient(s, flags, at);
     i0 = tl_first(d->cam_x, z, left, d->w);
     i1 = tl_first(d->cam_x, z, left + w16, d->w);
+#if defined(TL_GL)
+    if (d->display == 2) {
+        /* Every row an edge can reach, the lowest top to the highest bottom. */
+        int32_t lo = lift[0] > lift[1] ? lift[0] : lift[1], hi = lift[2] < lift[3] ? lift[2] : lift[3];
+        int32_t j0 = tl_first(d->cam_y, z, top0 - (int64_t) lo * 65536, d->h);
+        int32_t j1 = tl_first(d->cam_y, z, top0 + (int64_t) (oh - hi) * 65536, d->h);
+        if (!tl_gl_sheet((tl_set *) s) || !tl_gl_begin(d)) return;
+        tl_glUniform1i(tl_u_kind, 3);
+        tl_glUniform4f(tl_u_a, (float) x, (float) y, (float) lift[0], (float) lift[1]);
+        tl_glUniform4f(tl_u_b, (float) lift[2], (float) lift[3], 0.0f, 0.0f);
+        tl_glUniform4f(tl_u_d, (float) dark[0], (float) dark[1], (float) dark[2], (float) dark[3]);
+        tl_gl_tile(s, tile, flags, ow, oh, 0);
+        tl_gl_quad(i0, j0 > 0 ? j0 - 1 : 0, i1, j1 < d->h ? j1 + 1 : d->h);
+        return;
+    }
+#endif
     for (i = i0; i < i1; i++) {
         int64_t a = tl_centre(d->cam_x, z, i) - left, top, bottom, n;
         int32_t u = (int32_t) (a >> 16), j, j0, j1, k;
@@ -900,6 +1245,30 @@ static void tl_ground_at(tl_surf *d, const tl_set *s, int32_t tile, int64_t x, i
             if (t) d->px[(size_t) j * (size_t) d->w + (size_t) i] = s->pal[shade[row]][t];
         }
     }
+}
+
+int64_t tl_display_new(int32_t w, int32_t h);
+
+/* A surface for the display, `w` x `h` pixels: always drawn through its camera, and where the
+ * machine draws faster another way — a page's GPU, when the canvas is that size — drawn that
+ * way, straight onto the display, with `tl_pixels` reading the display back. */
+int64_t tl_display_new(int32_t w, int32_t h) {
+    int64_t handle = tl_surf_new(w, h);
+    tl_surf *d = (tl_surf *) tl_get(&tl_surfs, handle);
+    if (!d) return 0;
+    d->display = 1;
+#if defined(TL_GL)
+    if (tl_js_size(0) == w && tl_js_size(1) == h) d->display = 2;
+#endif
+    return handle;
+}
+
+int64_t tl_on_display(int64_t surf);
+
+/* 1 when the surface is drawn straight onto the display: nothing needs to be shown. */
+int64_t tl_on_display(int64_t surf) {
+    tl_surf *d = (tl_surf *) tl_get(&tl_surfs, surf);
+    return d && d->display == 2;
 }
 
 void tl_camera(int64_t surf, int64_t zoom, int64_t cam_x, int64_t cam_y);

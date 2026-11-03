@@ -38,6 +38,7 @@ loft install tiles
 | `sheet(rgba, width, height, tile_w, tile_h, spacing = 0, margin = 0) -> integer?` | null when the sizes do not fit or there are more than 255 colours once in RGB565 |
 | `sheet_from_png(path, tile_w, tile_h, …)`, `sheet_from_image(img, …)` | through `imaging` |
 | `surface(width, height) -> integer?`, `clear(surface, colour)` | colours are RGB565: `rgb(r, g, b)` |
+| `display_surface(width, height) -> integer?`, `on_display(surface)` | a surface for the display: always drawn through its camera, and in a page drawn by the GPU straight onto the canvas (the same picture as the CPU's, pixel for pixel on the checked scene); `on_display` says the frame is on the screen already, and `pixels` reads it back |
 | `camera(surface, zoom, x = 0.0, y = 0.0)` | `zoom` surface pixels per unit (any fraction, 1/256 .. 4096), the point (x, y) at the top-left; what is drawn after it is placed in units and drawn at the surface's resolution |
 | `sprite(surface, sheet, tile, x, y, turn = 0.0, pivot_x = 0.0, pivot_y = 0.0, scale_x = 1.0, scale_y = 1.0, flips…, shade, ghost)` | a tile placed, turned `turn` degrees clockwise and stretched about its point `pivot` (in the tile's pixels), every value fractional; a true rotation at the surface's resolution |
 | `fill(surface, x, y, w, h, colour)` | a rectangle in units, fractional: the pixels whose centres lie inside it |

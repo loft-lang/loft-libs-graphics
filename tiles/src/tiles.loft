@@ -50,6 +50,10 @@ fn tl_draw_ground(surf: integer, set: integer, tile: integer, x: integer, y: int
 fn tl_draw_turned(surf: integer, set: integer, tile: integer, x: integer, y: integer, degrees: integer,
                   pivot_x: integer, pivot_y: integer, flags: integer);
 #c "tl_draw_turned" "void(int64_t, int64_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t)"
+fn tl_display_new(width: integer, height: integer) -> integer;
+#c "tl_display_new" "int64_t(int32_t, int32_t)"
+fn tl_on_display(surf: integer) -> integer;
+#c "tl_on_display" "int64_t(int64_t)"
 fn tl_camera(surf: integer, zoom: integer, cam_x: integer, cam_y: integer);
 #c "tl_camera" "void(int64_t, int64_t, int64_t, int64_t)"
 fn tl_sprite(surf: integer, set: integer, tile: integer, x: integer, y: integer, turn: integer,
@@ -181,6 +185,21 @@ const GHOST = 4096;
 // A value in 256ths, rounded to the nearest.
 fn q8(v: float) -> integer {
   round(v * 256.0) as integer
+}
+
+/// A surface for the display, `width` x `height` pixels — the screen's own size.  It is always
+/// drawn through its camera, and where the machine draws faster another way it is drawn that
+/// way: in a page, by the GPU, straight onto the canvas (when the canvas is this size).  What it
+/// draws is the same picture either way; `pixels` reads it back.  Ask `on_display` whether
+/// there is anything left to show.
+pub fn display_surface(width: integer, height: integer) -> integer? {
+  handle(tl_display_new(width, height))
+}
+
+/// True when the surface is drawn straight onto the display, so the frame is on the screen as
+/// soon as it is drawn and nothing needs showing.
+pub fn on_display(surface: integer) -> boolean {
+  tl_on_display(surface) != 0
 }
 
 /// Point the surface's camera: `zoom` surface pixels per unit, with the point (x, y), in units,
