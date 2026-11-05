@@ -1,6 +1,6 @@
 [package]
 name = "imaging"
-version = "0.5.1"
+version = "0.5.2"
 loft = ">=2026.10.0"
 api_compatible_with  = "0.4.0"   # DECLARED BREAK: `png()` answers `Image?`.  It always
                                  # answered null on a missing or undecodable file; the
@@ -23,3 +23,13 @@ entry = "src/imaging.loft"
 # encodes with the same code.  No Rust crate, no rustc, no wasm bridge.
 [c]
 shim = "c/imaging_png.c"
+
+# What this package ships, compiles in or opens that it did not write (loft THIRDPARTY.md).
+[thirdparty.lodepng]
+kind       = "vendored"
+path       = "c/vendor/lodepng"
+upstream   = "https://github.com/lvandeve/lodepng"
+commit     = "ed6fe5825c6a4fbb7f58ab35a4231c7543cd452a"
+digest     = "sha256:33a66ec7e2416405ed1e4c84d9e6e3526d8cb96d7e405dbe99c5abeae1a6ce96"
+renames    = { "lodepng.c" = "lodepng.cpp" }
+advisories = ["nvd:lodepng", "osv:commit"]
