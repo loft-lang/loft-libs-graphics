@@ -33,3 +33,8 @@ commit     = "ed6fe5825c6a4fbb7f58ab35a4231c7543cd452a"
 digest     = "sha256:33a66ec7e2416405ed1e4c84d9e6e3526d8cb96d7e405dbe99c5abeae1a6ce96"
 renames    = { "lodepng.c" = "lodepng.cpp" }
 advisories = ["nvd:lodepng", "osv:commit"]
+
+[thirdparty.lodepng.reviewed]
+CVE-2019-17178 = "fixed: HuffmanTree_makeFromFrequencies allocates with lodepng_malloc and has no realloc; our pin is 2026-05-28"
+CVE-2022-44081 = "not-reached: the crash is in pngdetail, a separate example program; only lodepng.c and lodepng.h are vendored"
+CVE-2026-112020 = "not-reached: getFilterTypesInterlaced is in lodepng_util.cpp, which is not vendored and has no counterpart in lodepng.c"
