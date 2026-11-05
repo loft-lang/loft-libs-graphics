@@ -66,23 +66,23 @@ pub struct Image {
 // The C part (c/imaging_png.c over the vendored lodepng): PNG bytes to RGBA and back, memory to
 // memory.  A decode or an encode answers a handle (0 on failure); its size is asked, its bytes
 // copied into a vector sized for them, and the handle freed.
-fn ip_decode(png: const vector<u8>) -> integer;
+fn ip_decode(png: const vector<u8>) -> i64;
 #c "ip_decode" "int64_t(const uint8_t*, int64_t)"
-fn ip_encode(rgba: const vector<u8>, width: integer, height: integer, alpha: integer) -> integer;
+fn ip_encode(rgba: const vector<u8>, width: integer, height: integer, alpha: integer) -> i64;
 #c "ip_encode" "int64_t(const uint8_t*, int64_t, int32_t, int32_t, int32_t)"
-fn ip_width(h: integer) -> integer;
+fn ip_width(h: i64) -> integer;
 #c "ip_width" "int64_t(int64_t)"
-fn ip_height(h: integer) -> integer;
+fn ip_height(h: i64) -> integer;
 #c "ip_height" "int64_t(int64_t)"
-fn ip_size(h: integer) -> integer;
+fn ip_size(h: i64) -> integer;
 #c "ip_size" "int64_t(int64_t)"
-fn ip_copy(h: integer, out: vector<u8>);
+fn ip_copy(h: i64, out: vector<u8>);
 #c "ip_copy" "void(int64_t, uint8_t*)"
-fn ip_free(h: integer);
+fn ip_free(h: i64);
 #c "ip_free" "void(int64_t)"
 
 // The bytes handle `h` holds, its handle freed.
-fn ip_take(h: integer) -> vector<u8> {
+fn ip_take(h: i64) -> vector<u8> {
   out: vector<u8> = [0 as u8; ip_size(h)];
   ip_copy(h, out);
   ip_free(h);

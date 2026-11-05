@@ -69,8 +69,9 @@ pub fn color_b(color: integer) -> integer { color & 255 }
 // Alpha.  255 is opaque; a colour written as a bare 0xRRGGBB literal reads 0
 // here, which is what makes it composite to nothing.
 pub fn color_a(color: integer) -> integer {
-  // integer is i64 post-2c, so the shift is logical on the high byte.
-  ((color & 0xFF000000) >> 24) & 255
+  // The mask keeps the high byte whether the shift brings in sign bits (a 32-bit colour with
+  // alpha 128 or more is negative) or not.
+  (color >> 24) & 255
 }
 
 // A 2D pixel canvas backed by a flat vector of RGBA integers.
@@ -1003,9 +1004,9 @@ fn gg_height(h: integer) -> integer;
 fn gg_event_count(h: integer) -> integer;
 #c "gg_event_count" "int64_t(int64_t)"
 fn gg_events(h: integer, out: vector<integer>);
-#c "gg_events" "void(int64_t, int64_t*, int64_t)"
+#c "gg_events" "void(int64_t, loft_int*, int64_t)"
 fn gg_read_pixels(h: integer, out: vector<integer>);
-#c "gg_read_pixels" "void(int64_t, int64_t*, int64_t)"
+#c "gg_read_pixels" "void(int64_t, loft_int*, int64_t)"
 fn gg_text_size(h: integer) -> integer;
 #c "gg_text_size" "int64_t(int64_t)"
 fn gg_text_copy(h: integer, out: vector<u8>);
@@ -1152,7 +1153,7 @@ pub fn close(self: Window) {
 fn gg_shader(win: integer, vertex: text, fragment: text) -> integer;
 #c "gg_shader" "int64_t(int64_t, const char*, const char*)"
 fn gg_uniform_f(sh: integer, name: text, v: const vector<float>);
-#c "gg_uniform_f" "void(int64_t, const char*, const double*, int64_t)"
+#c "gg_uniform_f" "void(int64_t, const char*, const loft_float*, int64_t)"
 fn gg_uniform_i(sh: integer, name: text, v: integer);
 #c "gg_uniform_i" "void(int64_t, const char*, int64_t)"
 fn gg_mesh(win: integer, data: const vector<single>, stride: integer) -> integer;
@@ -1235,7 +1236,7 @@ pub fn draw(self: const GpuMesh, shader: const Shader) {
 fn gg_mesh_update(mesh: integer, data: const vector<single>);
 #c "gg_mesh_update" "void(int64_t, const float*, int64_t)"
 fn gg_mesh_indices(mesh: integer, idx: const vector<integer>);
-#c "gg_mesh_indices" "void(int64_t, const int64_t*, int64_t)"
+#c "gg_mesh_indices" "void(int64_t, const loft_int*, int64_t)"
 fn gg_draw_as(mesh: integer, shader: integer, mode: integer, indexed: integer, instances: integer);
 #c "gg_draw_as" "void(int64_t, int64_t, int64_t, int64_t, int64_t)"
 fn gg_instances(win: integer, data: const vector<single>) -> integer;
@@ -1334,9 +1335,9 @@ fn gg_scissor(win: integer, x: integer, y: integer, width: integer, height: inte
 fn gg_finish(win: integer);
 #c "gg_finish" "void(int64_t)"
 fn gg_line_width(win: integer, width: const vector<float>);
-#c "gg_line_width" "void(int64_t, const double*, int64_t)"
+#c "gg_line_width" "void(int64_t, const loft_float*, int64_t)"
 fn gg_point_size(win: integer, size: const vector<float>);
-#c "gg_point_size" "void(int64_t, const double*, int64_t)"
+#c "gg_point_size" "void(int64_t, const loft_float*, int64_t)"
 
 // Turn a capability on: `GL_DEPTH_TEST`, `GL_BLEND`, `GL_CULL_FACE` or `GL_SCISSOR_TEST`.
 pub fn enable(self: const Window, cap: integer) {
@@ -1410,7 +1411,7 @@ pub fn point_size(self: const Window, size: float) {
 fn gg_texture(win: integer, width: integer, height: integer, depth: integer) -> integer;
 #c "gg_texture" "int64_t(int64_t, int64_t, int64_t, int64_t)"
 fn gg_texture_from(win: integer, px: const vector<integer>, width: integer, height: integer) -> integer;
-#c "gg_texture_from" "int64_t(int64_t, const int64_t*, int64_t, int64_t, int64_t)"
+#c "gg_texture_from" "int64_t(int64_t, const loft_int*, int64_t, int64_t, int64_t)"
 fn gg_texture_put(
   tex: integer,
   x: integer,
@@ -1419,7 +1420,7 @@ fn gg_texture_put(
   height: integer,
   px: const vector<integer>
 );
-#c "gg_texture_put" "void(int64_t, int64_t, int64_t, int64_t, int64_t, const int64_t*, int64_t)"
+#c "gg_texture_put" "void(int64_t, int64_t, int64_t, int64_t, int64_t, const loft_int*, int64_t)"
 fn gg_texture_filter(tex: integer, nearest: integer);
 #c "gg_texture_filter" "void(int64_t, int64_t)"
 fn gg_texture_mipmaps(tex: integer);
