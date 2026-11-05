@@ -1,6 +1,6 @@
 [package]
 name = "graphics"
-version = "0.11.1"
+version = "0.11.2"
 loft = ">=2026.10.0"
 # 0.10 is a declared break: the integer-handle API of 0.9 (`gl_*`, `audio_*`, `Painter2D`,
 # `SpriteSheet`, `group_vbos_*`, `gl_load_font`) is gone for objects the caller holds — `Window`,
@@ -23,3 +23,14 @@ shim = "c/graphics_gl.c"
 mesh3d = ">=0.1.1"
 glb = ">=0.1.1"
 imaging = ">=0.5.1"
+
+# What this package ships, compiles in or opens that it did not write (loft THIRDPARTY.md).
+[thirdparty.opengl]
+kind     = "system"
+names    = ["GL", "OpenGL"]
+provider = "the GPU driver's OpenGL (Mesa or the vendor driver on Linux, macOS's OpenGL framework), opened at run time"
+
+[thirdparty.windowing]
+kind     = "system"
+names    = ["X11", "Xtst", "AppKit", "objc", "CoreGraphics"]
+provider = "the OS windowing and input libraries (Xorg / XWayland and XTest on Linux, AppKit and CoreGraphics on macOS), opened at run time"
