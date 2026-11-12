@@ -1,13 +1,16 @@
 [package]
 name = "graphics"
-version = "0.11.2"
+version = "0.12.0"
 loft = ">=2026.10.0"
 # 0.10 is a declared break: the integer-handle API of 0.9 (`gl_*`, `audio_*`, `Painter2D`,
 # `SpriteSheet`, `group_vbos_*`, `gl_load_font`) is gone for objects the caller holds — `Window`,
 # `Shader`, `GpuMesh`, `Texture`, `Framebuffer`, `Painter`, `Sprites`, `GroupMeshes`, `Font` —
 # so a 0.9 consumer stays on 0.9 until it moves (@PLN208).
-api_compatible_with  = "0.10.0"  # oldest own release this is a drop-in for
-data_compatible_with = "0.4.2"   # oldest own release whose stored data this reads
+# 0.12 is a declared break: `Canvas.data` is a `vector<u32>` (4 bytes a pixel) and
+# `Glyph.coverage` a `vector<u8>`.  A caller that writes `data` masks the colour to 32 bits; a
+# stored canvas or glyph has the narrower layout.  It needs a loft whose `u32` holds all 32 bits.
+api_compatible_with  = "0.12.0"  # oldest own release this is a drop-in for
+data_compatible_with = "0.12.0"  # oldest own release whose stored data this reads
 repository = "loft-libs-graphics"
 
 [library]

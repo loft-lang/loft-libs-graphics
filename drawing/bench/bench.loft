@@ -52,6 +52,19 @@ fn fnv(h0: integer, v: const vector<integer>) -> integer {
   fv_h
 }
 
+/// The same hash over a pixel buffer.
+fn fnv32(h0: integer, v: const vector<u32>) -> integer {
+  fv_h = h0;
+  for x in v {
+    fv_w = x & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 24) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 16) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 8) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ (fv_w & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+  }
+  fv_h
+}
+
 /// A coordinate as a hashable integer: thousandths, truncated.
 fn milli(v: float) -> integer { (v * 1000.0) as integer }
 
@@ -111,7 +124,7 @@ fn bench_hair(n: integer) -> Row {
   }
   hb_us = ticks() - hb_t0;
   hb_one = brush::hair_brush(12, 48, 1, 0.35);
-  Row { name: "hair", iters: n, us: hb_us, px: 576, hash: fnv(FNV_OFFSET, hb_one), sink: hb_sink }
+  Row { name: "hair", iters: n, us: hb_us, px: 576, hash: fnv32(FNV_OFFSET, hb_one), sink: hb_sink }
 }
 
 // ── Smoothing ───────────────────────────────────────────────────────
@@ -189,7 +202,7 @@ fn bench_lock(n: integer) -> Row {
   bl_us = ticks() - bl_t0;
   bl_one = brush::lock_layer(bl_xs, bl_ys, 360, 180, bl_br, bl_st);
   Row { name: "lock", iters: n, us: bl_us, px: bl_one.lw * bl_one.lh,
-        hash: fnv(FNV_OFFSET, bl_one.px), sink: bl_sink }
+        hash: fnv32(FNV_OFFSET, bl_one.px), sink: bl_sink }
 }
 
 fn curved_path() -> vector<raster::Pt> {
@@ -215,7 +228,7 @@ fn bench_lock_curved(n: integer) -> Row {
   bc_us = ticks() - bc_t0;
   bc_one = brush::lock_layer(bc_xs, bc_ys, 360, 180, bc_br, bc_st);
   Row { name: "lock_curved", iters: n, us: bc_us, px: bc_one.lw * bc_one.lh,
-        hash: fnv(FNV_OFFSET, bc_one.px), sink: bc_sink }
+        hash: fnv32(FNV_OFFSET, bc_one.px), sink: bc_sink }
 }
 
 fn bench_composite(n: integer) -> Row {
@@ -235,7 +248,7 @@ fn bench_composite(n: integer) -> Row {
   cm_one = graphics::canvas(360, 180, graphics::rgba(128, 128, 128, 255));
   brush::composite_layer(cm_one, cm_lay);
   Row { name: "composite", iters: n, us: cm_us, px: cm_lay.lw * cm_lay.lh,
-        hash: fnv(FNV_OFFSET, cm_one.data), sink: cm_sink }
+        hash: fnv32(FNV_OFFSET, cm_one.data), sink: cm_sink }
 }
 
 // ── Pillow's rasteriser ─────────────────────────────────────────────
@@ -271,7 +284,7 @@ fn bench_fill(n: integer, name: text, pts: const vector<raster::Pt>) -> Row {
   }
   bp_us = ticks() - bp_t0;
   Row { name: name, iters: n, us: bp_us, px: count_ink(bp_cv, bp_ink),
-        hash: fnv(FNV_OFFSET, bp_cv.data), sink: bp_sink }
+        hash: fnv32(FNV_OFFSET, bp_cv.data), sink: bp_sink }
 }
 
 fn bench_wide_line(n: integer) -> Row {
@@ -285,7 +298,7 @@ fn bench_wide_line(n: integer) -> Row {
   }
   wl_us = ticks() - wl_t0;
   Row { name: "wide_line", iters: n, us: wl_us, px: count_ink(wl_cv, wl_ink),
-        hash: fnv(FNV_OFFSET, wl_cv.data), sink: wl_sink }
+        hash: fnv32(FNV_OFFSET, wl_cv.data), sink: wl_sink }
 }
 
 // ── End to end (loft only: parsing, rendering and the resample) ─────
@@ -345,7 +358,7 @@ fn bench_render(n: integer, name: text, src: text) -> Row {
   br_us = ticks() - br_t0;
   br_one = render(br_sk);
   Row { name: name, iters: n, us: br_us, px: br_one.width * br_one.height,
-        hash: fnv(FNV_OFFSET, br_one.data), sink: br_sink }
+        hash: fnv32(FNV_OFFSET, br_one.data), sink: br_sink }
 }
 
 fn bench_resize(n: integer) -> Row {
@@ -363,7 +376,7 @@ fn bench_resize(n: integer) -> Row {
   }
   rz_us = ticks() - rz_t0;
   rz_one = rz_cv.resize_lanczos(256, 256);
-  Row { name: "resize", iters: n, us: rz_us, px: 256 * 256, hash: fnv(FNV_OFFSET, rz_one.data),
+  Row { name: "resize", iters: n, us: rz_us, px: 256 * 256, hash: fnv32(FNV_OFFSET, rz_one.data),
         sink: rz_sink }
 }
 

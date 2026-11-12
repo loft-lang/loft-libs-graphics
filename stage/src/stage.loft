@@ -242,7 +242,7 @@ pub struct Sequence {
 pub struct Mask {
     m_w: integer,
     m_h: integer,
-    m_alpha: vector<integer>,
+    m_alpha: vector<u8>,
 }
 
 // Where to put a node, and how.  A struct rather than nine parameters because the
@@ -1092,8 +1092,9 @@ pub fn scissor_of(self: const Stage, view: integer, b: const Batch, coff: const 
 
 // ── A4: picking and input routing ────────────────────────────────────────────
 
-// Register an alpha mask and answer its index, for `Place.pl_mask`.
-pub fn add_mask(self: Stage, w: integer, h: integer, alpha: const vector<integer>) -> integer {
+// Register an alpha mask — `w` x `h` bytes, row-major, 0 where a click passes through —
+// and answer its index, for `Place.pl_mask`.
+pub fn add_mask(self: Stage, w: integer, h: integer, alpha: const vector<u8>) -> integer {
     self.st_masks += [Mask { m_w: w, m_h: h, m_alpha: alpha }];
     len(self.st_masks) - 1
 }
@@ -2808,9 +2809,9 @@ pub fn blur_region(cv: graphics::Canvas, x0: integer, y0: integer, x1: integer,
     w = x1 - x0;
     h = y1 - y0;
     if w <= 0 or h <= 0 { return; }
-    src: vector<integer> = [];
+    src: vector<u32> = [];
     for py in y0..y1 {
-        for px in x0..x1 { src += [cv.get_pixel(px, py)]; }
+        for px in x0..x1 { src += [cv.get_pixel(px, py) & 4294967295]; }
     }
     for py in 0..h {
         for px in 0..w {

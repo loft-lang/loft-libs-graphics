@@ -45,7 +45,7 @@ pub struct Brush {
   pub bw: integer = 0,
   pub bh: integer = 0,
   pub period: float = 0.0,
-  pub img: vector<integer>,
+  pub img: vector<u32>,
 }
 
 /// Everything a `Lock` line says past its points.  Widths and `period` are in
@@ -80,7 +80,7 @@ pub struct Layer {
   y0: integer = 0,
   pub lw: integer = 0,
   pub lh: integer = 0,
-  pub px: vector<integer>,
+  pub px: vector<u32>,
 }
 
 /// The style with its canvas-px lengths scaled by `k` — the supersample factor.
@@ -111,8 +111,8 @@ fn clampi(v: integer, lo: integer, hi: integer) -> integer {
 /// lays); the outermost columns are soft so the silhouette frays.  Greyscale
 /// value × alpha — the stroke's colour ramp multiplies in at resolve time.
 /// @FR-Brush-Image — the built-in footprint.
-pub fn hair_brush(bw: integer, bh: integer, seed: integer, gap: float) -> vector<integer> {
-  hb_img = [for _i in 0..bw * bh { 0 }];
+pub fn hair_brush(bw: integer, bh: integer, seed: integer, gap: float) -> vector<u32> {
+  hb_img: vector<u32> = [0 as u32; bw * bh];
   hb_x = 0;
   hb_ci = 0;
   while hb_x < bw {
@@ -133,7 +133,7 @@ pub fn hair_brush(bw: integer, bh: integer, seed: integer, gap: float) -> vector
         }
         hb_g = (255.0 * hb_v + 0.5) as integer;
         hb_ai = (255.0 * hb_a + 0.5) as integer;
-        hb_img[y * bw + hb_xx] = (hb_ai << 24) | (hb_g << 16) | (hb_g << 8) | hb_g;
+        hb_img[y * bw + hb_xx] = ((hb_ai << 24) | (hb_g << 16) | (hb_g << 8) | hb_g) & 4294967295;
       }
     }
     hb_x += hb_cw;
@@ -148,7 +148,7 @@ pub fn hair_brush(bw: integer, bh: integer, seed: integer, gap: float) -> vector
 pub fn load_brush(path: text, bname: text, period: float) -> Brush {
   lb_im = file(path).png();
   if lb_im == null { return Brush { bname: bname, bw: 0, bh: 0, period: 0.0, img: [] } }
-  lb_px = [for i in 0..len(lb_im.data) { imaging::rgba(lb_im.data[i]?) }];
+  lb_px: vector<u32> = [for i in 0..len(lb_im.data) { imaging::rgba(lb_im.data[i]?) & 4294967295 }];
   Brush { bname: bname, bw: lb_im.width, bh: lb_im.height,
           period: if period > 0.0 { period } else { lb_im.height as float }, img: lb_px }
 }
@@ -382,7 +382,7 @@ fn chan(c: integer, sh: integer) -> float { ((c >> sh) & 255) as float }
 
 /// Bilinear: clamp across (`fu`), wrap along (`fv`, already non-negative).
 /// @FR-Brush-Image — the sampling half.
-fn brush_sample(img: const vector<integer>, bw: integer, bh: integer, fu: float, fv: float) -> Smp {
+fn brush_sample(img: const vector<u32>, bw: integer, bh: integer, fu: float, fv: float) -> Smp {
   bs_iu = floor_i(fu);
   bs_tu = fu - (bs_iu as float);
   bs_iv = fv as integer;
@@ -473,7 +473,7 @@ pub fn lock_layer(xs: const vector<float>, ys: const vector<float>, cw: integer,
   ll_phase = (noise::seed_hash(st.seed, 0, 44) + 1.0) * 0.5 * ll_period;
   ll_bw = br.bw as float;
   ll_bh = br.bh as float;
-  ll_out = [for _i in 0..ll_n { 0 }];
+  ll_out: vector<u32> = [0 as u32; ll_n];
   for idx in 0..ll_n {
     if ll_lay.best[idx]? > 1.5 { continue }
     ll_s = ll_lay.sb[idx]?;
@@ -503,8 +503,8 @@ pub fn lock_layer(xs: const vector<float>, ys: const vector<float>, cw: integer,
     ll_r = ramp(graphics::color_r(ll_c0), graphics::color_r(ll_c1), ll_f, ll_smp.r);
     ll_g = ramp(graphics::color_g(ll_c0), graphics::color_g(ll_c1), ll_f, ll_smp.g);
     ll_b = ramp(graphics::color_b(ll_c0), graphics::color_b(ll_c1), ll_f, ll_smp.b);
-    ll_out[idx] = (((ll_ia + 0.5) as integer) << 24) | (clampi(ll_r, 0, 255) << 16)
-                  | (clampi(ll_g, 0, 255) << 8) | clampi(ll_b, 0, 255);
+    ll_out[idx] = ((((ll_ia + 0.5) as integer) << 24) | (clampi(ll_r, 0, 255) << 16)
+                  | (clampi(ll_g, 0, 255) << 8) | clampi(ll_b, 0, 255)) & 4294967295;
   }
   Layer { x0: ll_x0, y0: ll_y0, lw: ll_lw, lh: ll_lh, px: ll_out }
 }

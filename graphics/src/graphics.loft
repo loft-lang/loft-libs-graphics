@@ -73,12 +73,12 @@ pub fn color_a(color: integer) -> integer {
   ((color & 0xFF000000) >> 24) & 255
 }
 
-// A 2D pixel canvas backed by a flat vector of RGBA integers.
-// Pixels are stored row-major: data[y * width + x].
+// A 2D pixel canvas: one packed 0xAARRGGBB `u32` a pixel, 4 bytes, stored
+// row-major: data[y * width + x].  A colour handed to a canvas keeps its low 32 bits.
 pub struct Canvas {
   pub const width: integer,
   pub const height: integer,
-  pub const data: vector<integer>
+  pub const data: vector<u32>
 }
 
 // `count` copies of `value`: the repeat literal, which every backend builds as one
@@ -86,9 +86,9 @@ pub struct Canvas {
 // what the earlier doubling built, at sizes 0, 1, 9 216, 65 537 and 691 200, and no
 // slower anywhere: a 691 200-pixel frame 393 us interpreted against the doubling's 437,
 // and a 1920x1080 canvas -19 % in the C.
-fn filled(count: integer, value: integer) -> vector<integer> {
+fn filled(count: integer, value: integer) -> vector<u32> {
   if count <= 0 { return []; }
-  [value; count]
+  [value & 4294967295; count]
 }
 
 // Create a canvas filled with a solid color.
@@ -124,7 +124,7 @@ pub fn set_pixel(self: Canvas, sx: integer, sy: integer, color: integer) {
     sp_idx = sy * self.width + sx;
     sp_d = &self.data;
     if sp_idx < len(sp_d) {
-      sp_d[sp_idx] = color;
+      sp_d[sp_idx] = color & 4294967295;
     }
   }
 }
@@ -132,8 +132,9 @@ pub fn set_pixel(self: Canvas, sx: integer, sy: integer, color: integer) {
 // Fill the entire canvas with a solid color.
 pub fn clear(self: Canvas, color: integer) {
   cl_n = self.data.len();
+  cl_c: u32 = color & 4294967295;
   for cl_i in 0..cl_n {
-    self.data[cl_i] = color;
+    self.data[cl_i] = cl_c;
   }
 }
 
@@ -159,7 +160,7 @@ pub fn blend_pixel(self: Canvas, bx: integer, by: integer, color: integer) {
     bp_idx = by * self.width + bx;
     bp_d = &self.data;
     if bp_idx < len(bp_d) {
-      bp_d[bp_idx] = blend(bp_d[bp_idx] ?? 0, color);
+      bp_d[bp_idx] = blend(bp_d[bp_idx] ?? 0, color) & 4294967295;
     }
   }
 }
@@ -175,11 +176,12 @@ pub fn fill_rect(self: Canvas, rx: integer, ry: integer, rw: integer, rh: intege
   y1 = if ry + rh > self.height { self.height } else { ry + rh };
   fr_d = &self.data;
   fr_n = len(fr_d);
+  fr_c: u32 = color & 4294967295;
   for fr_y in y0..y1 {
     for fr_x in x0..x1 {
       fr_idx = fr_y * self.width + fr_x;
       if fr_idx < fr_n {
-        fr_d[fr_idx] = color;
+        fr_d[fr_idx] = fr_c;
       }
     }
   }
@@ -195,10 +197,11 @@ pub fn hline(self: Canvas, hx0: integer, hx1: integer, hy: integer, color: integ
   right = if hx1 > self.width { self.width } else { hx1 };
   hl_d = &self.data;
   hl_n = len(hl_d);
+  hl_c: u32 = color & 4294967295;
   for hl_x in left..right {
     hl_idx = hy * self.width + hl_x;
     if hl_idx < hl_n {
-      hl_d[hl_idx] = color;
+      hl_d[hl_idx] = hl_c;
     }
   }
 }
@@ -212,10 +215,11 @@ pub fn vline(self: Canvas, vx: integer, vy0: integer, vy1: integer, color: integ
   bottom = if vy1 > self.height { self.height } else { vy1 };
   vl_d = &self.data;
   vl_n = len(vl_d);
+  vl_c: u32 = color & 4294967295;
   for vl_y in top..bottom {
     vl_idx = vl_y * self.width + vx;
     if vl_idx < vl_n {
-      vl_d[vl_idx] = color;
+      vl_d[vl_idx] = vl_c;
     }
   }
 }
@@ -845,7 +849,7 @@ fn resample(self: const Canvas, ow: integer, oh: integer, support0: float,
           rl_rgb += [if rl_u > 255 { 255 } else { rl_u }];
         }
       }
-      rl_od[yy * ow + xx] = (rl_a << 24) | (rl_rgb[0]? << 16) | (rl_rgb[1]? << 8) | rl_rgb[2]?;
+      rl_od[yy * ow + xx] = ((rl_a << 24) | (rl_rgb[0]? << 16) | (rl_rgb[1]? << 8) | rl_rgb[2]?) & 4294967295;
     }
     rl_vbase += rl_n;
   }
@@ -1004,8 +1008,8 @@ fn gg_event_count(h: integer) -> integer;
 #c "gg_event_count" "int64_t(int64_t)"
 fn gg_events(h: integer, out: vector<integer>);
 #c "gg_events" "void(int64_t, int64_t*, int64_t)"
-fn gg_read_pixels(h: integer, out: vector<integer>);
-#c "gg_read_pixels" "void(int64_t, int64_t*, int64_t)"
+fn gg_read_pixels(h: integer, out: vector<u32>);
+#c "gg_read_pixels" "void(int64_t, uint32_t*, int64_t)"
 fn gg_text_size(h: integer) -> integer;
 #c "gg_text_size" "int64_t(int64_t)"
 fn gg_text_copy(h: integer, out: vector<u8>);
@@ -1409,17 +1413,17 @@ pub fn point_size(self: const Window, size: float) {
 
 fn gg_texture(win: integer, width: integer, height: integer, depth: integer) -> integer;
 #c "gg_texture" "int64_t(int64_t, int64_t, int64_t, int64_t)"
-fn gg_texture_from(win: integer, px: const vector<integer>, width: integer, height: integer) -> integer;
-#c "gg_texture_from" "int64_t(int64_t, const int64_t*, int64_t, int64_t, int64_t)"
+fn gg_texture_from(win: integer, px: const vector<u32>, width: integer, height: integer) -> integer;
+#c "gg_texture_from" "int64_t(int64_t, const uint32_t*, int64_t, int64_t, int64_t)"
 fn gg_texture_put(
   tex: integer,
   x: integer,
   y: integer,
   width: integer,
   height: integer,
-  px: const vector<integer>
+  px: const vector<u32>
 );
-#c "gg_texture_put" "void(int64_t, int64_t, int64_t, int64_t, int64_t, const int64_t*, int64_t)"
+#c "gg_texture_put" "void(int64_t, int64_t, int64_t, int64_t, int64_t, const uint32_t*, int64_t)"
 fn gg_texture_filter(tex: integer, nearest: integer);
 #c "gg_texture_filter" "void(int64_t, int64_t)"
 fn gg_texture_mipmaps(tex: integer);
@@ -1535,8 +1539,8 @@ pub fn load_texture(self: const Window, path: text) -> Texture? {
     if dir != "" { full = "{dir}/{path}"; }
   }
   img = imaging::png(file(full)) ?? return null;
-  px: vector<integer> = [];
-  for p in img.data { px += [rgba(p.r, p.g, p.b, p.a)]; }
+  px: vector<u32> = [];
+  for p in img.data { px += [rgba(p.r, p.g, p.b, p.a) & 4294967295]; }
   self.texture_from(Canvas { width: img.width, height: img.height, data: px })
 }
 
@@ -2112,7 +2116,7 @@ pub struct Glyph {
   pub width: integer,
   pub height: integer,
   pub advance: single,
-  pub coverage: vector<integer>,
+  pub coverage: vector<u8>,
 }
 
 fn ol_line(x0: single, y0: single, x1: single, y1: single) -> OlLine {
@@ -2644,7 +2648,7 @@ fn raster_glyph(self: const Font, g: integer, size: float) -> Glyph {
     for k in 0..4 {
       if i + k < n {
         c = (lanes[k] * 255.9f).abs();
-        gl.coverage += [if c >= 255.0f { 255 } else { c as integer }];
+        gl.coverage += [if c >= 255.0f { 255 } else { (c as integer) & 255 }];
       }
     }
     carry = lanes[3];
@@ -2690,7 +2694,7 @@ pub fn rasterize_text(self: const Font, content: text, size: float) -> Glyph {
     line_h = (size as single * 1.2f).ceil() as integer;
     baseline = (size as single * 0.8f).round() as integer;
   }
-  px: vector<integer> = filled(total * line_h, 0);
+  px: vector<u8> = [0 as u8; total * line_h];
   x_pen = 0.0f;
   for k in 0..len(glyphs) {
     gl = glyphs[k];
