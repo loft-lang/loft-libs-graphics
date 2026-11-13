@@ -118,8 +118,9 @@ fn pil_hline(cv: graphics::Canvas, hx0: integer, hy: integer, hx1: integer, ink:
   if hl_lo > hl_hi { return }
   hl_d = &cv.data;
   hl_base = hy * cv.width;
+  hl_ink: u32 = ink & 4294967295;
   for hl_x in hl_lo..=hl_hi {
-    hl_d[hl_base + hl_x] = ink;
+    hl_d[hl_base + hl_x] = hl_ink;
   }
 }
 

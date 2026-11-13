@@ -41,7 +41,7 @@ int64_t gg_text_size(int64_t h);
 void gg_text_copy(int64_t h, uint8_t *out, int64_t n);
 int64_t gg_key_down(int64_t h, int64_t key);
 int64_t gg_mouse(int64_t h, int64_t which);
-void gg_read_pixels(int64_t h, int64_t *out, int64_t n);
+void gg_read_pixels(int64_t h, uint32_t *out, int64_t n);
 int64_t gg_shader(int64_t win, const char *vertex, const char *fragment);
 void gg_uniform_f(int64_t sh, const char *name, const double *v, int64_t n);
 void gg_uniform_i(int64_t sh, const char *name, int64_t v);
@@ -60,9 +60,9 @@ void gg_finish(int64_t win);
 void gg_line_width(int64_t win, const double *width, int64_t n);
 void gg_point_size(int64_t win, const double *size, int64_t n);
 int64_t gg_texture(int64_t win, int64_t width, int64_t height, int64_t depth);
-int64_t gg_texture_from(int64_t win, const int64_t *px, int64_t n, int64_t width, int64_t height);
+int64_t gg_texture_from(int64_t win, const uint32_t *px, int64_t n, int64_t width, int64_t height);
 void gg_texture_put(int64_t tex, int64_t x, int64_t y, int64_t width, int64_t height,
-                    const int64_t *px, int64_t n);
+                    const uint32_t *px, int64_t n);
 void gg_texture_filter(int64_t tex, int64_t nearest);
 void gg_texture_mipmaps(int64_t tex);
 void gg_texture_bind(int64_t tex, int64_t unit);
@@ -1862,7 +1862,7 @@ int64_t gg_mouse(int64_t h, int64_t which) {
 
 /* The back buffer as 0xAARRGGBB pixels, top row first: read before `swap`, after the frame's
  * draws.  `n` is width * height. */
-void gg_read_pixels(int64_t h, int64_t *out, int64_t n) {
+void gg_read_pixels(int64_t h, uint32_t *out, int64_t n) {
     gg_window *w = gg_of(h);
     unsigned char *rgba;
     int64_t x, y;
@@ -1879,8 +1879,8 @@ void gg_read_pixels(int64_t h, int64_t *out, int64_t n) {
         const unsigned char *row = rgba + (size_t) (w->height - 1 - y) * w->width * 4u;
         for (x = 0; x < w->width; x++) {
             const unsigned char *p = row + x * 4;
-            out[y * w->width + x] = (int64_t) (((uint32_t) p[3] << 24) | ((uint32_t) p[0] << 16) |
-                                               ((uint32_t) p[1] << 8) | p[2]);
+            out[y * w->width + x] = ((uint32_t) p[3] << 24) | ((uint32_t) p[0] << 16) |
+                                    ((uint32_t) p[1] << 8) | p[2];
         }
     }
     free(rgba);
@@ -2299,12 +2299,12 @@ int64_t gg_texture(int64_t win, int64_t width, int64_t height, int64_t depth) {
 }
 
 /* 0xAARRGGBB pixels as RGBA bytes, row 0 first (it lands at the texture's bottom row). */
-static unsigned char *gg_rgba(const int64_t *px, int64_t n) {
+static unsigned char *gg_rgba(const uint32_t *px, int64_t n) {
     unsigned char *out = (unsigned char *) malloc((size_t) n * 4u);
     int64_t i;
     if (!out) return NULL;
     for (i = 0; i < n; i++) {
-        uint32_t p = (uint32_t) px[i];
+        uint32_t p = px[i];
         out[4 * i] = (unsigned char) (p >> 16);
         out[4 * i + 1] = (unsigned char) (p >> 8);
         out[4 * i + 2] = (unsigned char) p;
@@ -2314,7 +2314,7 @@ static unsigned char *gg_rgba(const int64_t *px, int64_t n) {
 }
 
 /* A colour texture holding a canvas's pixels: linear, clamped. */
-int64_t gg_texture_from(int64_t win, const int64_t *px, int64_t n, int64_t width, int64_t height) {
+int64_t gg_texture_from(int64_t win, const uint32_t *px, int64_t n, int64_t width, int64_t height) {
     gg_window *w = gg_of(win);
     unsigned char *rgba;
     gg_res *r;
@@ -2346,7 +2346,7 @@ int64_t gg_texture_from(int64_t win, const int64_t *px, int64_t n, int64_t width
 
 /* Replace a `width` x `height` region at (x, y) of a colour texture. */
 void gg_texture_put(int64_t tex, int64_t x, int64_t y, int64_t width, int64_t height,
-                    const int64_t *px, int64_t n) {
+                    const uint32_t *px, int64_t n) {
     gg_res *r = gg_texture_of(tex, "Texture.put");
     unsigned char *rgba;
     if (!r || r->depth || width <= 0 || height <= 0 || n < width * height) return;
@@ -2509,7 +2509,7 @@ void gg_events(int64_t h, int64_t *out, int64_t n) {
     (void) out;
     (void) n;
 }
-void gg_read_pixels(int64_t h, int64_t *out, int64_t n) {
+void gg_read_pixels(int64_t h, uint32_t *out, int64_t n) {
     (void) h;
     (void) out;
     (void) n;
@@ -2607,7 +2607,7 @@ int64_t gg_texture(int64_t win, int64_t width, int64_t height, int64_t depth) {
     (void) depth;
     return 0;
 }
-int64_t gg_texture_from(int64_t win, const int64_t *px, int64_t n, int64_t width, int64_t height) {
+int64_t gg_texture_from(int64_t win, const uint32_t *px, int64_t n, int64_t width, int64_t height) {
     (void) win;
     (void) px;
     (void) n;
@@ -2616,7 +2616,7 @@ int64_t gg_texture_from(int64_t win, const int64_t *px, int64_t n, int64_t width
     return 0;
 }
 void gg_texture_put(int64_t tex, int64_t x, int64_t y, int64_t width, int64_t height,
-                    const int64_t *px, int64_t n) {
+                    const uint32_t *px, int64_t n) {
     (void) tex;
     (void) x;
     (void) y;

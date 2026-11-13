@@ -19,7 +19,7 @@ fn from_rgba(fr: const vector<integer>, fw: integer, fh: integer) -> graphics::C
   c = graphics::canvas(fw, fh, 0);
   d = &c.data;
   for i in 0..(fw * fh) {
-    d[i] = (fr[i * 4 + 3]? << 24) | (fr[i * 4]? << 16) | (fr[i * 4 + 1]? << 8) | fr[i * 4 + 2]?;
+    d[i] = ((fr[i * 4 + 3]? << 24) | (fr[i * 4]? << 16) | (fr[i * 4 + 1]? << 8) | fr[i * 4 + 2]?) & 4294967295;
   }
   c
 }

@@ -63,7 +63,8 @@ A guide: [docs/01-getting-started.loft](docs/01-getting-started.loft).
 
 A colour is one `integer` packed **0xAARRGGBB** — build it with `rgba` / `rgb` rather than a
 hex literal, which leaves the alpha byte at 0 (fully transparent).  `Canvas.data` is a flat,
-row-major `vector<integer>`: the pixel at (x, y) is `data[y * width + x]`.  Every solid
+row-major `vector<u32>`, 4 bytes a pixel: the pixel at (x, y) is `data[y * width + x]`.  A
+colour handed to a canvas keeps its low 32 bits.  Every solid
 primitive **stores** its colour; only `blend_pixel` composites.  Span ends are **exclusive**,
 and a reversed span draws nothing.
 
@@ -96,6 +97,21 @@ screen's pixel density.
 **The suite** opens a window wherever one is expected and fails when none opens: `DISPLAY` says
 so on X11 (`xvfb-run -a -s '-noreset -screen 0 800x600x24'`), and on a Mac, where nothing in the
 environment says whether a window server is reachable, `GRAPHICS_TEST_WINDOW=1` does.
+
+## Moving from 0.11
+
+0.12 is a declared break (`api_compatible_with = "0.12.0"`) and needs a loft whose `u32` holds
+all 32 bits.  `Canvas.data` is a `vector<u32>` and `Glyph.coverage` a `vector<u8>`, so a
+canvas takes half the memory and a glyph an eighth.  Reading a pixel is unchanged: it widens to
+`integer`.  A program that WRITES `data` directly, or passes it where a `vector<integer>` is
+expected, changes:
+
+```loft
+d = &cv.data;
+d[i] = rgba(r, g, b, a) & 4294967295;   // was: d[i] = rgba(r, g, b, a);
+```
+
+The mask says the colour fits in 32 bits; `set_pixel` and every drawing call do it for you.
 
 ## Moving from 0.9
 

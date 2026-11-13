@@ -43,7 +43,7 @@ const CURVES = 2000;
 const SHAPES = 20;
 
 /// FNV-1a-32 over the low 32 bits of each integer, high byte first — a pixel's a, r, g, b.
-fn fnv(h0: integer, v: const vector<integer>) -> integer {
+fn fnv(h0: integer, v: const vector<u32>) -> integer {
   fv_h = h0;
   for x in v {
     fv_w = x & 0xFFFFFFFF;
