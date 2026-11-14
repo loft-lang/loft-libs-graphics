@@ -986,10 +986,10 @@ pub enum Event {
 //   }                              // the window closes here, when `w` dies
 //
 // A window answers null where none can open: no display, no GL 3.3, or a host without a window
-// yet (only Linux has one).  It is used from the thread that opened it; a call from another is
+// yet (Linux, macOS and a browser page have one).  It is used from the thread that opened it; a call from another is
 // refused with a message.  It cannot be copied — move it, or pass it as an argument.
 
-// The C part (c/graphics_gl.c): X11 and GLX, opened at run time.  A window is a handle, 0 for none.
+// The C part (c/graphics_gl.c): X11 and GLX on Linux, AppKit on macOS, WebGL2 in a page, opened at run time.  A window is a handle, 0 for none.
 fn gg_open(width: integer, height: integer, title: text, fullscreen: integer) -> integer;
 #c "gg_open" "int64_t(int64_t, int64_t, const char*, int64_t)"
 fn gg_poll(h: integer) -> integer;

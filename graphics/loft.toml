@@ -12,13 +12,14 @@ loft = ">=2026.11.20261113"
 api_compatible_with  = "0.12.0"  # oldest own release this is a drop-in for
 data_compatible_with = "0.12.0"  # oldest own release whose stored data this reads
 repository = "loft-libs-graphics"
+description = "A 2D canvas, windows, OpenGL and text for loft (meshes and glTF are mesh3d and glb)"
 
 [library]
 entry = "src/graphics.loft"
 
 # The native part is C the package ships and loft builds itself with `cc` (c/graphics_gl.c,
 # bound by the `#c` declarations in src/graphics.loft): the window and its GL context through
-# libX11 and libGL opened at run time on Linux, the page's WebGL2 in a browser.  No Rust crate.
+# libX11 and libGL opened at run time on Linux, AppKit on macOS, the page's WebGL2 in a browser.  No Rust crate.
 [c]
 shim = "c/graphics_gl.c"
 
