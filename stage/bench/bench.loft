@@ -58,6 +58,20 @@ fn fnv(h0: integer, v: const vector<integer>) -> integer {
   fv_h
 }
 
+// `fnv` over a canvas's pixels, which are `u32` since graphics 0.12: the same bytes hashed,
+// so the hash is the Rust twin's.
+fn fnv32(h0: integer, v: const vector<u32>) -> integer {
+  fv_h = h0;
+  for x in v {
+    fv_w = x & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 24) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 16) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 8) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ (fv_w & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+  }
+  fv_h
+}
+
 /// A float as a hashable integer: millionths, truncated.
 fn micro(v: float) -> integer { (v * 1000000.0) as integer }
 
@@ -148,7 +162,7 @@ fn bench_render(n: integer) -> Row {
   br_one = graphics::canvas(RENDER_W, RENDER_H, graphics::rgba(20, 30, 40, 255));
   br_st.render_stage(br_one);
   Row { name: "render_stage", iters: n, us: br_us, px: RENDER_NODES * 64 * 64,
-        hash: fnv(FNV_OFFSET, br_one.data), sink: br_sink }
+        hash: fnv32(FNV_OFFSET, br_one.data), sink: br_sink }
 }
 
 // ── The forward pass ────────────────────────────────────────────────
@@ -263,7 +277,7 @@ fn bench_light(n: integer) -> Row {
   bl_one = pattern_canvas(LIGHT_W, LIGHT_H);
   bl_st.composite_light(0, bl_one);
   Row { name: "composite_light", iters: n, us: bl_us, px: LIGHT_W * LIGHT_H,
-        hash: fnv(FNV_OFFSET, bl_one.data), sink: bl_sink }
+        hash: fnv32(FNV_OFFSET, bl_one.data), sink: bl_sink }
 }
 
 // ── The layer blur ──────────────────────────────────────────────────
@@ -280,7 +294,7 @@ fn bench_blur(n: integer) -> Row {
   bb_one = pattern_canvas(BLUR_W, BLUR_H);
   blur_region(bb_one, 0, 0, BLUR_W, BLUR_H, BLUR_R);
   Row { name: "blur_region", iters: n, us: bb_us, px: BLUR_W * BLUR_H,
-        hash: fnv(FNV_OFFSET, bb_one.data), sink: bb_sink }
+        hash: fnv32(FNV_OFFSET, bb_one.data), sink: bb_sink }
 }
 
 fn main() {

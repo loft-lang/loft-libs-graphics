@@ -47,6 +47,20 @@ fn fnv(h0: integer, v: const vector<integer>) -> integer {
   fv_h
 }
 
+// `fnv` over a canvas's pixels, which are `u32` since graphics 0.12: the same bytes hashed,
+// so the hash is the Rust twin's.
+fn fnv32(h0: integer, v: const vector<u32>) -> integer {
+  fv_h = h0;
+  for x in v {
+    fv_w = x & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 24) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 16) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ ((fv_w >> 8) & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+    fv_h = ((fv_h ^ (fv_w & 255)) * FNV_PRIME) & 0xFFFFFFFF;
+  }
+  fv_h
+}
+
 fn print_row(r: const Row) {
   pr_ns = ((r.us * 1000) / r.iters) ?? 0;
   pr_px = if r.px > 0 { (((r.us * 1000) as float) / ((r.iters * r.px) as float)) ?? 0.0 }
@@ -122,7 +136,7 @@ fn bench_write_text(n: integer) -> Row {
   for s in bw_lines {
     for c in s { bw_calls += lit_bits(c as integer) * WT_SCALE * WT_SCALE; }
   }
-  Row { name: "write_text", iters: n, us: bw_us, px: bw_calls, hash: fnv(FNV_OFFSET, bw_one.data),
+  Row { name: "write_text", iters: n, us: bw_us, px: bw_calls, hash: fnv32(FNV_OFFSET, bw_one.data),
         sink: bw_sink + bw_cv.get_pixel(3, 3) }
 }
 
@@ -254,7 +268,7 @@ fn bench_draw_quads(n: integer) -> Row {
   bd_one = graphics::canvas(WT_W, WT_H, 0);
   text2d::draw_quads(bd_one, bd_at, bd_quads, 0xFF405060);
   bd_texels = len(bd_quads) * 5 * DQ_SCALE * 7 * DQ_SCALE;
-  Row { name: "draw_quads", iters: n, us: bd_us, px: bd_texels, hash: fnv(FNV_OFFSET, bd_one.data),
+  Row { name: "draw_quads", iters: n, us: bd_us, px: bd_texels, hash: fnv32(FNV_OFFSET, bd_one.data),
         sink: bd_sink }
 }
 
