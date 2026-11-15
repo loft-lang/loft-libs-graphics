@@ -49,11 +49,12 @@ fn test_a_scene_is_two_pipelines_an_atlas_and_a_light_map() {
   dev = open();
   scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, 0xFF94BFE6)!;
   // The land pipeline: a place, a point on the picture, the picture's slot, the light's cell
-  // and factor, an own light; one matrix; the atlas and the light map.  It tests and writes
+  // and factor, an own light; one matrix and two arrays of 64 for the torches; the atlas, the
+  // light map, the torches' cells and their reaches.  It tests and writes
   // depth (2).  The overlay's: a place and a point on the picture, one texture, no depth.
   made = lines([
     "open 1 800x480 \"scene\"",
-    "pipeline 2 vertex 3 2 2 4 1 instance block 16x1@0 size 16 textures 2",
+    "pipeline 2 vertex 3 2 2 4 1 instance block 16x1@0 4x64@16 4x64@272 size 528 textures 4",
     "  state shape 0 depth 2 blend 0 cull 0 into 0",
     "pipeline 3 vertex 2 2 instance block size 0 textures 1",
     "  state shape 0 depth 0 blend 0 cull 0 into 0",
@@ -82,20 +83,23 @@ fn test_a_frame_draws_each_tile_that_holds_faces_then_the_actors() {
   scene.fixed_camera(0, 0);
   before = gpu_record::log();
   scene.draw(dev);
-  // The matrix's first float is 2 * 48 / 800 = 0.12 and its last is 1.  Handles: the device,
-  // two pipelines, the atlas and the light map, the cards (6), the overlay's quad (7) and
-  // picture (8), then the tiles' buffers 9, 10 and 11.
+  // The block is the matrix (its first float 2 * 48 / 800 = 0.12) and the torches' two arrays,
+  // dark: its last float is 0.  Handles: the device, two pipelines, the atlas (4), the light
+  // map (5), the torches' cells (6) and reaches (7), the cards (8), the overlay's quad (9) and
+  // picture (10), then the tiles' buffers 11, 12 and 13.
   drawn = lines([
     "begin 0 clear ff94bfe6",
     "  bind 2",
-    "  uniforms floats 16 first 0.120 last 1.000",
+    "  uniforms floats 528 first 0.120 last 0.000",
     "  sample 0 texture 4",
     "  sample 1 texture 5",
-    "  vertices 9",
-    "  draw from 0 count 12 copies 0",
+    "  sample 2 texture 6",
+    "  sample 3 texture 7",
     "  vertices 11",
+    "  draw from 0 count 12 copies 0",
+    "  vertices 13",
     "  draw from 0 count 6 copies 0",
-    "  vertices 6",
+    "  vertices 8",
     "  draw from 0 count 6 copies 0",
     "end",
   ]);
@@ -152,4 +156,56 @@ fn test_a_box_of_light_is_one_write_and_a_few_where_it_crosses_the_maps_edge() {
     "texture_put 5 at 255,0 1x1 first ff000000",
   ]);
   assert(got == want, "the light's writes:\n{got}");
+}
+
+fn test_a_torch_is_its_reach_once_and_nine_numbers_a_frame() {
+  dev = open();
+  scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, 0xFF94BFE6)!;
+  assert(scene.offers_torches(), "an implementation on a GPU lights torches of their own");
+  before = gpu_record::log();
+  // Torch 7 on layer 0: a reach of 3 x 2 cells from cell (4, 9), full at its first cell.  It
+  // takes the first square of the reach atlas (16 x 16 texels at 0, 0; the reach is 65535:
+  // red ff, green ff), and the cells of its box name it: square 0 plus one, in red — the
+  // strongest there; green, blue and alpha hold the second to the fourth.
+  assert(scene.set_torch_reach(s([7.0, 0.0, 4.0, 9.0, 3.0, 2.0, 1.0, 0.5, 0.25, 0.5, 0.5, 0.25])), "the reach is kept");
+  // Torch 8 on the same cells, weaker at the first: it is the second there, in green (square 1
+  // plus one), and its square is the atlas's second, at x 16.  0.5 is 32768: red 80, green 00.
+  assert(scene.set_torch_reach(s([8.0, 0.0, 4.0, 9.0, 1.0, 1.0, 0.5])), "a second reach");
+  assert(scene.torches() == 2, "two torches, got {scene.torches()}");
+  got = gpu_record::log()[len(before)..];
+  want = lines([
+    "texture_put 7 at 0,0 16x16 first ffffff00",
+    "texture_put 6 at 4,9 3x2 first 00010000",
+    "texture_put 7 at 16,0 16x16 first ff800000",
+    "texture_put 6 at 4,9 1x1 first 00010200",
+  ]);
+  assert(got == want, "two reaches given:\n{got}");
+  // A box too large, or with too few numbers, is refused and nothing is written.
+  assert(!scene.set_torch_reach(s([9.0, 0.0, 0.0, 0.0, 16.0, 1.0, 1.0])), "16 cells across is too many");
+  assert(!scene.set_torch_reach(s([9.0, 0.0, 0.0, 0.0, 2.0, 2.0, 1.0])), "four cells need four numbers");
+  // A frame: the torches' numbers go into the block and nothing is written to a texture.  The
+  // block's last float is the last torch's colour's fourth, 0.
+  scene.set_torches(s([7.0, 4.0, 9.0, 0.0, 1.0, 0.9, 1.0, 0.8, 0.5]));
+  mid = gpu_record::log();
+  scene.fixed_camera(0, 0);
+  scene.draw(dev);
+  frame = gpu_record::log()[len(mid)..];
+  assert(!frame.contains("texture_put"), "a flicker writes no texture:\n{frame}");
+  assert(frame.contains("  uniforms floats 528 first 0.120 last 0.000\n"), "the torches ride in the block:\n{frame}");
+  // Moved a cell east, torch 7's old box is ranked again as well as its new one: at cell
+  // (4, 9) only torch 8 is left (square 1 plus one, first), and the new box starts at (5, 9).
+  mid = gpu_record::log();
+  assert(scene.set_torch_reach(s([7.0, 0.0, 5.0, 9.0, 3.0, 2.0, 1.0, 0.5, 0.25, 0.5, 0.5, 0.25])), "moved");
+  got = gpu_record::log()[len(mid)..];
+  assert(got == lines([
+    "texture_put 7 at 0,0 16x16 first ffffff00",
+    "texture_put 6 at 4,9 3x2 first 00020000",
+    "texture_put 6 at 5,9 3x2 first 00010000",
+  ]), "torch 7 moved:\n{got}");
+  // Dropped, the cells it reached are ranked again: none is left at cell (5, 9).
+  mid = gpu_record::log();
+  scene.drop_torch(7);
+  got = gpu_record::log()[len(mid)..];
+  assert(got == lines(["texture_put 6 at 5,9 3x2 first 00000000"]), "torch 7 dropped:\n{got}");
+  assert(scene.torches() == 1, "one torch left");
 }
