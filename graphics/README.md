@@ -82,6 +82,7 @@ No Rust crate: the native part is `c/graphics_gl.c`, a `[c] shim` loft compiles 
 | `--interpret`, `--native`, `--native-c` on Linux | X11 + GLX, `libX11.so.6` and `libGL.so.1` opened at run time (no development package) | the suite under Xvfb (`-noreset`); `desktop/input.sh` injects input through XTest |
 | `--html` (Rust and C pages) | the page's canvas and WebGL2, through loft's `loft_gl` page imports — a loft whose pages carry them (main after loft `d26929886`); an older loft refuses the page at build | `browser/check.sh` in headless Chrome |
 | `--interpret`, `--native`, `--native-c` on macOS | AppKit and an `NSOpenGLContext` (3.2 core, served as GL 4.1), through the Objective-C runtime opened at run time (no SDK) | the suite on a macOS runner with `GRAPHICS_TEST_WINDOW=1`; `desktop/input_mac.sh` posts the same input sequence into the app's own queue |
+| `--native-c --native-android` | the activity's window, through EGL and OpenGL ES 3 (`libEGL.so`, `libGLESv3.so` opened at run time); the shaders take the page's `#version 300 es` rewrite | by hand on an x86_64 emulator (API 34); no CI job runs it yet |
 | `--native-wasm` | none: `open_window` answers null | the suite's canvas, font and PNG half |
 | Windows | not yet: `open_window` answers null | — |
 
@@ -93,6 +94,13 @@ window work is sent to the main thread, which loft's native `main` keeps in its 
 from 2026-10-31 on — an older one is told so, and `open_window` answers null).  The drawable is
 in points, as the window's size is: on a Retina screen the frame is scaled up, not drawn at the
 screen's pixel density.
+
+**On Android** the window is the screen, whatever size `open_window` asks for: read it with
+`width()` and `height()`.  Each finger is a `TouchBegin` / `TouchMove` / `TouchEnd` with its
+pointer id, and the first is also mouse button 1, so a program written for the mouse works on a
+touch screen.  While the app is in the background the window has nothing to draw on, and `poll`
+waits until it is back, where a rotation arrives as a `Resize`; Back ends the app, and `poll`
+then answers false.  It needs a loft whose C backend builds Android apps.
 
 **The suite** opens a window wherever one is expected and fails when none opens: `DISPLAY` says
 so on X11 (`xvfb-run -a -s '-noreset -screen 0 800x600x24'`), and on a Mac, where nothing in the
