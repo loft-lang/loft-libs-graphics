@@ -1078,6 +1078,12 @@ pub fn events(self: const Window) -> vector<Event> {
       out += [MouseMove { x: a as float, y: b as float }];
     } else if tag == EV_WHEEL {
       out += [Wheel { delta: a, x: b as float, y: c as float }];
+    } else if tag == EV_TOUCH_BEGIN {
+      out += [TouchBegin { id: a, x: b as float, y: c as float }];
+    } else if tag == EV_TOUCH_MOVE {
+      out += [TouchMove { id: a, x: b as float, y: c as float }];
+    } else if tag == EV_TOUCH_END {
+      out += [TouchEnd { id: a, x: b as float, y: c as float }];
     } else if tag == EV_RESIZE {
       out += [Resize { width: a, height: b }];
     }

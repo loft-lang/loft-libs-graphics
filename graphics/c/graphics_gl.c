@@ -21,6 +21,15 @@
  * time, each message sent through `objc_msgSend` cast to the method's own type — so it too builds
  * with loft's fixed flags and no SDK.  A Cocoa window lives on the main thread.
  *
+ * Android (`loft --native-c --native-android`): the activity's window, through EGL and GLES 3.0
+ * (`libEGL.so`, `libGLESv3.so`, opened at run time), reached through the activity loft's Android
+ * entry hands over (`loft_android_app()`).  GLES 3.0 is WebGL2, so the shaders take the browser's
+ * rewrite of their `#version 330 core` line.  The window is the screen; the program runs on the
+ * thread that owns the activity's looper, and `Window.poll` drains it: each pointer is a Touch
+ * event with its id, and the first is also the left mouse button; a key is its 0.9 code; the
+ * window's surface follows the activity (gone while it is in the background, made again when it
+ * returns).
+ *
  * Other hosts (Windows, a WASI module) open no window yet: `gg_open` answers 0, which the loft
  * side reports as a null `Window`. */
 #include <stdint.h>
@@ -88,13 +97,18 @@ void gg_instance_attrib(int64_t mesh, int64_t buf, int64_t location, int64_t com
 #define GG_EV_MOUSE_UP 5
 #define GG_EV_MOUSE_MOVE 6
 #define GG_EV_WHEEL 7
+#define GG_EV_TOUCH_BEGIN 8
+#define GG_EV_TOUCH_MOVE 9
+#define GG_EV_TOUCH_END 10
 #define GG_EV_RESIZE 11
 #define GG_MOD_SHIFT 1
 #define GG_MOD_CTRL 2
 #define GG_MOD_ALT 4
 #define GG_MOD_SUPER 8
 
-#if defined(__linux__) && !defined(__wasm__)
+#if defined(__ANDROID__)
+#define GG_ANDROID 1 /* the activity's window, through EGL and GLES 3, opened at run time */
+#elif defined(__linux__) && !defined(__wasm__)
 #define GG_X11 1 /* a window through X11 and GLX, opened at run time */
 #elif defined(__APPLE__) && !defined(__wasm__)
 #define GG_COCOA 1 /* a window through AppKit and NSOpenGL, by the Objective-C runtime */
@@ -102,7 +116,7 @@ void gg_instance_attrib(int64_t mesh, int64_t buf, int64_t location, int64_t com
 #define GG_BROWSER 1 /* the page's canvas, through its `loft_gl` imports (WebGL2) */
 #endif
 
-#if defined(GG_X11) || defined(GG_COCOA) || defined(GG_BROWSER)
+#if defined(GG_X11) || defined(GG_COCOA) || defined(GG_BROWSER) || defined(GG_ANDROID)
 
 #if defined(GG_X11)
 #include <dlfcn.h>
@@ -407,7 +421,32 @@ typedef struct {
     void (*glXDestroyContext)(void *, gx_context);
     void (*glXSwapIntervalEXT)(void *, gx_xid, int);
 } gg_x_api;
-#endif /* GG_X11 */
+#elif defined(GG_ANDROID)
+#include <android/input.h>
+#include <android/native_window.h>
+#include <android_native_app_glue.h>
+#include <dlfcn.h>
+#include <EGL/egl.h>
+
+/* The EGL entry points a window calls, looked up in `libEGL.so` when it opens: the app links no
+ * graphics library, as the X11 build links none. */
+typedef struct {
+    EGLDisplay (*eglGetDisplay)(EGLNativeDisplayType);
+    EGLBoolean (*eglInitialize)(EGLDisplay, EGLint *, EGLint *);
+    EGLBoolean (*eglBindAPI)(EGLenum);
+    EGLBoolean (*eglChooseConfig)(EGLDisplay, const EGLint *, EGLConfig *, EGLint, EGLint *);
+    EGLContext (*eglCreateContext)(EGLDisplay, EGLConfig, EGLContext, const EGLint *);
+    EGLSurface (*eglCreateWindowSurface)(EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint *);
+    EGLBoolean (*eglMakeCurrent)(EGLDisplay, EGLSurface, EGLSurface, EGLContext);
+    EGLBoolean (*eglSwapBuffers)(EGLDisplay, EGLSurface);
+    EGLBoolean (*eglQuerySurface)(EGLDisplay, EGLSurface, EGLint, EGLint *);
+    EGLBoolean (*eglDestroySurface)(EGLDisplay, EGLSurface);
+    EGLBoolean (*eglDestroyContext)(EGLDisplay, EGLContext);
+} gg_egl_api;
+
+/* The activity loft's Android entry runs the program for (src/c/android/loft_android_main.c). */
+struct android_app *loft_android_app(void);
+#endif
 
 /* Every GL entry point a window calls: resolved through GLX when it opens, or the page's
  * `loft_gl` imports in a browser. */
@@ -515,6 +554,14 @@ typedef struct {
     int fullscreen;
     pthread_t thread;
     void *next_open; /* the next open window: AppKit has one event queue for all of them */
+#elif defined(GG_ANDROID)
+    gg_egl_api ea;
+    void *libegl, *libgles;
+    EGLDisplay display;
+    EGLConfig config;
+    EGLContext context;
+    EGLSurface surface; /* EGL_NO_SURFACE while the activity has no window */
+    struct android_app *app;
 #endif
     int width, height, should_close;
     int closed; /* `gg_close` ran: the context and the X window are gone */
@@ -919,6 +966,80 @@ static void gg_teardown(gg_window *w) {
         gg_current = NULL;
     }
     gc_on_main(gc_teardown_main, w); /* unserved: the window stays on screen until the exit */
+}
+
+#elif defined(GG_ANDROID)
+
+/* The activity shows one window: the one `gg_open` made, which its callbacks reach. */
+static gg_window *gg_android_window;
+
+/* A window draws while it has a surface: none while the activity is in the background. */
+static int gg_use(gg_window *w, const char *what) {
+    (void) what;
+    return w && !w->closed && w->surface != EGL_NO_SURFACE;
+}
+
+/* GLES 3.0 has no `glDrawBuffer` (only `glDrawBuffers`) and no `glPointSize` (a vertex shader
+ * writes `gl_PointSize`): the two entries the window calls answer through these. */
+static void (*gg_gles_draw_buffers)(int, const unsigned *);
+static void gg_gles_draw_buffer(unsigned b) {
+    gg_gles_draw_buffers(1, &b);
+}
+static void gg_gles_point_size(float size) {
+    (void) size;
+}
+
+static int gg_gles_sym(gg_window *w, void **slot, const char *name) {
+    if (strcmp(name, "glDrawBuffer") == 0) {
+        *slot = (void *) gg_gles_draw_buffer;
+        return gg_gles_draw_buffers != NULL;
+    }
+    if (strcmp(name, "glPointSize") == 0) {
+        *slot = (void *) gg_gles_point_size;
+        return 1;
+    }
+    *slot = dlsym(w->libgles, name);
+    return *slot != NULL;
+}
+
+#define GG_GLES(name) gg_gles_sym(w, (void **) (&w->api.name), #name)
+
+static int gg_bind_gl(gg_window *w) {
+    *(void **) (&gg_gles_draw_buffers) = dlsym(w->libgles, "glDrawBuffers");
+    return GG_GL_ALL(GG_GLES);
+}
+
+#define GG_EGL(name) (*(void **) (&w->ea.name) = dlsym(w->libegl, #name), w->ea.name != NULL)
+
+/* The libraries stay loaded once a window opened them, as the X11 build keeps its own. */
+static int gg_bind_egl(gg_window *w) {
+    w->libegl = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL | RTLD_NODELETE);
+    w->libgles = dlopen("libGLESv3.so", RTLD_NOW | RTLD_LOCAL | RTLD_NODELETE);
+    if (!w->libegl || !w->libgles) return 0;
+    return GG_EGL(eglGetDisplay) && GG_EGL(eglInitialize) && GG_EGL(eglBindAPI) &&
+           GG_EGL(eglChooseConfig) && GG_EGL(eglCreateContext) && GG_EGL(eglCreateWindowSurface) &&
+           GG_EGL(eglMakeCurrent) && GG_EGL(eglSwapBuffers) && GG_EGL(eglQuerySurface) &&
+           GG_EGL(eglDestroySurface) && GG_EGL(eglDestroyContext);
+}
+
+/* Let go of the surface (the activity's window is going): the context stays, without one. */
+static void gg_android_drop_surface(gg_window *w) {
+    if (w->surface == EGL_NO_SURFACE) return;
+    w->ea.eglMakeCurrent(w->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    w->ea.eglDestroySurface(w->display, w->surface);
+    w->surface = EGL_NO_SURFACE;
+}
+
+static void gg_teardown(gg_window *w) {
+    gg_android_drop_surface(w);
+    if (w->context != EGL_NO_CONTEXT) w->ea.eglDestroyContext(w->display, w->context);
+    w->context = EGL_NO_CONTEXT;
+    if (w->app) {
+        w->app->onAppCmd = NULL;
+        w->app->onInputEvent = NULL;
+    }
+    if (gg_android_window == w) gg_android_window = NULL;
+    w->closed = 1;
 }
 
 #else /* GG_BROWSER: the page's canvas and WebGL2 context, through its `loft_gl` imports */
@@ -1725,6 +1846,229 @@ int64_t gg_poll(int64_t h) {
     return !w->should_close;
 }
 
+#elif defined(GG_ANDROID)
+
+/* The 0.9 code of an Android key code (src/graphics.loft KEY_*): ASCII for a character, its own
+ * codes for the named keys, -1 for a key it has none for. */
+static int64_t gg_android_key(int32_t kc) {
+    if (kc >= AKEYCODE_A && kc <= AKEYCODE_Z) return 'a' + (kc - AKEYCODE_A);
+    if (kc >= AKEYCODE_0 && kc <= AKEYCODE_9) return '0' + (kc - AKEYCODE_0);
+    if (kc >= AKEYCODE_F1 && kc <= AKEYCODE_F12) return 135 + (kc - AKEYCODE_F1);
+    switch (kc) {
+    case AKEYCODE_SPACE: return ' ';
+    case AKEYCODE_COMMA: return ',';
+    case AKEYCODE_PERIOD: return '.';
+    case AKEYCODE_MINUS: return '-';
+    case AKEYCODE_EQUALS: return '=';
+    case AKEYCODE_LEFT_BRACKET: return '[';
+    case AKEYCODE_RIGHT_BRACKET: return ']';
+    case AKEYCODE_BACKSLASH: return '\\';
+    case AKEYCODE_SEMICOLON: return ';';
+    case AKEYCODE_APOSTROPHE: return '\'';
+    case AKEYCODE_SLASH: return '/';
+    case AKEYCODE_GRAVE: return '`';
+    case AKEYCODE_ENTER: case AKEYCODE_NUMPAD_ENTER: return 13;
+    case AKEYCODE_ESCAPE: return 27;
+    case AKEYCODE_TAB: return 9;
+    case AKEYCODE_DEL: return 8; /* Android's DEL is the backspace key */
+    case AKEYCODE_DPAD_UP: return 128;
+    case AKEYCODE_DPAD_DOWN: return 129;
+    case AKEYCODE_DPAD_LEFT: return 130;
+    case AKEYCODE_DPAD_RIGHT: return 131;
+    case AKEYCODE_SHIFT_LEFT: case AKEYCODE_SHIFT_RIGHT: return 132;
+    case AKEYCODE_CTRL_LEFT: case AKEYCODE_CTRL_RIGHT: return 133;
+    case AKEYCODE_FORWARD_DEL: return 147;
+    case AKEYCODE_INSERT: return 148;
+    case AKEYCODE_MOVE_HOME: return 149;
+    case AKEYCODE_MOVE_END: return 150;
+    case AKEYCODE_PAGE_UP: return 151;
+    case AKEYCODE_PAGE_DOWN: return 152;
+    default: return -1;
+    }
+}
+
+/* Each pointer's touch is TouchBegin / TouchMove / TouchEnd with its pointer id, and the first
+ * pointer's is also the left mouse button, as a browser makes mouse events of a touch: a
+ * program written for the mouse works on the screen.  A key is KeyDown (a repeat when it is
+ * already down) and, when it types anything, a Text with what it typed (Enter types "\r",
+ * Backspace "\b", as 0.9 reported them), and KeyUp.  Back is left to the system, which finishes
+ * the activity, and the next `Window.poll` answers false. */
+static int32_t gg_android_input(struct android_app *app, AInputEvent *e) {
+    gg_window *w = gg_android_window;
+    (void) app;
+    if (!w) return 0;
+    if (AInputEvent_getType(e) == AINPUT_EVENT_TYPE_MOTION) {
+        int32_t raw = AMotionEvent_getAction(e);
+        int32_t action = raw & AMOTION_EVENT_ACTION_MASK;
+        size_t index = (size_t) ((raw & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >>
+                                 AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT);
+        size_t count = AMotionEvent_getPointerCount(e);
+        int x = (int) AMotionEvent_getX(e, 0), y = (int) AMotionEvent_getY(e, 0);
+        if (action == AMOTION_EVENT_ACTION_MOVE) {
+            for (size_t k = 0; k < count; k++)
+                gg_push(w, GG_EV_TOUCH_MOVE, AMotionEvent_getPointerId(e, k),
+                        (int64_t) AMotionEvent_getX(e, k), (int64_t) AMotionEvent_getY(e, k), 0);
+        } else if (index < count) {
+            int64_t tx = (int64_t) AMotionEvent_getX(e, index), ty = (int64_t) AMotionEvent_getY(e, index);
+            int64_t id = AMotionEvent_getPointerId(e, index);
+            if (action == AMOTION_EVENT_ACTION_DOWN || action == AMOTION_EVENT_ACTION_POINTER_DOWN)
+                gg_push(w, GG_EV_TOUCH_BEGIN, id, tx, ty, 0);
+            else if (action == AMOTION_EVENT_ACTION_UP || action == AMOTION_EVENT_ACTION_POINTER_UP ||
+                     action == AMOTION_EVENT_ACTION_CANCEL)
+                gg_push(w, GG_EV_TOUCH_END, id, tx, ty, 0);
+        }
+        w->mouse_x = x;
+        w->mouse_y = y;
+        if (action == AMOTION_EVENT_ACTION_DOWN) {
+            w->buttons |= 1;
+            gg_push(w, GG_EV_MOUSE_DOWN, 1, x, y, 0);
+        } else if (action == AMOTION_EVENT_ACTION_UP || action == AMOTION_EVENT_ACTION_CANCEL) {
+            w->buttons &= ~1;
+            gg_push(w, GG_EV_MOUSE_UP, 1, x, y, 0);
+        } else if (action == AMOTION_EVENT_ACTION_MOVE) {
+            gg_push(w, GG_EV_MOUSE_MOVE, x, y, 0, 0);
+        }
+        return 1;
+    }
+    if (AInputEvent_getType(e) == AINPUT_EVENT_TYPE_KEY) {
+        int32_t kc = AKeyEvent_getKeyCode(e), meta = AKeyEvent_getMetaState(e);
+        int64_t code = gg_android_key(kc);
+        int64_t mods = ((meta & AMETA_SHIFT_ON) ? GG_MOD_SHIFT : 0) | ((meta & AMETA_CTRL_ON) ? GG_MOD_CTRL : 0) |
+                       ((meta & AMETA_ALT_ON) ? GG_MOD_ALT : 0) | ((meta & AMETA_META_ON) ? GG_MOD_SUPER : 0);
+        if (kc == AKEYCODE_BACK) return 0;
+        if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_DOWN) {
+            int repeat = code >= 0 && code < 256 && w->keys[code];
+            char typed = 0;
+            if (code >= 0 && code < 256) w->keys[code] = 1;
+            gg_push(w, GG_EV_KEY_DOWN, code, mods, repeat, 0);
+            if (code >= 'a' && code <= 'z') typed = (char) ((meta & AMETA_SHIFT_ON) ? code - 32 : code);
+            else if (code >= ' ' && code < 127) typed = (char) code;
+            else if (code == 13) typed = '\r';
+            else if (code == 8) typed = '\b';
+            if (typed) gg_text_push(w, &typed, 1);
+        } else if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_UP) {
+            if (code >= 0 && code < 256) w->keys[code] = 0;
+            gg_push(w, GG_EV_KEY_UP, code, mods, 0, 0);
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/* Make the surface for the activity's window, and take its size: a new window after the activity
+ * came back can be another size (a rotation), which the program reads as a Resize. */
+static void gg_android_surface(gg_window *w) {
+    EGLint width = 0, height = 0;
+    if (w->surface != EGL_NO_SURFACE || w->context == EGL_NO_CONTEXT || !w->app->window) return;
+    w->surface = w->ea.eglCreateWindowSurface(w->display, w->config, w->app->window, NULL);
+    if (w->surface == EGL_NO_SURFACE) return;
+    w->ea.eglMakeCurrent(w->display, w->surface, w->surface, w->context);
+    w->ea.eglQuerySurface(w->display, w->surface, EGL_WIDTH, &width);
+    w->ea.eglQuerySurface(w->display, w->surface, EGL_HEIGHT, &height);
+    if (w->width && (width != w->width || height != w->height)) gg_push(w, GG_EV_RESIZE, width, height, 0, 0);
+    w->width = width;
+    w->height = height;
+}
+
+static void gg_android_cmd(struct android_app *app, int32_t cmd) {
+    gg_window *w = gg_android_window;
+    (void) app;
+    if (!w) return;
+    if (cmd == APP_CMD_TERM_WINDOW) gg_android_drop_surface(w);
+    else if (cmd == APP_CMD_INIT_WINDOW) gg_android_surface(w);
+    else if (cmd == APP_CMD_DESTROY) w->should_close = 1;
+}
+
+/* Run the activity's queued work: `timeout` -1 waits for the first, 0 takes what is there. */
+static void gg_android_pump(struct android_app *app, int timeout) {
+    int events;
+    struct android_poll_source *source;
+    while (ALooper_pollOnce(timeout, NULL, &events, (void **) &source) >= 0) {
+        if (source) source->process(app, source);
+        if (app->destroyRequested) return;
+        timeout = 0;
+    }
+}
+
+/* Present an opaque frame: whatever alpha the shaders wrote is forced to 1 first, as 0.9 did. */
+static void gg_present(gg_window *w) {
+    if (w->surface == EGL_NO_SURFACE) return;
+    if (w->target) w->api.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    w->api.glColorMask(0, 0, 0, 1);
+    w->api.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    w->api.glClear(GL_COLOR_BUFFER_BIT);
+    w->api.glColorMask(1, 1, 1, 1);
+    w->ea.eglSwapBuffers(w->display, w->surface);
+    if (w->target) w->api.glBindFramebuffer(GL_FRAMEBUFFER, w->target);
+}
+
+/* The activity's window, whatever size is asked: it is the screen.  The context is made first
+ * and waits, without a surface, for the window the activity is given. */
+int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullscreen) {
+    static const EGLint config_attrs[] = {EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, 0x40,
+                                          EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
+                                          EGL_ALPHA_SIZE, 8, EGL_DEPTH_SIZE, 16, EGL_NONE};
+    static const EGLint context_attrs[] = {0x3098 /* EGL_CONTEXT_MAJOR_VERSION */, 3, EGL_NONE};
+    struct android_app *app = loft_android_app();
+    gg_window *w;
+    EGLint n = 0;
+    (void) width;
+    (void) height;
+    (void) title;
+    (void) fullscreen;
+    if (!app || gg_android_window) return 0;
+    w = (gg_window *) calloc(1, sizeof(gg_window));
+    if (!w) return 0;
+    w->app = app;
+    w->surface = EGL_NO_SURFACE;
+    w->context = EGL_NO_CONTEXT;
+    if (!gg_bind_egl(w) || !gg_bind_gl(w)) {
+        free(w);
+        return 0;
+    }
+    w->display = w->ea.eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    if (w->display == EGL_NO_DISPLAY || !w->ea.eglInitialize(w->display, NULL, NULL) ||
+        !w->ea.eglBindAPI(EGL_OPENGL_ES_API) ||
+        !w->ea.eglChooseConfig(w->display, config_attrs, &w->config, 1, &n) || n < 1) {
+        free(w);
+        return 0;
+    }
+    w->context = w->ea.eglCreateContext(w->display, w->config, EGL_NO_CONTEXT, context_attrs);
+    if (w->context == EGL_NO_CONTEXT) {
+        free(w);
+        return 0;
+    }
+    gg_android_window = w;
+    app->onAppCmd = gg_android_cmd;
+    app->onInputEvent = gg_android_input;
+    while (!app->window && !app->destroyRequested) gg_android_pump(app, -1);
+    gg_android_surface(w);
+    if (w->surface == EGL_NO_SURFACE) {
+        gg_teardown(w);
+        free(w);
+        return 0;
+    }
+    /* 0.9's first state: depth test on, the frame opaque black */
+    w->api.glEnable(GL_DEPTH_TEST);
+    w->caps = 1u << 1;
+    w->api.glViewport(0, 0, w->width, w->height);
+    w->api.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    w->api.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    return (int64_t) (intptr_t) w;
+}
+
+/* Run the activity's queued input and lifecycle; while it is in the background (no surface), wait
+ * for it to come back rather than spin.  False once the activity is finishing. */
+int64_t gg_poll(int64_t h) {
+    gg_window *w = gg_of(h);
+    if (!w || w->closed) return 0;
+    gg_android_pump(w->app, 0);
+    while (w->surface == EGL_NO_SURFACE && !w->should_close && !w->app->destroyRequested)
+        gg_android_pump(w->app, -1);
+    if (w->app->destroyRequested) w->should_close = 1;
+    return !w->should_close;
+}
+
 #else /* GG_BROWSER */
 
 /* Present the frame and give the page its turn: the browser draws it, and its events arrive. */
@@ -1901,10 +2245,39 @@ static void gg_trim(char *log) {
     while (n > 0 && (log[n - 1] == '\n' || log[n - 1] == '\r' || log[n - 1] == ' ')) log[--n] = 0;
 }
 
+#if defined(GG_ANDROID)
+/* GLES 3.0 reads `#version 300 es`, and a fragment shader states its float precision: the
+ * library's desktop shaders (`#version 330 core`) take the line the page's rewrite gives them
+ * (doc/loft-gl-wasm.js), the rest unchanged.  NULL leaves `source` as it is. */
+static char *gg_gles_source(unsigned type, const char *source) {
+    const char *at = source, *rest;
+    const char *head;
+    char *out;
+    size_t len;
+    while (*at == ' ' || *at == '\t' || *at == '\n' || *at == '\r') at++;
+    if (strncmp(at, "#version 330", 12) != 0) return NULL;
+    rest = strchr(at, '\n');
+    rest = rest ? rest + 1 : at + strlen(at);
+    head = type == GL_FRAGMENT_SHADER ? "#version 300 es\nprecision highp float;\nprecision highp int;\n"
+                                      : "#version 300 es\n";
+    len = strlen(head) + strlen(rest) + 1;
+    out = (char *) malloc(len);
+    if (out) snprintf(out, len, "%s%s", head, rest);
+    return out;
+}
+#endif
+
 static unsigned gg_compile(gg_window *w, unsigned type, const char *source, const char *what) {
     unsigned id = w->api.glCreateShader(type);
     int ok = 0;
+#if defined(GG_ANDROID)
+    char *gles = gg_gles_source(type, source);
+    if (gles) source = gles;
+#endif
     w->api.glShaderSource(id, 1, &source, NULL);
+#if defined(GG_ANDROID)
+    free(gles);
+#endif
     w->api.glCompileShader(id);
     w->api.glGetShaderiv(id, GL_COMPILE_STATUS, &ok);
     if (!ok) {
