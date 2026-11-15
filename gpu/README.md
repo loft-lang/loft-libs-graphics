@@ -103,7 +103,10 @@ scissor's origin is the bottom left; texture coordinate (0, 0) is the first pixe
 
 ## Writing a backend
 
-Include `gpu/c/gpu_backend.h` by a path relative to your package, fill one `gpu_backend`, and
+Declare `gpu` as a dependency and write `#include "gpu/gpu_backend.h"`: loft puts a declared
+dependency's headers where your C finds them, wherever the two packages are installed (a path
+out of your package, `../../gpu/c/…`, names no file once it is installed).  Fill one
+`gpu_backend`, and
 export its address through a `table()` function (0 where your stack is absent).  Name the tag
 your shading language's sources carry in `shading`.  `gpu` checks every call first, so a
 backend sees a draw only inside a pass, with a pipeline built for that pass's target and all

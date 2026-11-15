@@ -14,7 +14,7 @@
  *   - the uniform block is the program's one `layout(std140) uniform` block;
  *   - the sampler of texture slot n is named `tex<n>` (`tex0`, `tex1`, ...). */
 #include "gl_base.h"
-#include "../../gpu/c/gpu_backend.h"
+#include "gpu/gpu_backend.h"
 
 #if defined(GQ_X11) || defined(GQ_COCOA) || defined(GQ_BROWSER) || defined(GQ_ANDROID)
 

@@ -3,7 +3,7 @@
 /* A GPU backend that draws nothing: each call it receives becomes one line of a log the
  * program reads back.  Handles are numbered from 1 in the order they are made, so a log is
  * the same on every run and every machine. */
-#include "../../gpu/c/gpu_backend.h"
+#include "gpu/gpu_backend.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
