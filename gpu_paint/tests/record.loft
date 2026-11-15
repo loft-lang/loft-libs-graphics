@@ -1,0 +1,88 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// What a painter asks of a backend, read from the recording one: no display is needed.  The
+// expected log is written by hand.  Handles count from 1: the device, the painter's six
+// pipelines (flat, image and cell, each replacing and blending), its quad.  Blending by alpha
+// is state 1 + 8 * 2 + 3 = 20.  On a 64 x 48 window a rectangle 16 wide has 2 / 64 * 16 = 0.5
+// as its matrix's first float; an image over the whole window has 2, and its last float is 1.
+use gpu;
+use gpu_paint;
+use gpu_record;
+
+fn lines(of: const vector<text>) -> text {
+  out = "";
+  for l in of { out += "{l}\n"; }
+  out
+}
+
+fn test_a_painter_asks_for_six_pipelines_and_four_calls_a_draw() {
+  gpu_record::reset();
+  dev = gpu::open(gpu_record::table(), 64, 48, "paint")!;
+  p = gpu_paint::painter(dev, gpu::INTO_WINDOW)!;
+  made = lines([
+    "open 1 64x48 \"paint\"",
+    "pipeline 2 vertex 3 instance block 16x1@0 4x1@16 size 20 textures 0",
+    "  state shape 0 depth 0 blend 0 cull 0 into 0",
+    "pipeline 3 vertex 3 instance block 16x1@0 4x1@16 size 20 textures 0",
+    "  state shape 0 depth 0 blend 20 cull 0 into 0",
+    "pipeline 4 vertex 3 instance block 16x1@0 size 16 textures 1",
+    "  state shape 0 depth 0 blend 0 cull 0 into 0",
+    "pipeline 5 vertex 3 instance block 16x1@0 size 16 textures 1",
+    "  state shape 0 depth 0 blend 20 cull 0 into 0",
+    "pipeline 6 vertex 3 instance block 16x1@0 4x1@16 size 20 textures 1",
+    "  state shape 0 depth 0 blend 0 cull 0 into 0",
+    "pipeline 7 vertex 3 instance block 16x1@0 4x1@16 size 20 textures 1",
+    "  state shape 0 depth 0 blend 20 cull 0 into 0",
+    "buffer 8 floats 18",
+  ]);
+  assert(gpu_record::log() == made, "what a painter is made of:\n{gpu_record::log()}");
+
+  picture = dev.texture_from([0xFF112233 as u32, 0 as u32], 2, 1);
+  dev.begin_window(gpu::KEEP, 0);
+  p.rect(dev, 8.0, 4.0, 16.0, 10.0, 1.0, 0.0, 0.0, 0.25);
+  p.blend = false;
+  p.image(dev, picture, 0.0, 0.0, 64.0, 48.0);
+  dev.end();
+  drawn = lines([
+    "texture 9 2x1 colour",
+    "texture_put 9 at 0,0 2x1 first ff112233",
+    "begin 0 keep",
+    "  bind 3",
+    "  uniforms floats 20 first 0.500 last 0.250",
+    "  vertices 8",
+    "  draw from 0 count 6 copies 0",
+    "  bind 4",
+    "  uniforms floats 16 first 2.000 last 1.000",
+    "  sample 0 texture 9",
+    "  vertices 8",
+    "  draw from 0 count 6 copies 0",
+    "end",
+  ]);
+  got = gpu_record::log()[len(made)..];
+  assert(got == drawn, "a rectangle and an image:\n{got}");
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+}
+
+fn test_a_sheet_names_its_cell_in_the_block() {
+  gpu_record::reset();
+  dev = gpu::open(gpu_record::table(), 64, 48, "sheet")!;
+  // four cells in a row: cell 2 spans u 0.5 to 0.75, so the block's last float (v1) is 1
+  sheet = gpu_paint::sprites(dev, [for _ in 0..8 { 0xFFFFFFFF as u32 }], 8, 1, 4, 1, gpu::INTO_WINDOW)!;
+  before = gpu_record::log();
+  dev.begin_window(gpu::KEEP, 0);
+  sheet.draw(dev, [for i in 0..16 { if i % 5 == 0 { 3.0 } else { 0.0 } }], 2);
+  dev.end();
+  drawn = lines([
+    "begin 0 keep",
+    "  bind 2",
+    "  uniforms floats 20 first 3.000 last 1.000",
+    "  sample 0 texture 3",
+    "  vertices 4",
+    "  draw from 0 count 6 copies 0",
+    "end",
+  ]);
+  got = gpu_record::log()[len(before)..];
+  assert(got == drawn, "a sprite in a scene:\n{got}");
+  assert(gpu_record::log().starts_with(lines(["open 1 64x48 \"sheet\"", "pipeline 2 vertex 3 instance block 16x1@0 4x1@16 size 20 textures 1", "  state shape 0 depth 2 blend 0 cull 0 into 0"])), "its pipeline tests and writes depth:\n{before}");
+}

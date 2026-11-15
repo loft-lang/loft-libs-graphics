@@ -1,0 +1,219 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// A painter and a sprite sheet through `gpu` draw the same pixels as the graphics library's
+// own `Painter` and `Sprites`, byte for byte.  Each test opens a window of each, draws one
+// scene both ways and compares the two captures whole; it also asks that the scene shows more
+// than one colour.  graphics and gpu_gl are not dependencies of this package: one is the path
+// it is measured against, the other the backend that draws here.  Without a display every
+// test returns at once (`DISPLAY`, or `GRAPHICS_TEST_WINDOW=1` on a Mac).
+use gpu;
+use gpu_gl;
+use gpu_paint;
+use graphics;
+
+fn display() -> boolean {
+  (env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1"
+}
+
+const BLACK = 0xFF000000;
+const RED = 0xFFFF0000;
+const GREEN = 0xFF00FF00;
+const BLUE = 0xFF0000FF;
+
+fn same(old: const vector<u32>, new: const vector<u32>, what: text) {
+  assert(len(old) == len(new) && len(old) > 0, "{what}: {len(old)} pixels through graphics, {len(new)} through gpu");
+  differ = 0;
+  first = -1;
+  colours = 0;
+  for p in old {
+    if p != (new[p#index] ?? 0) {
+      differ += 1;
+      if first < 0 { first = p#index; }
+    }
+    if p != old[0] { colours += 1; }
+  }
+  assert(colours > 0, "{what}: the scene shows one colour only");
+  assert(differ == 0, "{what}: {differ} pixels differ, the first at {first}: {old[first] ?? 0:x} through graphics, {new[first] ?? 0:x} through gpu");
+}
+
+// The old painter blends where its window does: plain transparency, as the new one blends.
+fn blending(w: const graphics::Window, on: boolean) {
+  if on {
+    w.enable(graphics::GL_BLEND);
+    w.blend(graphics::BLEND_SRC_ALPHA, graphics::BLEND_ONE_MINUS_SRC_ALPHA);
+  } else {
+    w.disable(graphics::GL_BLEND);
+  }
+}
+
+// A 4 x 2 picture: two cells of 2 x 2, each pixel its own colour, one of them see-through.
+fn sheet_pixels() -> vector<u32> {
+  out: vector<u32> = [];
+  for i in 0..8 {
+    alpha = if i == 5 { 0 } else { 255 };
+    out += [(graphics::rgba(30 + 25 * i, 240 - 22 * i, 60 + 9 * (i % 3), alpha) & 4294967295) as u32];
+  }
+  out
+}
+
+// The unit quad stretched to `sx` x `sy` around the middle of the target, at depth `z`.
+fn placed(sx: float, sy: float, z: float) -> vector<float> {
+  [sx, 0.0, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -sx / 2.0, -sy / 2.0, z, 1.0]
+}
+
+fn test_rectangles_opaque_blended_and_after_a_resize() {
+  wo = graphics::open_window(64, 48, "old-rect");
+  if !display() { return; }
+  w = wo ?? return assert(false, "a display is set and no window opened");
+  dev = gpu::open(gpu_gl::table(), 64, 48, "new-rect") ?? return assert(false, "no device");
+  op = w.painter() ?? return assert(false, "the old painter");
+  np = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return assert(false, "the new painter");
+
+  w.clear(BLACK);
+  blending(w, false);
+  op.rect(8.0, 4.0, 16.0, 10.0, 1.0, 0.0, 0.0, 0.3);
+  op.rect(20.5, 9.25, 30.0, 20.5, 0.0, 0.0, 1.0, 1.0);
+  blending(w, true);
+  op.rect(4.0, 8.0, 40.0, 30.0, 0.2, 1.0, 0.4, 0.35);
+  op.resize(32, 24);
+  op.rect(24.0, 18.0, 8.0, 6.0, 1.0, 1.0, 0.0, 0.5);
+  old = w.capture();
+
+  dev.begin_window(gpu::CLEAR, BLACK);
+  np.blend = false;
+  np.rect(dev, 8.0, 4.0, 16.0, 10.0, 1.0, 0.0, 0.0, 0.3);
+  np.rect(dev, 20.5, 9.25, 30.0, 20.5, 0.0, 0.0, 1.0, 1.0);
+  np.blend = true;
+  np.rect(dev, 4.0, 8.0, 40.0, 30.0, 0.2, 1.0, 0.4, 0.35);
+  np.resize(32, 24);
+  np.rect(dev, 24.0, 18.0, 8.0, 6.0, 1.0, 1.0, 0.0, 0.5);
+  dev.end();
+  same(old.data, dev.capture(), "rectangles");
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+}
+
+fn test_an_image_keeps_its_rows_and_skips_the_transparent() {
+  wo = graphics::open_window(64, 48, "old-image");
+  if !display() { return; }
+  w = wo ?? return assert(false, "a display is set and no window opened");
+  dev = gpu::open(gpu_gl::table(), 64, 48, "new-image") ?? return assert(false, "no device");
+  op = w.painter() ?? return assert(false, "the old painter");
+  np = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return assert(false, "the new painter");
+  px = sheet_pixels();
+
+  ot = w.texture_from(graphics::Canvas { width: 4, height: 2, data: px });
+  ot.filter(true);
+  ol = w.texture_from(graphics::Canvas { width: 4, height: 2, data: px });
+  w.clear(BLUE);
+  blending(w, true);
+  op.image(ot, 30.0, 2.0, 32.0, 40.0);
+  op.image(ol, 2.0, 20.0, 24.0, 24.0);
+  old = w.capture();
+
+  nt = dev.texture_from(px, 4, 2);
+  nt.nearest(true);
+  nl = dev.texture_from(px, 4, 2);
+  dev.begin_window(gpu::CLEAR, BLUE);
+  np.image(dev, nt, 30.0, 2.0, 32.0, 40.0);
+  np.image(dev, nl, 2.0, 20.0, 24.0, 24.0);
+  dev.end();
+  same(old.data, dev.capture(), "images");
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+}
+
+fn test_sprites_at_pixel_positions_and_in_a_scene_with_depth() {
+  wo = graphics::open_window(64, 48, "old-sprites");
+  if !display() { return; }
+  w = wo ?? return assert(false, "a display is set and no window opened");
+  dev = gpu::open(gpu_gl::table(), 64, 48, "new-sprites") ?? return assert(false, "no device");
+  op = w.painter() ?? return assert(false, "the old painter");
+  np = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return assert(false, "the new painter");
+  px = sheet_pixels();
+
+  // Two sprites in a scene: the near one drawn first, so the far one is hidden where they
+  // overlap only if depth is tested and written.  Then two by the painter, over them, in
+  // call order whatever the depth.
+  os = w.sprites(graphics::Canvas { width: 4, height: 2, data: px }, 2, 1) ?? return assert(false, "the old sheet");
+  os.texture.filter(true);
+  // In a page the two libraries draw in the page's one context, and graphics takes the state
+  // it finds: say what this scene relies on, which a painter before it turned off.
+  w.enable(graphics::GL_DEPTH_TEST);
+  w.depth_write(true);
+  w.clear(BLACK);
+  blending(w, false);
+  os.draw(placed(1.2, 1.4, -0.5), 1);
+  os.draw(placed(1.9, 0.8, 0.5), 0);
+  op.sprite(os, 2.0, 30.0, 20.0, 16.0, 0);
+  op.sprite(os, 12.0, 34.0, 20.0, 12.0, 1);
+  assert(w.enabled(graphics::GL_DEPTH_TEST), "the old painter handed depth testing back on");
+  old = w.capture();
+
+  ns = gpu_paint::sprites(dev, px, 4, 2, 2, 1, gpu::INTO_WINDOW) ?? return assert(false, "the new sheet");
+  ns.texture.nearest(true);
+  np.blend = false;
+  dev.begin_window(gpu::CLEAR, BLACK);
+  ns.draw(dev, placed(1.2, 1.4, -0.5), 1);
+  ns.draw(dev, placed(1.9, 0.8, 0.5), 0);
+  np.sprite(dev, ns, 2.0, 30.0, 20.0, 16.0, 0);
+  np.sprite(dev, ns, 12.0, 34.0, 20.0, 12.0, 1);
+  dev.end();
+  same(old.data, dev.capture(), "sprites");
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+}
+
+fn test_a_painter_draws_into_a_texture_that_another_shows() {
+  wo = graphics::open_window(64, 48, "old-into");
+  if !display() { return; }
+  w = wo ?? return assert(false, "a display is set and no window opened");
+  dev = gpu::open(gpu_gl::table(), 64, 48, "new-into") ?? return assert(false, "no device");
+  op = w.painter() ?? return assert(false, "the old painter");
+  inner = gpu_paint::painter(dev, gpu::INTO_COLOUR) ?? return assert(false, "a painter into a texture");
+  outer = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return assert(false, "a painter into the window");
+
+  // A 32 x 24 picture painted first, then shown over part of the window.
+  oc = w.texture(32, 24);
+  oc.filter(true);
+  of = w.framebuffer();
+  of.attach(oc);
+  w.render_to(of);
+  w.viewport(0, 0, 32, 24);
+  w.clear(RED);
+  blending(w, false);
+  op.resize(32, 24);
+  op.rect(4.0, 3.0, 12.0, 8.0, 0.0, 1.0, 0.0, 1.0);
+  w.render_to_window();
+  w.viewport(0, 0, 64, 48);
+  w.clear(BLACK);
+  op.resize(64, 48);
+  op.image(oc, 8.0, 6.0, 48.0, 36.0);
+  old = w.capture();
+
+  nc = dev.texture(32, 24);
+  nc.nearest(true);
+  nf = dev.colour_target(nc);
+  inner.blend = false;
+  inner.resize(32, 24);
+  dev.begin(nf, gpu::CLEAR, RED);
+  inner.rect(dev, 4.0, 3.0, 12.0, 8.0, 0.0, 1.0, 0.0, 1.0);
+  dev.end();
+  outer.blend = false;
+  dev.begin_window(gpu::CLEAR, BLACK);
+  outer.image(dev, nc, 8.0, 6.0, 48.0, 36.0);
+  dev.end();
+  same(old.data, dev.capture(), "a painted texture shown");
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+}
+
+fn test_a_painter_for_the_window_is_refused_in_a_pass_into_a_texture() {
+  if !display() { return; }
+  dev = gpu::open(gpu_gl::table(), 64, 48, "new-kind") ?? return assert(false, "no device");
+  np = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return assert(false, "the new painter");
+  t = dev.texture(16, 16);
+  f = dev.colour_target(t);
+  dev.begin(f, gpu::CLEAR, GREEN);
+  np.rect(dev, 0.0, 0.0, 8.0, 8.0, 1.0, 0.0, 0.0, 1.0);
+  dev.end();
+  got = dev.refusals();
+  assert((got[0] ?? "") == "bind: the pipeline was built for another kind of target than this pass draws into", "the painter's pipeline is the window's: {got}");
+}

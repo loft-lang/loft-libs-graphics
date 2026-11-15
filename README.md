@@ -24,6 +24,7 @@ All four are published to the registry and installable today.
 | [`imaging/`](imaging/) | `imaging` — PNG load/save, image manipulation | v0.2.2 |
 | [`gpu/`](gpu/) | `gpu` — drawing on a GPU through pipelines, passes and uniform blocks, with no graphics stack named | v0.1.0 |
 | [`gpu_gl/`](gpu_gl/) | `gpu_gl` — the OpenGL backend of `gpu`: OpenGL 3.3, OpenGL ES 3 and WebGL2 | v0.1.0 |
+| [`gpu_paint/`](gpu_paint/) | `gpu_paint` — rectangles, images and sprites at pixel positions, drawn through `gpu` | v0.1.0 |
 | [`gpu_record/`](gpu_record/) | `gpu_record` — a `gpu` backend that draws nothing and writes down every call, for tests | v0.1.0 |
 | [`tiles/`](tiles/) | `tiles` — tile sheets, map layers and sprites drawn at a surface's own resolution through a camera | v0.1.0 |
 | [`shapes/`](shapes/) | `shapes` — 2D collision detection | v0.4.1 |
