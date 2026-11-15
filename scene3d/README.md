@@ -10,8 +10,8 @@ A 3D scene a game's view gives once, drawn through [`gpu`](../gpu/README.md).
 It is the GPU side of tile-world-game's scene contract (`SCENE_CONTRACT.md` there): a view
 builds tiles of faces, the cells' light and the actors of a frame; an implementation draws
 them.  The contract's CPU implementation, `raster3d`, draws the same scene on a machine with
-no GPU (the Tanmatsu).  This library takes the same arrays `raster3d` takes, so one view feeds
-either.
+no GPU (the Tanmatsu).  This library takes the same arrays `raster3d` takes — single
+precision, as a 32-bit program holds them — so one view feeds either.
 
 ```loft
 use gpu;
@@ -42,7 +42,7 @@ Units: x east, y up in layers, z south; a cell is 1 across, a layer 1 high.
 | The overlay | `set_overlay(dev, pixels, w, h, scale)` | A picture over everything, its clear pixels not drawn |
 | The camera | `fixed_camera(px, py)`, `free_camera(eye, at, field)` | Parallel from the south, or in perspective from anywhere |
 
-**A face** is, in `faces`, one after another: the picture, the group it is hidden with (-1:
+**A face** is, in `faces` (a `vector<single>`), one after another: the picture, the group it is hidden with (-1:
 none), its corners n, the cell its light comes from (x, y, its layer, a factor; layer
 `NO_LIGHT`: its corners' own light), then n times x, y, z, u, v, light.
 
@@ -77,8 +77,8 @@ facing south for both.
   ground, blocks whose faces are groups, a slanted triangle, three actors (the hero behind a
   block, one turned and mirrored, one turned about its middle), an overlay — through
   `raster3d` and through this library at 800 x 480, and compares the pictures.  Measured on a
-  Mac (OpenGL 4.1): of 384,000 pixels, 21 differ by more than two steps of the CPU's five
-  bits a channel (16 of 255); the rest are equal or within that, which is the CPU reducing a
+  Mac (OpenGL 4.1), against `raster3d` at tile-world-game `dd62c5e`: of 384,000 pixels, 23
+  differ by more than two steps of the CPU's five bits a channel (16 of 255); the rest are equal or within that, which is the CPU reducing a
   colour to RGB565 after it is lit.  The same block is cut away by both.  Four planted
   breaks (no cut-away, no cell light, the camera a pixel off, the overlay at half its scale)
   each put thousands of pixels out.  It is not under `tests/`: `raster3d` is in
