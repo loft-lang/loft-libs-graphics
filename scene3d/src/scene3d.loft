@@ -1,0 +1,672 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// A 3D scene, drawn through `gpu`.
+//
+//   scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, 0xFF94BFE6) ?? return;
+//   stone = scene.add_picture(texels);                    // 16 x 16 RGB565, NONE where clear
+//   scene.set_tile(key, faces);                           // a square of cells, whole
+//   scene.set_light([layer, x0, y0, w, h, …lights]);      // the cells' light, as data
+//   …each frame…
+//   scene.set_actors(actors, hero);
+//   scene.fixed_camera(px, py);
+//   scene.draw(dev);                                      // a pass into the window
+//
+// What a view gives is what tile-world-game's scene contract names, in the arrays its CPU
+// implementation (`raster3d`) takes, so one view feeds either: pictures by number, tiles of
+// faces under a key, the cells' light, the actors of a frame, the camera.  Units: x east, y up
+// in layers, z south; a cell is 1 across, a layer 1 high.
+//
+// Changes come by key: a tile given again or dropped, a box of light, the actors.  A frame is
+// the scene as it is, never what an earlier frame drew.
+use gpu;
+
+/// A texel that is not there (RGB565).
+pub const NONE = 63519;
+/// A face's light that comes from no cell (`set_tile`): its corners' own.
+pub const NO_LIGHT = -1000000;
+
+/// The fixed camera's scale: pixels a cell is across, a cell's ground is deep, a layer is tall.
+pub const WIDE = 48;
+pub const DEEP = 40;
+pub const TALL = 48;
+
+// A picture's texels each way, the atlas's pictures each way, and its texels each way.
+const TS = 16;
+const SLOTS = 64;
+const ATLAS = 1024;
+// The light map: cells each way on a layer, and the layers it holds, one above the other.
+const LIGHT_CELLS = 256;
+const LIGHT_LAYERS = 8;
+// Floats a vertex: its place (3), where it lies on its picture (2), its picture's slot (2), the
+// cell its light comes from and the factor (4), its own light (1).
+const VERTEX = 12;
+
+const LAND_VERTEX_GLSL: text = `
+#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec2 aUV;
+layout (location = 2) in vec2 aSlot;
+layout (location = 3) in vec4 aLit;
+layout (location = 4) in float aOwn;
+layout (std140) uniform Block {{ mat4 uView; }};
+uniform sampler2D tex1;
+out vec2 vUV;
+flat out vec2 vSlot;
+out float vLight;
+void main() {{
+    gl_Position = uView * vec4(aPos, 1.0);
+    vUV = aUV;
+    vSlot = aSlot;
+    float l = aOwn;
+    if (aLit.z > -999999.0) {{
+        vec2 at = vec2(mod(aLit.x, 256.0) + 0.5, mod(aLit.y, 256.0) + 0.5 + 256.0 * mod(aLit.z, 8.0));
+        vec4 c = textureLod(tex1, at / vec2(256.0, 2048.0), 0.0);
+        if (c.a > 0.5) l = (c.r * 255.0 * 256.0 + c.g * 255.0) / 65535.0 * aLit.w;
+    }}
+    vLight = clamp(l, 0.0, 1.0);
+}}
+`;
+
+const LAND_FRAGMENT_GLSL: text = `
+#version 330 core
+in vec2 vUV;
+flat in vec2 vSlot;
+in float vLight;
+uniform sampler2D tex0;
+out vec4 FragColor;
+void main() {{
+    vec2 t = clamp(floor(vUV * 16.0), 0.0, 15.0);
+    vec4 c = texture(tex0, (vSlot * 16.0 + t + 0.5) / 1024.0);
+    if (c.a < 0.5) discard;
+    FragColor = vec4(c.rgb * vLight, 1.0);
+}}
+`;
+
+fn land_program() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3, gpu::F2, gpu::F2, gpu::F4, gpu::F1],
+    instance: [],
+    block: [gpu::MAT4],
+    textures: 2,
+    sources: [gpu::source("glsl-330", LAND_VERTEX_GLSL, LAND_FRAGMENT_GLSL), gpu::source("record", "", "")],
+  }
+}
+
+// The overlay: a picture over part of the target, its clear pixels not drawn.
+const OVER_VERTEX_GLSL: text = `
+#version 330 core
+layout (location = 0) in vec2 aPos;
+layout (location = 1) in vec2 aUV;
+out vec2 vUV;
+void main() {{ gl_Position = vec4(aPos, 0.0, 1.0); vUV = aUV; }}
+`;
+
+const OVER_FRAGMENT_GLSL: text = `
+#version 330 core
+in vec2 vUV;
+uniform sampler2D tex0;
+out vec4 FragColor;
+void main() {{
+    vec4 c = texture(tex0, vUV);
+    if (c.a < 0.5) discard;
+    FragColor = vec4(c.rgb, 1.0);
+}}
+`;
+
+fn over_program() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F2, gpu::F2],
+    instance: [],
+    block: [],
+    textures: 1,
+    sources: [gpu::source("glsl-330", OVER_VERTEX_GLSL, OVER_FRAGMENT_GLSL), gpu::source("record", "", "")],
+  }
+}
+
+// Where tile `key` is kept.
+struct Slot {
+  const key: integer,
+  at: integer,
+}
+
+/// A scene on a device: its pictures, its tiles, the cells' light, this frame's actors and the
+/// camera.
+pub struct Scene {
+  into: integer,
+  sky: integer,
+  land: gpu::Pipeline,
+  values: gpu::Block,
+  atlas: gpu::Texture,
+  lights: gpu::Texture,
+  pictures: integer,
+  slots: hash<Slot[key]>,
+  // A tile's faces as they were given, its vertices on the GPU and how many it has; a dropped
+  // tile keeps its place, empty.
+  faces: vector<vector<float>>,
+  buffers: vector<gpu::Buffer>,
+  counts: vector<integer>,
+  // A tile's triangles that belong to a group, six numbers each: the group, the triangle's
+  // rectangle in world pixels (x0, y0, x1, y1) and how near it reaches — what the cut-away asks.
+  walls: vector<vector<integer>>,
+  // The groups hidden now (the walls cut away).
+  hidden: vector<integer>,
+  cards: gpu::Buffer,
+  card_count: integer,
+  over: gpu::Pipeline,
+  over_quad: gpu::Buffer,
+  over_picture: gpu::Texture,
+  over_on: boolean,
+  // The camera: free (a matrix the view gave), or fixed with the screen's top-left in world
+  // pixels; and the screen's size.
+  free: boolean,
+  view: vector<float>,
+  cam_x: integer,
+  cam_y: integer,
+  width: integer,
+  height: integer,
+}
+
+/// A scene for passes into `into` (`gpu::INTO_WINDOW`, `gpu::INTO_COLOUR_DEPTH` for a target
+/// with depth), `sky` (0xAARRGGBB) where nothing is, on a screen the size of the device's
+/// window.  Null on a device whose backend this library has no shader source for.
+pub fn new_scene(dev: const gpu::Device, into: integer, sky: integer) -> Scene? {
+  land = dev.pipeline(land_program(), gpu::State { depth: gpu::DEPTH_TEST_WRITE, into: into }) ?? return null;
+  over = dev.pipeline(over_program(), gpu::State { into: into }) ?? return null;
+  atlas = dev.texture(ATLAS, ATLAS);
+  atlas.nearest(true);
+  lights = dev.texture(LIGHT_CELLS, LIGHT_CELLS * LIGHT_LAYERS);
+  lights.nearest(true);
+  // nothing is lit from a cell until its light is given
+  lights.put(0, 0, [for _ in 0..LIGHT_CELLS * LIGHT_CELLS * LIGHT_LAYERS { 0 as u32 }], LIGHT_CELLS, LIGHT_CELLS * LIGHT_LAYERS);
+  Scene {
+    into: into,
+    sky: sky,
+    values: land.block(),
+    land: land,
+    atlas: atlas,
+    lights: lights,
+    pictures: 0,
+    slots: [],
+    faces: [],
+    buffers: [],
+    counts: [],
+    walls: [],
+    hidden: [],
+    cards: dev.buffer([0.0f]),
+    card_count: 0,
+    over: over,
+    over_quad: dev.buffer([0.0f]),
+    over_picture: dev.texture(1, 1),
+    over_on: false,
+    free: false,
+    view: [],
+    cam_x: 0,
+    cam_y: 0,
+    width: dev.width(),
+    height: dev.height(),
+  }
+}
+
+/// The screen's size, for a pass into a target of another size than the window.
+pub fn resize(self: Scene, width: integer, height: integer) {
+  self.width = width;
+  self.height = height;
+}
+
+// An RGB565 value as 0xAARRGGBB: each channel's high bits repeated in its low ones; NONE clear.
+fn wide(v: integer) -> integer {
+  if v == NONE { return 0; }
+  r = (v >> 11) & 31;
+  g = (v >> 5) & 63;
+  b = v & 31;
+  0xFF000000 | (((r << 3) | (r >> 2)) << 16) | (((g << 2) | (g >> 4)) << 8) | ((b << 3) | (b >> 2))
+}
+
+/// A picture, 16 x 16 RGB565 texels row by row (NONE where it is clear): its number, for a
+/// face or an actor; -1 when the texels are too few or the scene holds no more.
+pub fn add_picture(self: Scene, texels: const vector<i32>) -> integer {
+  if len(texels) < TS * TS || self.pictures >= SLOTS * SLOTS { return -1; }
+  px: vector<u32> = [];
+  for t in texels[0..TS * TS] { px += [(wide(t) & 4294967295) as u32]; }
+  n = self.pictures;
+  self.atlas.put((n % SLOTS) * TS, (n / SLOTS) * TS, px, TS, TS);
+  self.pictures += 1;
+  n
+}
+
+// The vertices of the faces in `d` that are not hidden: a fan of triangles a face.
+fn vertices(self: const Scene, d: const vector<float>) -> vector<single> {
+  out: vector<single> = [];
+  i = 0;
+  while i + 7 <= len(d) {
+    pic = (d[i] ?? 0.0) as integer;
+    group = (d[i + 1] ?? 0.0) as integer;
+    n = (d[i + 2] ?? 0.0) as integer;
+    at = i + 7;
+    if n < 3 || at + 6 * n > len(d) { break; }
+    shown = pic >= 0 && pic < self.pictures;
+    if group >= 0 { for h in self.hidden { if h == group { shown = false; } } }
+    if shown {
+      sx = (pic % SLOTS) as single;
+      sy = (pic / SLOTS) as single;
+      for t in 1..n - 1 {
+        for c in [0, t, t + 1] {
+          k = at + 6 * c;
+          out += [
+            (d[k] ?? 0.0) as single, (d[k + 1] ?? 0.0) as single, (d[k + 2] ?? 0.0) as single,
+            (d[k + 3] ?? 0.0) as single, (d[k + 4] ?? 0.0) as single, sx, sy,
+            (d[i + 3] ?? 0.0) as single, (d[i + 4] ?? 0.0) as single, (d[i + 5] ?? 0.0) as single,
+            (d[i + 6] ?? 0.0) as single, (d[k + 5] ?? 0.0) as single,
+          ];
+        }
+      }
+    }
+    i = at + 6 * n;
+  }
+  out
+}
+
+/// Tile `key`'s faces, in place of the ones it had (none: it is empty).  Faces follow one
+/// another in `d`: the picture, the group it is hidden with (-1: none), its corners n, where
+/// its light comes from (the cell x, y, its layer, and a factor; layer NO_LIGHT: its corners'
+/// own), then n times x, y, z, u, v, light — u and v 0 .. 1 over the picture, light 0 .. 1.
+pub fn set_tile(self: Scene, dev: const gpu::Device, key: integer, d: const vector<float>) {
+  verts = self.vertices(d);
+  old = self.slots[key];
+  if old != null {
+    self.faces[old.at] = d;
+    self.walls[old.at] = walls_of(d);
+    self.counts[old.at] = len(verts) / VERTEX;
+    b = self.buffers[old.at] ?? return; // `at` names a buffer: slots and buffers grow together
+    b.update(verts);
+    return;
+  }
+  self.slots += [Slot { key: key, at: len(self.buffers) }];
+  self.faces += [d];
+  self.walls += [walls_of(d)];
+  self.counts += [len(verts) / VERTEX];
+  self.buffers += [dev.buffer(verts)];
+}
+
+// A world place in the fixed camera's subpixels (16 a pixel), rounded as the CPU rounds it.
+fn sub_x(x: float) -> integer {
+  v = x * (WIDE as float) * 16.0;
+  if v < 0.0 { -((-v + 0.5) as integer) } else { (v + 0.5) as integer }
+}
+
+fn sub_y(y: float, z: float) -> integer {
+  v = (z * (DEEP as float) - y * (TALL as float)) * 16.0;
+  if v < 0.0 { -((-v + 0.5) as integer) } else { (v + 0.5) as integer }
+}
+
+// The pixel a subpixel lies in, and the first pixel past it.
+fn pixel_of(sub: integer) -> integer {
+  if sub >= 0 { sub / 16 } else { -((-sub + 15) / 16) }
+}
+
+fn pixel_past(sub: integer) -> integer {
+  pixel_of(sub + 15)
+}
+
+// How near a place is: smaller is nearer, as the CPU's depth (a layer up and a cell south
+// are nearer).
+fn nearness(y: float, z: float) -> float {
+  32768.0 - 16.0 * (y * (DEEP as float) + z * (TALL as float))
+}
+
+fn floor_of(v: float) -> integer {
+  i = v as integer;
+  if (i as float) > v { i - 1 } else { i }
+}
+
+// The triangle of three corners (x, y, z each) as six numbers under `group`: its rectangle in
+// world pixels and the nearest it reaches.
+fn wall_of(group: integer, c: const vector<float>) -> vector<integer> {
+  x0 = sub_x(c[0]);
+  x1 = x0;
+  y0 = sub_y(c[1], c[2]);
+  y1 = y0;
+  near = nearness(c[1], c[2]);
+  for k in 1..3 {
+    x = sub_x(c[3 * k] ?? 0.0);
+    y = sub_y(c[3 * k + 1] ?? 0.0, c[3 * k + 2] ?? 0.0);
+    n = nearness(c[3 * k + 1] ?? 0.0, c[3 * k + 2] ?? 0.0);
+    if x < x0 { x0 = x; }
+    if x > x1 { x1 = x; }
+    if y < y0 { y0 = y; }
+    if y > y1 { y1 = y; }
+    if n < near { near = n; }
+  }
+  [group, pixel_of(x0), pixel_of(y0), pixel_past(x1), pixel_past(y1), floor_of(near)]
+}
+
+fn least(a: integer, b: integer) -> integer {
+  if a < b { a } else { b }
+}
+
+// Every triangle in `d` that belongs to a group.
+fn walls_of(d: const vector<float>) -> vector<integer> {
+  out: vector<integer> = [];
+  i = 0;
+  while i + 7 <= len(d) {
+    group = (d[i + 1] ?? 0.0) as integer;
+    n = (d[i + 2] ?? 0.0) as integer;
+    at = i + 7;
+    if n < 3 || at + 6 * n > len(d) { break; }
+    if group >= 0 {
+      for t in 1..n - 1 {
+        c: vector<float> = [];
+        for k in [0, t, t + 1] { c += [d[at + 6 * k] ?? 0.0, d[at + 6 * k + 1] ?? 0.0, d[at + 6 * k + 2] ?? 0.0]; }
+        out += wall_of(group, c);
+      }
+    }
+    i = at + 6 * n;
+  }
+  out
+}
+
+/// Tile `key` gone.
+pub fn drop_tile(self: Scene, key: integer) {
+  old = self.slots[key] ?? return;
+  self.faces[old.at] = [];
+  self.walls[old.at] = [];
+  self.counts[old.at] = 0;
+}
+
+/// How many tiles hold faces now.
+pub fn tiles(self: const Scene) -> integer {
+  n = 0;
+  for c in self.counts { if c > 0 { n += 1; } }
+  n
+}
+
+/// The light of cells as data: `d` is the layer, the box's corner (x0, y0), its width and
+/// height, then each cell's light (0 .. 1) row by row.  The faces lit from those cells are lit
+/// by it from the next frame; no face is given again.
+pub fn set_light(self: Scene, d: const vector<float>) {
+  if len(d) < 5 { return; }
+  z = (d[0] ?? 0.0) as integer;
+  x0 = (d[1] ?? 0.0) as integer;
+  y0 = (d[2] ?? 0.0) as integer;
+  w = (d[3] ?? 0.0) as integer;
+  h = (d[4] ?? 0.0) as integer;
+  if w <= 0 || h <= 0 || len(d) < 5 + w * h { return; }
+  layer = ((z % LIGHT_LAYERS) + LIGHT_LAYERS) % LIGHT_LAYERS;
+  // A cell at a time: a box may lie across the map's edge, where it goes on at the other side.
+  for j in 0..h {
+    for i in 0..w {
+      l = d[5 + j * w + i] ?? 0.0;
+      v = (if l < 0.0 { 0.0 } else if l > 1.0 { 1.0 } else { l } * 65535.0 + 0.5) as integer;
+      cx = (((x0 + i) % LIGHT_CELLS) + LIGHT_CELLS) % LIGHT_CELLS;
+      cy = (((y0 + j) % LIGHT_CELLS) + LIGHT_CELLS) % LIGHT_CELLS;
+      // the light's high byte in red, its low byte in green; alpha says a light was given
+      self.lights.put(cx, cy + LIGHT_CELLS * layer, [((0xFF000000 | ((v >> 8) << 16) | ((v & 255) << 8)) & 4294967295) as u32], 1, 1);
+    }
+  }
+}
+
+/// This frame's actors, eleven numbers each in `d`: an id, the picture, the bottom middle
+/// (x, y, z) of the picture as it stands unturned, its size in cells, its light, how far it is
+/// turned (degrees clockwise as the fixed camera sees it), the point of the picture it turns
+/// about (u, v: 0 .. 1 across and down) and whether it is mirrored (1) or not (0).  A card
+/// stands in the plane the fixed camera looks at.  The actor `keep_seen` is never hidden from
+/// the fixed camera: the wall groups in front of it are cut away, and shown again when they no
+/// longer are (-1: none).
+pub fn set_actors(self: Scene, d: const vector<float>, keep_seen: integer) {
+  verts: vector<single> = [];
+  hero: vector<float> = [];
+  i = 0;
+  while i + 11 <= len(d) {
+    pic = (d[i + 1] ?? 0.0) as integer;
+    x = d[i + 2] ?? 0.0;
+    y = d[i + 3] ?? 0.0;
+    z = d[i + 4] ?? 0.0;
+    size = d[i + 5] ?? 0.0;
+    light = d[i + 6] ?? 0.0;
+    deg = d[i + 7] ?? 0.0;
+    pu = d[i + 8] ?? 0.0;
+    pv = d[i + 9] ?? 0.0;
+    mirror = (d[i + 10] ?? 0.0) != 0.0;
+    if pic >= 0 && pic < self.pictures {
+      sn = sin(deg * PI / 180.0);
+      cs = cos(deg * PI / 180.0);
+      bx = x - size / 2.0 + pu * size;
+      by = y + (1.0 - pv) * size;
+      // the picture's corners about its pivot, turned: top-left, top-right, bottom-right, bottom-left
+      c: vector<float> = [];
+      for uv in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+        px = (uv.0 - pu) * size;
+        py = (pv - uv.1) * size;
+        c += [bx + px * cs + py * sn, by - px * sn + py * cs, if mirror { 1.0 - uv.0 } else { uv.0 }, uv.1];
+      }
+      sx = (pic % SLOTS) as single;
+      sy = (pic / SLOTS) as single;
+      for k in [0, 1, 2, 0, 2, 3] {
+        verts += [
+          (c[4 * k] ?? 0.0) as single, (c[4 * k + 1] ?? 0.0) as single, z as single, (c[4 * k + 2] ?? 0.0) as single,
+          (c[4 * k + 3] ?? 0.0) as single, sx, sy, 0.0f, 0.0f, (NO_LIGHT as float) as single, 1.0f, light as single,
+        ];
+      }
+      if (d[i] ?? 0.0) as integer == keep_seen {
+        for k in 0..4 { hero += [c[4 * k] ?? 0.0, c[4 * k + 1] ?? 0.0, z]; }
+      }
+    }
+    i += 11;
+  }
+  self.card_count = len(verts) / VERTEX;
+  if len(verts) > 0 { self.cards.update(verts); }
+  if keep_seen >= 0 && !self.free { self.uncover(hero); }
+}
+
+// Hide every wall group that covers the card with corners `c` (four of x, y, z) and reaches
+// nearer than it, and show those hidden before that no longer do.  The tiles holding a group
+// that changed are given to the GPU again.
+fn uncover(self: Scene, c: const vector<float>) {
+  want: vector<integer> = [];
+  if len(c) >= 12 {
+    a = wall_of(0, c[0..9]);
+    b = wall_of(0, c[0..3] + c[6..12]);
+    x0 = least(a[1] ?? 0, b[1] ?? 0);
+    y0 = least(a[2] ?? 0, b[2] ?? 0);
+    x1 = -least(-(a[3] ?? 0), -(b[3] ?? 0));
+    y1 = -least(-(a[4] ?? 0), -(b[4] ?? 0));
+    near = least(a[5] ?? 0, b[5] ?? 0);
+    for ws in self.walls {
+      j = 0;
+      while j + 6 <= len(ws) {
+        g = ws[j] ?? 0;
+        covers = (ws[j + 1] ?? 0) < x1 && x0 < (ws[j + 3] ?? 0) && (ws[j + 2] ?? 0) < y1 && y0 < (ws[j + 4] ?? 0)
+          && (ws[j + 1] ?? 0) < (ws[j + 3] ?? 0) && (ws[j + 2] ?? 0) < (ws[j + 4] ?? 0) && x0 < x1 && y0 < y1;
+        if covers && (ws[j + 5] ?? 0) < near {
+          known = false;
+          for w in want { if w == g { known = true; } }
+          if !known { want += [g]; }
+        }
+        j += 6;
+      }
+    }
+  }
+  changed: vector<integer> = [];
+  for h in self.hidden {
+    still = false;
+    for w in want { if w == h { still = true; } }
+    if !still { changed += [h]; }
+  }
+  for w in want {
+    was = false;
+    for h in self.hidden { if h == w { was = true; } }
+    if !was { changed += [w]; }
+  }
+  if len(changed) == 0 { return; }
+  self.hidden = want;
+  for ws in self.walls {
+    touched = false;
+    j = 0;
+    while j + 6 <= len(ws) && !touched {
+      for g in changed { if g == (ws[j] ?? -1) { touched = true; } }
+      j += 6;
+    }
+    if touched {
+      verts = self.vertices(self.faces[ws#index] ?? []);
+      self.counts[ws#index] = len(verts) / VERTEX;
+      again = self.buffers[ws#index] ?? continue; // walls and buffers grow together
+      again.update(verts);
+    }
+  }
+}
+
+/// The groups hidden now: the walls cut away in front of the actor that is never hidden.
+pub fn hidden_groups(self: const Scene) -> vector<integer> {
+  self.hidden
+}
+
+/// A picture over everything — the status line, talk bubbles — `w` x `h` RGB565 values row by
+/// row, NONE where it is clear, each drawn `scale` x `scale` from the screen's top-left.  One
+/// with too few values takes it away.
+pub fn set_overlay(self: Scene, dev: const gpu::Device, px: const vector<i32>, w: integer, h: integer, scale: integer) {
+  if w <= 0 || h <= 0 || scale <= 0 || len(px) < w * h {
+    self.over_on = false;
+    return;
+  }
+  if self.over_picture.width() != w || self.over_picture.height() != h {
+    self.over_picture = dev.texture(w, h);
+    self.over_picture.nearest(true);
+  }
+  wide_px: vector<u32> = [];
+  for v in px[0..w * h] { wide_px += [(wide(v) & 4294967295) as u32]; }
+  self.over_picture.put(0, 0, wide_px, w, h);
+  // the picture's rectangle from the screen's top-left, in clip space; its first row on top
+  right = ((2.0 * (w * scale) as float / self.width as float) ?? 0.0) - 1.0;
+  low = 1.0 - ((2.0 * (h * scale) as float / self.height as float) ?? 0.0);
+  self.over_quad.update([
+    -1.0f, 1.0f, 0.0f, 0.0f, right as single, 1.0f, 1.0f, 0.0f, right as single, low as single, 1.0f, 1.0f,
+    -1.0f, 1.0f, 0.0f, 0.0f, right as single, low as single, 1.0f, 1.0f, -1.0f, low as single, 0.0f, 1.0f,
+  ]);
+  self.over_on = true;
+}
+
+/// Whether this implementation offers a free camera: it does.  One on a CPU offers the fixed
+/// camera only, so a view asks before it chooses.
+pub fn offers_free_camera(self: const Scene) -> boolean {
+  self.into >= 0
+}
+
+/// The free camera: an eye, a point looked at, and a field of view in degrees, in perspective.
+/// Cards stand as for the fixed camera, facing south, and no wall is cut away.
+pub fn free_camera(self: Scene, eye: (float, float, float), at: (float, float, float), field: float) {
+  self.free = true;
+  aspect = (self.width as float / self.height as float) ?? 1.0;
+  self.view = times(perspective(field, aspect, 0.05, 200.0), look(eye, at));
+}
+
+// A perspective projection, column-major: `field` degrees high, depth -1 at `near` to 1 at `far`.
+fn perspective(field: float, aspect: float, near: float, far: float) -> vector<float> {
+  f = (1.0 / tan(field * PI / 360.0)) ?? 1.0;
+  [
+    (f / aspect) ?? f, 0.0, 0.0, 0.0, 0.0, f, 0.0, 0.0, 0.0, 0.0, ((far + near) / (near - far)) ?? -1.0, -1.0,
+    0.0, 0.0, ((2.0 * far * near) / (near - far)) ?? 0.0, 0.0,
+  ]
+}
+
+// The view from `eye` towards `at`, y up, column-major.
+fn look(eye: (float, float, float), at: (float, float, float)) -> vector<float> {
+  fx = at.0 - eye.0;
+  fy = at.1 - eye.1;
+  fz = at.2 - eye.2;
+  fl = sqrt(fx * fx + fy * fy + fz * fz);
+  if fl == 0.0 { fl = 1.0; }
+  fx = (fx / fl) ?? 0.0;
+  fy = (fy / fl) ?? 0.0;
+  fz = (fz / fl) ?? 0.0;
+  // right = forward x up, with up (0, 1, 0)
+  rx = -fz;
+  rz = fx;
+  rl = sqrt(rx * rx + rz * rz);
+  if rl == 0.0 { rx = 1.0; rz = 0.0; rl = 1.0; }
+  rx = (rx / rl) ?? 1.0;
+  rz = (rz / rl) ?? 0.0;
+  // up = right x forward
+  ux = -rz * fy;
+  uy = rz * fx - rx * fz;
+  uz = rx * fy;
+  [
+    rx, ux, -fx, 0.0, 0.0, uy, -fy, 0.0, rz, uz, -fz, 0.0,
+    -(rx * eye.0 + rz * eye.2), -(ux * eye.0 + uy * eye.1 + uz * eye.2), fx * eye.0 + fy * eye.1 + fz * eye.2, 1.0,
+  ]
+}
+
+// a times b, both column-major.
+fn times(a: const vector<float>, b: const vector<float>) -> vector<float> {
+  out: vector<float> = [];
+  for c in 0..4 {
+    for r in 0..4 {
+      v = 0.0;
+      for k in 0..4 { v += (a[k * 4 + r] ?? 0.0) * (b[c * 4 + k] ?? 0.0); }
+      out += [v];
+    }
+  }
+  out
+}
+
+/// The fixed camera, from the south: the screen's top-left at world pixel (px, py), where cell
+/// (x, z) on layer y lies at (x * WIDE, z * DEEP - y * TALL).
+pub fn fixed_camera(self: Scene, px: integer, py: integer) {
+  self.free = false;
+  self.cam_x = px;
+  self.cam_y = py;
+}
+
+// The fixed camera as a matrix, column-major: a parallel projection onto the screen's pixels,
+// the depth growing away from the camera — nearer is higher and further south.
+fn fixed_matrix(self: const Scene) -> vector<float> {
+  w = self.width as float;
+  h = self.height as float;
+  far = 2048.0;
+  [
+    (WIDE as float * 2.0 / w) ?? 0.0, 0.0, 0.0, 0.0,
+    0.0, (TALL as float * 2.0 / h) ?? 0.0, (-(DEEP as float) / far) ?? 0.0, 0.0,
+    0.0, (-(DEEP as float) * 2.0 / h) ?? 0.0, (-(TALL as float) / far) ?? 0.0, 0.0,
+    ((-2.0 * self.cam_x as float / w) ?? 0.0) - 1.0, 1.0 + ((2.0 * self.cam_y as float / h) ?? 0.0), 0.0, 1.0,
+  ]
+}
+
+// Draw the scene inside the pass in progress.
+fn draw_in(self: Scene, dev: gpu::Device) {
+  self.values.mat4(0, if self.free { self.view } else { self.fixed_matrix() });
+  dev.bind(self.land);
+  dev.uniforms(self.values);
+  dev.sample(0, self.atlas);
+  dev.sample(1, self.lights);
+  for b in self.buffers {
+    n = self.counts[b#index] ?? 0;
+    if n > 0 {
+      dev.vertices(b);
+      dev.draw(0, n);
+    }
+  }
+  if self.card_count > 0 {
+    dev.vertices(self.cards);
+    dev.draw(0, self.card_count);
+  }
+  if self.over_on {
+    dev.bind(self.over);
+    dev.sample(0, self.over_picture);
+    dev.vertices(self.over_quad);
+    dev.draw(0, 6);
+  }
+}
+
+/// Draw the scene into the window: a pass of its own, cleared to the sky.
+pub fn draw(self: Scene, dev: gpu::Device) {
+  dev.begin_window(gpu::CLEAR, self.sky);
+  self.draw_in(dev);
+  dev.end();
+}
+
+/// Draw the scene into `target` (made for the kind the scene was made for).
+pub fn draw_into(self: Scene, dev: gpu::Device, target: const gpu::Target) {
+  dev.begin(target, gpu::CLEAR, self.sky);
+  self.draw_in(dev);
+  dev.end();
+}
