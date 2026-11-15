@@ -142,3 +142,19 @@ fn test_the_free_camera_looks_where_it_is_pointed() {
   c = dev.capture();
   assert(at(c, 10, 10) == GREEN && at(c, 60, 44) == SKY, "the fixed camera again: {at(c, 10, 10):x}");
 }
+
+fn test_a_scene_far_from_the_origin_is_drawn_as_one_near_it() {
+  if !display() { return; }
+  dev = gpu::open(gpu_gl::table(), 64, 48, "scene-far") ?? return assert(false, "no device");
+  scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, SKY) ?? return assert(false, "no scene");
+  _ = scene.add_picture([for _ in 0..256 { 2016 as i32 }]);
+  // the ground of cell (0, 60), 60 rows south of the origin as a town's street is, and the camera
+  // over it: its depth is measured from the camera, not from the origin, so it is not cut off
+  far = [0.0, -1.0, 4.0, 0.0, 60.0, 0.0, 1.0,
+         0.0, 0.0, 60.0, 0.0, 0.0, 1.0, 1.0, 0.0, 60.0, 1.0, 0.0, 1.0, 1.0, 0.0, 61.0, 1.0, 1.0, 1.0, 0.0, 0.0, 61.0, 0.0, 1.0, 1.0];
+  scene.set_tile(dev, 1, s(far));
+  scene.fixed_camera(0, 60 * 40);
+  scene.draw(dev);
+  c = dev.capture();
+  assert(at(c, 10, 10) == GREEN && at(c, 10, 40) == SKY, "the cell 60 rows south: {at(c, 10, 10):x} {at(c, 10, 40):x}");
+}
