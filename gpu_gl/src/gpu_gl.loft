@@ -1,0 +1,24 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The OpenGL backend of `gpu`.
+//
+//   dev = gpu::open(gpu_gl::table(), 960, 720, "view") ?? return;
+//
+// A game does not name this library: its host package asks each backend in turn.  A program's
+// source for it carries the tag "glsl-330" and is GLSL 3.30 (`#version 330 core`), which this
+// backend also gives to OpenGL ES 3 and WebGL2:
+//   - the inputs read per vertex are `layout(location = 0)` onwards, in the program's order,
+//     and the inputs read per copy follow them;
+//   - the uniform block is the source's one `layout(std140) uniform` block; a block laid out
+//     otherwise than the program declares builds no pipeline, and stderr shows both layouts;
+//   - the sampler of texture slot n is named `tex<n>`.
+
+fn gq_table() -> integer;
+#c "gq_table" "int64_t()"
+
+// This backend's table, for `gpu::open`; 0 on a machine it has no window host for.  `open`
+// answers null where the machine has no OpenGL.
+pub fn table() -> integer {
+  gq_table()
+}

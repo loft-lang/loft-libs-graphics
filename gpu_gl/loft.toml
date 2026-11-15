@@ -1,0 +1,34 @@
+[package]
+name = "gpu_gl"
+version = "0.1.0"
+loft = ">=2026.10.0"
+repository = "loft-libs-graphics"
+description = "The OpenGL backend of gpu: OpenGL 3.3 on Linux and macOS, OpenGL ES 3 on Android, WebGL2 in a page"
+categories  = ["graphics", "game"]
+
+# ⚠ FIRST release, so both floors are this release itself.
+api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
+data_compatible_with = "0.1.0"   # oldest own release whose stored data this reads
+
+[dependencies]
+gpu = ">=0.1.0"
+
+[library]
+entry = "src/gpu_gl.loft"
+
+# The backend's table in C99 (c/gpu_gl.c), over the window hosts and GL table the graphics
+# library's C holds (c/gl_base.h, derived from it by c/derive_base.sh).  The window system and
+# OpenGL are opened at run time; a page's WebGL2 comes through its `loft_gl` imports.
+[c]
+shim = "c/gpu_gl.c"
+
+# What this package opens that it did not write (loft THIRDPARTY.md).
+[thirdparty.opengl]
+kind     = "system"
+names    = ["GL", "OpenGL", "GLESv3", "EGL"]
+provider = "the GPU driver's OpenGL (Mesa or the vendor driver on Linux, macOS's OpenGL framework, Android's OpenGL ES), opened at run time"
+
+[thirdparty.windowing]
+kind     = "system"
+names    = ["X11", "Xtst", "AppKit", "objc", "CoreGraphics"]
+provider = "the OS windowing and input libraries (Xorg / XWayland and XTest on Linux, AppKit and CoreGraphics on macOS), opened at run time"
