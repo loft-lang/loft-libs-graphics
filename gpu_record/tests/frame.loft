@@ -1,0 +1,278 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// A scripted frame through `gpu`, read back from the recording backend.  Every expected log is
+// written by hand from the calls above it: handles count from 1 in the order they are made, and
+// a block's offsets are gpu's layout (a matrix 16 floats, an `F4` on a multiple of 4).
+use gpu;
+use gpu_record;
+
+// Three inputs per vertex; a block of a matrix, a vector, a float and a vector; one texture.
+fn view() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3, gpu::F3, gpu::F2],
+    instance: [],
+    block: [gpu::MAT4, gpu::F4, gpu::F1, gpu::F4],
+    textures: 1,
+    sources: [gpu::source("other", "not", "these"), gpu::source("record", "v", "f")],
+  }
+}
+
+// One input per vertex and two per copy; a block of one pair; no texture.
+fn copies() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3],
+    instance: [gpu::F4, gpu::F2],
+    block: [gpu::F2],
+    textures: 0,
+    sources: [gpu::source("record", "v", "f")],
+  }
+}
+
+// A log: each line with its newline.
+fn lines(of: const vector<text>) -> text {
+  out = "";
+  for l in of { out += "{l}\n"; }
+  out
+}
+
+fn matrix(first: float) -> vector<float> {
+  m: vector<float> = [for _ in 0..16 { 0.0 }];
+  m[0] = first;
+  m
+}
+
+fn open() -> gpu::Device {
+  gpu_record::reset();
+  gpu::open(gpu_record::table(), 64, 48, "frame")!
+}
+
+fn frame_log() -> text {
+  lines([
+    "open 1 64x48 \"frame\"",
+    "pipeline 2 vertex 3 3 2 instance block 16x1@0 4x1@16 1x1@20 4x1@24 size 28 textures 1",
+    "  state shape 0 depth 2 blend 0 cull 0 into 0",
+    "texture 3 8x8 colour",
+    "texture_nearest 3 on",
+    "buffer 4 floats 16",
+    "begin 0 clear ff102030",
+    "  bind 2",
+    "  uniforms floats 28 first 2.000 last 7.500",
+    "  sample 0 texture 3",
+    "  vertices 4",
+    "  draw from 0 count 2 copies 0",
+    "end",
+    "present",
+  ])
+}
+
+fn test_a_frame_arrives_at_the_backend_call_for_call() {
+  dev = open();
+  pipe = dev.pipeline(view(), gpu::State { depth: gpu::DEPTH_TEST_WRITE })!;
+  atlas = dev.texture(8, 8);
+  atlas.nearest(true);
+  mesh = dev.buffer([for _ in 0..16 { 0.0f }]);
+  u = pipe.block();
+  u.mat4(0, matrix(2.0));
+  u.f4(3, 0.0, 0.0, 0.0, 7.5);
+  dev.begin_window(gpu::CLEAR, 0xFF102030);
+  dev.bind(pipe);
+  dev.uniforms(u);
+  dev.sample(0, atlas);
+  dev.vertices(mesh);
+  dev.draw(0, 2);
+  dev.end();
+  dev.present();
+  assert(gpu_record::log() == frame_log(), "the frame's record:\n{gpu_record::log()}");
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+}
+
+fn copies_log() -> text {
+  lines([
+    "open 1 64x48 \"frame\"",
+    "pipeline 2 vertex 3 instance 4 2 block 2x1@0 size 4 textures 0",
+    "  state shape 0 depth 0 blend 12 cull 1 into 1",
+    "texture 3 32x16 colour",
+    "target 4 colour 3 depth 0",
+    "buffer 5 floats 9",
+    "buffer 6 floats 24",
+    "index_buffer 7 count 3",
+    "begin 4 keep",
+    "  viewport 0,0 32x16",
+    "  bind 2",
+    "  uniforms floats 4 first 32.000 last 0.000",
+    "  vertices 5",
+    "  instances 6 from 12",
+    "  scissor 2,3 10x5",
+    "  draw from 0 count 3 copies 2",
+    "  scissor off",
+    "  indices 7",
+    "  draw from 0 count 3 indexed copies 0",
+    "end",
+    "buffer_update 6 floats 12",
+  ])
+}
+
+fn test_copies_indices_a_target_and_a_scissor_arrive_too() {
+  dev = open();
+  // blend(ONE, ONE_MINUS_SRC_ALPHA) is 1 + 8 * 1 + 3
+  state = gpu::State { blend: gpu::blend(gpu::ONE, gpu::ONE_MINUS_SRC_ALPHA), cull: gpu::CULL_BACK, into: gpu::INTO_COLOUR };
+  pipe = dev.pipeline(copies(), state)!;
+  scene = dev.texture(32, 16);
+  target = dev.colour_target(scene);
+  mesh = dev.buffer([for _ in 0..9 { 0.0f }]);
+  per_copy = dev.buffer([for _ in 0..24 { 0.0f }]);
+  order = dev.index_buffer([0, 1, 2]);
+  u = pipe.block();
+  u.f2(0, 32.0, 16.0);
+  dev.begin(target, gpu::KEEP, 0);
+  dev.viewport(0, 0, 32, 16);
+  dev.bind(pipe);
+  dev.uniforms(u);
+  dev.vertices(mesh);
+  dev.instances(per_copy, 12);
+  dev.scissor(2, 3, 10, 5);
+  dev.draw_copies(3, 2);
+  dev.no_scissor();
+  dev.indices(order);
+  dev.draw_indexed(3);
+  dev.end();
+  per_copy.update([for _ in 0..12 { 0.0f }]);
+  assert(gpu_record::log() == copies_log(), "the record:\n{gpu_record::log()}");
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  assert(per_copy.floats() == 12 && order.count() == 3, "the lengths follow the data");
+}
+
+// What the backend saw after `open`: nothing, when every call was refused.
+fn after_open() -> text {
+  gpu_record::log()[len("open 1 64x48 \"frame\"\n")..]
+}
+
+fn test_a_call_that_breaks_the_rule_never_reaches_the_backend() {
+  dev = open();
+  mesh = dev.buffer([0.0f, 0.0f, 0.0f]);
+  atlas = dev.texture(8, 8);
+  pipe = dev.pipeline(view(), gpu::State {})!;
+  into_colour = dev.pipeline(view(), gpu::State { into: gpu::INTO_COLOUR })!;
+  other = dev.pipeline(copies(), gpu::State {})!;
+  u = pipe.block();
+  made = gpu_record::log();
+
+  dev.draw(0, 3); // outside a pass
+  dev.bind(pipe); // outside a pass
+  dev.end(); // no pass to end
+  dev.begin_window(gpu::KEEP, 0);
+  dev.begin_window(gpu::KEEP, 0); // a pass inside a pass
+  dev.present(); // inside a pass
+  dev.vertices(mesh); // no pipeline yet
+  dev.bind(into_colour); // built for a texture, this pass draws into the window
+  dev.bind(pipe);
+  dev.draw(0, 3); // no vertices
+  dev.vertices(mesh);
+  dev.draw(0, 3); // no block
+  dev.uniforms(other.block()); // another pipeline's block
+  dev.uniforms(u);
+  dev.draw(0, 3); // texture slot 0 empty
+  dev.sample(1, atlas); // the pipeline has one slot
+  dev.instances(mesh, 0); // the pipeline reads nothing per copy
+  dev.sample(0, atlas);
+  dev.draw_indexed(3); // no indices
+  u.f2(1, 1.0, 2.0); // field 1 is an F4
+  dev.uniforms(u); // a marked block
+  dev.bind(pipe); // a second bind forgets the first one's block
+  dev.vertices(mesh);
+  dev.sample(0, atlas);
+  dev.draw(0, 3); // no block since the bind
+  dev.end();
+
+  want = [
+    "draw: outside a pass", "bind: outside a pass", "end: outside a pass",
+    "begin: the pass before it has not ended", "present: a pass has not ended",
+    "vertices: no pipeline is bound in this pass",
+    "bind: the pipeline was built for another kind of target than this pass draws into",
+    "draw: no vertices were given since the pipeline was bound",
+    "draw: the pipeline's block was not given since it was bound",
+    "uniforms: the block is another pipeline's",
+    "draw: a texture slot of the pipeline was not given since it was bound",
+    "sample: the pipeline has no texture slot 1",
+    "instances: the pipeline declares no input per copy",
+    "draw_indexed: no indices were given since the pipeline was bound",
+    "uniforms: a field of the block was set as another kind than it was declared",
+    "draw: the pipeline's block was not given since it was bound",
+  ];
+  got = dev.refusals();
+  assert(len(got) == len(want), "{len(want)} refusals, got {len(got)}: {got}");
+  for w in want { assert((got[w#index] ?? "") == w, "refusal {w#index}: {got[w#index] ?? ""}"); }
+  // Of the 26 calls only the pass, the binds and what was given to a bound pipeline arrived: no draw.
+  seen = gpu_record::log()[len(made)..];
+  expect = lines([
+    "begin 0 keep",
+    "  bind 4",
+    "  vertices 2",
+    "  uniforms floats 28 first 0.000 last 0.000",
+    "  sample 0 texture 3",
+    "  bind 4",
+    "  vertices 2",
+    "  sample 0 texture 3",
+    "end",
+  ]);
+  assert(seen == expect, "what arrived:\n{seen}");
+}
+
+fn make_and_drop(dev: const gpu::Device) -> integer {
+  mesh = dev.buffer([0.0f]);
+  order = dev.index_buffer([0]);
+  colour = dev.texture(4, 4);
+  depth = dev.depth_texture(4, 4);
+  target = dev.target(colour, depth);
+  pipe = dev.pipeline(copies(), gpu::State {})!;
+  // six objects are held while their owners live
+  held = gpu_record::live();
+  assert(mesh.floats() == 1 && order.count() == 1 && colour.width() == 4, "the objects are used");
+  held
+}
+
+fn test_every_object_is_released_when_its_owner_dies() {
+  dev = open();
+  held = make_and_drop(dev);
+  assert(held == 6, "six objects held inside, got {held}");
+  assert(gpu_record::live() == 0, "none held after their owners died, got {gpu_record::live()}");
+  assert(len(after_open()) > 0, "the backend saw them made and released");
+}
+
+fn test_an_object_outliving_its_device_dies_quietly() {
+  dev = open();
+  mesh = dev.buffer([0.0f]);
+  dev.close();
+  assert(gpu_record::live() == 0, "closing the device freed its buffer");
+  closed = gpu_record::log();
+  assert(closed.ends_with("close 1\n"), "the close is the last line:\n{closed}");
+  assert(mesh.floats() == 1, "the buffer's own record stays readable");
+}
+
+fn test_a_program_without_this_backends_source_builds_no_pipeline() {
+  dev = open();
+  p = gpu::Program { vertex: [gpu::F3], instance: [], block: [], textures: 0, sources: [gpu::source("other", "v", "f")] };
+  assert(dev.pipeline(p, gpu::State {}) == null, "no source tagged for this backend");
+  assert(after_open() == "", "the backend was not asked:\n{after_open()}");
+}
+
+fn test_a_block_with_a_three_float_field_builds_no_pipeline() {
+  dev = open();
+  p = gpu::Program { vertex: [gpu::F3], instance: [], block: [gpu::F3], textures: 0, sources: [gpu::source("record", "v", "f")] };
+  assert(dev.pipeline(p, gpu::State {}) == null, "a block takes no F3");
+  assert(after_open() == "", "the backend was not asked:\n{after_open()}");
+}
+
+fn test_a_backend_that_compiles_nothing_refuses_a_source_and_takes_a_blob() {
+  dev = open();
+  gpu_record::refuse_source(true);
+  assert(dev.pipeline(copies(), gpu::State {}) == null, "source text is refused in this mode");
+  ahead = gpu::Program { vertex: [gpu::F3], instance: [], block: [], textures: 0, sources: [gpu::source("record", "", "")] };
+  assert(dev.pipeline(ahead, gpu::State {}) != null, "a shader compiled ahead passes");
+  gpu_record::refuse_source(false);
+}
+
+fn test_no_table_opens_no_device() {
+  assert(gpu::open(0, 64, 48, "none") == null, "a backend whose stack is absent answers table 0");
+}

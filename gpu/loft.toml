@@ -1,0 +1,19 @@
+[package]
+name = "gpu"
+version = "0.1.0"
+loft = ">=2026.10.0"
+repository = "loft-libs-graphics"
+description = "Drawing on a GPU through pipelines, passes and uniform blocks, with no graphics stack named: a backend library beneath it draws"
+categories  = ["graphics", "game"]
+
+# ⚠ FIRST release, so both floors are this release itself.
+api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
+data_compatible_with = "0.1.0"   # oldest own release whose stored data this reads
+
+[library]
+entry = "src/gpu.loft"
+
+# The C part only passes each call on to the backend's table (c/gpu_backend.h, which a backend's
+# own C includes).  It opens no library and names no graphics stack.
+[c]
+shim = "c/gpu.c"

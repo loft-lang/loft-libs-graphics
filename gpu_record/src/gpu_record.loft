@@ -1,0 +1,51 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// A GPU backend that draws nothing and writes down every call it receives.
+//
+//   gpu_record::reset();
+//   dev = gpu::open(gpu_record::table(), 64, 48, "test") ?? return;
+//   …the program's drawing…
+//   assert(gpu_record::log() == EXPECTED);
+//
+// It needs no display, so a program's drawing is tested on any machine: the log names each
+// pipeline, pass and draw in order, with handles numbered from 1 as they are made.  A program
+// gives it sources under the tag "record"; their text is not read.
+
+fn rec_table() -> integer;
+#c "rec_table" "int64_t()"
+fn rec_log() -> text;
+#c "rec_log" "const char*()"
+fn rec_reset();
+#c "rec_reset" "void()"
+fn rec_live() -> integer;
+#c "rec_live" "int64_t()"
+fn rec_refuse_source(on: integer);
+#c "rec_refuse_source" "void(int64_t)"
+
+// This backend's table, for `gpu::open`.  It is there on every machine.
+pub fn table() -> integer {
+  rec_table()
+}
+
+// Every call received since the last `reset`, one line each.
+pub fn log() -> text {
+  rec_log()
+}
+
+// Forget the log and every object, number handles from 1 again, and take sources again.
+pub fn reset() {
+  rec_reset();
+}
+
+// How many buffers, textures, targets and pipelines are held now: 0 once their owners died.
+pub fn live() -> integer {
+  rec_live()
+}
+
+// Refuse (or take again) a pipeline whose shader arrives as text — what a machine that compiles
+// no shader while a program runs does.  A source with empty text passes: it stands for a shader
+// compiled ahead.
+pub fn refuse_source(on: boolean) {
+  rec_refuse_source(if on { 1 } else { 0 });
+}

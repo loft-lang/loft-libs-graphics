@@ -1,0 +1,32 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// A uniform block's layout.  The expected numbers are not this library's: they are the byte
+// offsets a GLSL 3.30 std140 block and a Metal structure of the same eleven fields both report
+// (measured on an Apple-silicon Mac), divided by four to count floats.
+use gpu;
+
+// vec4 a; float b; vec2 c; float d; vec4 e; vec2 f; float n; vec4 l[3]; vec4 k[3]; mat4 m; float z
+fn eleven() -> vector<integer> {
+  [gpu::F4, gpu::F1, gpu::F2, gpu::F1, gpu::F4, gpu::F2, gpu::F1, gpu::f4s(3), gpu::f4s(3), gpu::MAT4, gpu::F1]
+}
+
+fn test_a_block_starts_each_field_where_both_stacks_measured_it() {
+  bytes = [0, 16, 24, 32, 48, 64, 72, 80, 128, 176, 240, 256];
+  got = gpu::layout(eleven());
+  assert(len(got) == 12, "eleven fields and the size, got {len(got)}");
+  for b in bytes {
+    assert(4 * (got[b#index] ?? -1) == b, "field {b#index} at byte {4 * (got[b#index] ?? -1)}, measured {b}");
+  }
+}
+
+fn test_a_float_after_a_float_packs_and_a_pair_starts_on_two() {
+  // floats at 0 and 1; the pair skips float 3 to start on 2... which is free, so 2; size 4
+  assert("{gpu::layout([gpu::F1, gpu::F1, gpu::F2])}" == "[0,1,2,4]", "got {gpu::layout([gpu::F1, gpu::F1, gpu::F2])}");
+  // one float, then a pair on the next multiple of two, then a float behind it; size 8
+  assert("{gpu::layout([gpu::F1, gpu::F2, gpu::F1])}" == "[0,2,4,8]", "got {gpu::layout([gpu::F1, gpu::F2, gpu::F1])}");
+}
+
+fn test_an_empty_block_has_no_size() {
+  assert("{gpu::layout([])}" == "[0]", "got {gpu::layout([])}");
+}

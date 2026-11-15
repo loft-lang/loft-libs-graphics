@@ -22,6 +22,8 @@ All four are published to the registry and installable today.
 |---|---|---|
 | [`graphics/`](graphics/) | `graphics` — drawing primitives, 2D canvas + 3D scene rendering, OpenGL/WebGL bindings | v0.5.5 |
 | [`imaging/`](imaging/) | `imaging` — PNG load/save, image manipulation | v0.2.2 |
+| [`gpu/`](gpu/) | `gpu` — drawing on a GPU through pipelines, passes and uniform blocks, with no graphics stack named | v0.1.0 |
+| [`gpu_record/`](gpu_record/) | `gpu_record` — a `gpu` backend that draws nothing and writes down every call, for tests | v0.1.0 |
 | [`tiles/`](tiles/) | `tiles` — tile sheets, map layers and sprites drawn at a surface's own resolution through a camera | v0.1.0 |
 | [`shapes/`](shapes/) | `shapes` — 2D collision detection | v0.4.1 |
 | [`gridmesh/`](gridmesh/) | `gridmesh` — chunk-local mesh generation primitives | v0.2.1 |
