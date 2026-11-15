@@ -330,6 +330,16 @@ pub fn key_down(self: const Device, key: integer) -> boolean {
   gp_key_down(self.handle, key) != 0
 }
 
+// Which keys are down now: 256 flags by key code, the form `screen::keys()` answers and
+// `input::input_tick_from_state` takes, in the same codes (a letter its lower-case character,
+// the arrows 128 to 131, F1 to F12 135 to 146) — so a view in a device's window reads its keys
+// as one in `screen`'s does.
+pub fn keys(self: const Device) -> vector<boolean> {
+  out: vector<boolean> = [];
+  for k in 0..256 { out += [gp_key_down(self.handle, k) != 0]; }
+  out
+}
+
 // The pointer's place in the window, in pixels from the top left.
 pub fn pointer_x(self: const Device) -> integer {
   gp_pointer(self.handle, 0)

@@ -282,6 +282,10 @@ fn test_input_a_small_machines_pixels_and_a_targets_pixels_reach_the_backend() {
   // the recording backend has no keys, no pointer and no events: each answers nothing
   assert(!dev.key_down(65) && dev.pointer_x() == 0 && dev.pointer_y() == 0 && dev.buttons() == 0, "no input");
   assert(len(dev.typed()) == 0 && len(dev.events()) == 0, "no text, no events");
+  held = dev.keys();
+  down = 0;
+  for k in held { if k { down += 1; } }
+  assert(len(held) == 256 && down == 0, "256 flags, none down: {len(held)} {down}");
   t = dev.texture(2, 1);
   // 63488 is five bits of red (f800), 2016 six of green
   t.put_rgb565(0, 0, [63488 as i32, 2016 as i32], 2, 1);

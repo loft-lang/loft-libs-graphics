@@ -74,7 +74,7 @@ whether the frame was drawn on the GPU or on the CPU.  For it a device also answ
 
 | Call | What it answers |
 |---|---|
-| `dev.key_down(key)`, `pointer_x()`, `pointer_y()`, `buttons()` | What the window's keys and pointer hold now |
+| `dev.keys()`, `dev.key_down(key)`, `pointer_x()`, `pointer_y()`, `buttons()` | What the window's keys and pointer hold now; `keys()` is 256 flags in `screen::keys()`'s form and codes |
 | `dev.typed()`, then `dev.events()` | The bytes typed and the events queued since the last call (`EVENT_WORDS` numbers each) |
 | `texture.put_rgb565(x, y, pixels, w, h)` | A frame a small machine's renderer drew, taken as it is: 5 bits red, 6 green, 5 blue |
 | `dev.capture_of(target)` | A target's colour read back, the top row first, without showing it |
