@@ -16,6 +16,11 @@ use gpu_gl;
 use scene3d;
 use raster3d;
 
+// The numbers of a face, a light box or an actor as the scene takes them: single precision.
+fn s(v: const vector<float>) -> vector<single> {
+  [for x in v { x as single }]
+}
+
 fn rgb565(r: integer, g: integer, b: integer) -> integer { ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3) }
 
 fn wide(v: integer) -> integer {
@@ -84,11 +89,11 @@ fn main() {
 
   cpu = raster3d::new_scene(sky) ?? return;
   for p in pics { _ = raster3d::add_picture(cpu, p); }
-  raster3d::set_tile(cpu, 1, faces);
-  raster3d::set_light(cpu, light);
+  raster3d::set_tile(cpu, 1, s(faces));
+  raster3d::set_light(cpu, s(light));
   raster3d::build_scene(cpu, 0.0, 0.0, 0.0);
   raster3d::move_camera(cpu, cam.0, cam.1);
-  raster3d::set_actors(cpu, actors, 1);
+  raster3d::set_actors(cpu, s(actors), 1);
   raster3d::set_overlay(cpu, over, 100, 12, 2);
   frame: vector<i32> = [for _ in 0..raster3d::WIDTH * raster3d::HEIGHT { 0 as i32 }];
   raster3d::draw_frame(cpu, frame);
@@ -96,11 +101,11 @@ fn main() {
   dev = gpu::open(gpu_gl::table(), 64, 48, "scene") ?? return;
   scene = scene3d::new_scene(dev, gpu::INTO_COLOUR_DEPTH, wide(sky)) ?? return;
   for p in pics { _ = scene.add_picture(p); }
-  scene.set_tile(dev, 1, faces);
-  scene.set_light(light);
+  scene.set_tile(dev, 1, s(faces));
+  scene.set_light(s(light));
   scene.resize(800, 480);
   scene.fixed_camera(cam.0, cam.1);
-  scene.set_actors(actors, 1);
+  scene.set_actors(s(actors), 1);
   scene.set_overlay(dev, over, 100, 12, 2);
   println("hidden groups: {scene.hidden_groups()}");
   colour = dev.texture(800, 480);

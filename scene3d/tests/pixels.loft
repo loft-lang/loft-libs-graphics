@@ -9,6 +9,11 @@ use gpu;
 use gpu_gl;
 use scene3d;
 
+// The numbers of a face, a light box or an actor as the scene takes them: single precision.
+fn s(v: const vector<float>) -> vector<single> {
+  [for x in v { x as single }]
+}
+
 fn display() -> boolean {
   (env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1"
 }
@@ -38,23 +43,23 @@ fn test_a_face_takes_its_cells_light_once_it_is_given() {
   // and the ground of the cell east of it (x 48 .. 95 on the screen), lit from cell (0, 0) on layer 1
   east = [0.0, -1.0, 4.0, 0.0, 0.0, 1.0, 1.0,
           1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0];
-  scene.set_tile(dev, 1, ground() + east);
+  scene.set_tile(dev, 1, s(ground() + east));
   scene.fixed_camera(0, 0);
   scene.draw(dev);
   c = dev.capture();
   assert(at(c, 10, 10) == GREEN && at(c, 47, 39) == GREEN, "no light given yet: the corners' own, full: {at(c, 10, 10):x}");
   assert(at(c, 48, 10) == GREEN && at(c, 10, 40) == SKY, "the cells end at y 40: {at(c, 48, 10):x} {at(c, 10, 40):x}");
   // its cell dark, the cell east of it bright: only its own cell counts
-  scene.set_light([0.0, 0.0, 0.0, 2.0, 1.0, 0.0, 1.0]);
+  scene.set_light(s([0.0, 0.0, 0.0, 2.0, 1.0, 0.0, 1.0]));
   scene.draw(dev);
   c = dev.capture();
   assert(at(c, 10, 10) == BLACK, "its cell's light is 0: {at(c, 10, 10):x}");
-  scene.set_light([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+  scene.set_light(s([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]));
   scene.draw(dev);
   c = dev.capture();
   assert(at(c, 10, 10) == GREEN, "and full again, with no face given again: {at(c, 10, 10):x}");
   // the same cell on another layer does not light it
-  scene.set_light([1.0, 0.0, 0.0, 1.0, 1.0, 0.0]);
+  scene.set_light(s([1.0, 0.0, 0.0, 1.0, 1.0, 0.0]));
   scene.draw(dev);
   c = dev.capture();
   assert(at(c, 10, 10) == GREEN, "layer 1's light is not layer 0's: {at(c, 10, 10):x}");
@@ -69,10 +74,10 @@ fn test_an_actor_stands_over_the_land_and_the_overlay_over_both() {
   _ = scene.add_picture([for _ in 0..256 { 2016 as i32 }]);
   // 63488 is five bits of red
   _ = scene.add_picture([for _ in 0..256 { 63488 as i32 }]);
-  scene.set_tile(dev, 1, ground());
+  scene.set_tile(dev, 1, s(ground()));
   // A red card half a cell wide and tall, its foot in the middle of the cell: x 12 .. 35, from
   // y = 0.5 * 40 = 20 up to 20 - 24 = -4.
-  scene.set_actors([1.0, 1.0, 0.5, 0.0, 0.5, 0.5, 1.0, 0.0, 0.5, 1.0, 0.0], -1);
+  scene.set_actors(s([1.0, 1.0, 0.5, 0.0, 0.5, 0.5, 1.0, 0.0, 0.5, 1.0, 0.0]), -1);
   // Two overlay pixels, each four screen pixels square: blue, then clear.  31 is five bits of blue.
   scene.set_overlay(dev, [31 as i32, scene3d::NONE as i32], 2, 1, 4);
   scene.fixed_camera(0, 0);
@@ -87,17 +92,17 @@ fn test_an_actor_stands_over_the_land_and_the_overlay_over_both() {
   halves: vector<i32> = [];
   for _ in 0..16 { for x in 0..16 { halves += [(if x < 8 { 63488 } else { 31 }) as i32]; } }
   both = scene.add_picture(halves);
-  scene.set_actors([1.0, both as float, 0.5, 0.0, 0.5, 0.5, 1.0, 0.0, 0.5, 1.0, 0.0], -1);
+  scene.set_actors(s([1.0, both as float, 0.5, 0.0, 0.5, 0.5, 1.0, 0.0, 0.5, 1.0, 0.0]), -1);
   scene.draw(dev);
   c = dev.capture();
   assert(at(c, 14, 10) == RED && at(c, 33, 10) == BLUE, "as it is: {at(c, 14, 10):x} {at(c, 33, 10):x}");
-  scene.set_actors([1.0, both as float, 0.5, 0.0, 0.5, 0.5, 1.0, 0.0, 0.5, 1.0, 1.0], -1);
+  scene.set_actors(s([1.0, both as float, 0.5, 0.0, 0.5, 0.5, 1.0, 0.0, 0.5, 1.0, 1.0]), -1);
   scene.draw(dev);
   c = dev.capture();
   assert(at(c, 14, 10) == BLUE && at(c, 33, 10) == RED, "mirrored: {at(c, 14, 10):x} {at(c, 33, 10):x}");
   // Turned a quarter clockwise about its foot, the card lies to the right of the foot: its
   // top (the picture's left half is still on the card's own left, now up the screen) at x 24 .. 47.
-  scene.set_actors([1.0, 1.0, 0.5, 0.0, 0.5, 0.5, 1.0, 90.0, 0.5, 1.0, 0.0], -1);
+  scene.set_actors(s([1.0, 1.0, 0.5, 0.0, 0.5, 0.5, 1.0, 90.0, 0.5, 1.0, 0.0]), -1);
   scene.draw(dev);
   c = dev.capture();
   assert(at(c, 40, 14) == RED && at(c, 20, 14) == GREEN && at(c, 30, 2) == GREEN, "turned a quarter, it lies east of its foot: {at(c, 40, 14):x} {at(c, 20, 14):x} {at(c, 30, 2):x}");
@@ -113,7 +118,7 @@ fn test_the_free_camera_looks_where_it_is_pointed() {
   dev = gpu::open(gpu_gl::table(), 64, 48, "scene-free") ?? return assert(false, "no device");
   scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, SKY) ?? return assert(false, "no scene");
   _ = scene.add_picture([for _ in 0..256 { 2016 as i32 }]);
-  scene.set_tile(dev, 1, ground());
+  scene.set_tile(dev, 1, s(ground()));
   // From the south and above, looking at the middle of the cell: it is in the middle of the
   // frame, and the sky is over it.
   scene.free_camera((0.5, 1.5, 3.0), (0.5, 0.0, 0.5), 50.0);

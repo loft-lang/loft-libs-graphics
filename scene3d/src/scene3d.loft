@@ -143,7 +143,7 @@ pub struct Scene {
   slots: hash<Slot[key]>,
   // A tile's faces as they were given, its vertices on the GPU and how many it has; a dropped
   // tile keeps its place, empty.
-  faces: vector<vector<float>>,
+  faces: vector<vector<single>>,
   buffers: vector<gpu::Buffer>,
   counts: vector<integer>,
   // A tile's triangles that belong to a group, six numbers each: the group, the triangle's
@@ -236,13 +236,13 @@ pub fn add_picture(self: Scene, texels: const vector<i32>) -> integer {
 }
 
 // The vertices of the faces in `d` that are not hidden: a fan of triangles a face.
-fn vertices(self: const Scene, d: const vector<float>) -> vector<single> {
+fn vertices(self: const Scene, d: const vector<single>) -> vector<single> {
   out: vector<single> = [];
   i = 0;
   while i + 7 <= len(d) {
-    pic = (d[i] ?? 0.0) as integer;
-    group = (d[i + 1] ?? 0.0) as integer;
-    n = (d[i + 2] ?? 0.0) as integer;
+    pic = ((d[i] ?? 0.0f) as float) as integer;
+    group = ((d[i + 1] ?? 0.0f) as float) as integer;
+    n = ((d[i + 2] ?? 0.0f) as float) as integer;
     at = i + 7;
     if n < 3 || at + 6 * n > len(d) { break; }
     shown = pic >= 0 && pic < self.pictures;
@@ -254,10 +254,10 @@ fn vertices(self: const Scene, d: const vector<float>) -> vector<single> {
         for c in [0, t, t + 1] {
           k = at + 6 * c;
           out += [
-            (d[k] ?? 0.0) as single, (d[k + 1] ?? 0.0) as single, (d[k + 2] ?? 0.0) as single,
-            (d[k + 3] ?? 0.0) as single, (d[k + 4] ?? 0.0) as single, sx, sy,
-            (d[i + 3] ?? 0.0) as single, (d[i + 4] ?? 0.0) as single, (d[i + 5] ?? 0.0) as single,
-            (d[i + 6] ?? 0.0) as single, (d[k + 5] ?? 0.0) as single,
+            d[k] ?? 0.0f, d[k + 1] ?? 0.0f, d[k + 2] ?? 0.0f,
+            d[k + 3] ?? 0.0f, d[k + 4] ?? 0.0f, sx, sy,
+            d[i + 3] ?? 0.0f, d[i + 4] ?? 0.0f, d[i + 5] ?? 0.0f,
+            d[i + 6] ?? 0.0f, d[k + 5] ?? 0.0f,
           ];
         }
       }
@@ -271,7 +271,7 @@ fn vertices(self: const Scene, d: const vector<float>) -> vector<single> {
 /// another in `d`: the picture, the group it is hidden with (-1: none), its corners n, where
 /// its light comes from (the cell x, y, its layer, and a factor; layer NO_LIGHT: its corners'
 /// own), then n times x, y, z, u, v, light — u and v 0 .. 1 over the picture, light 0 .. 1.
-pub fn set_tile(self: Scene, dev: const gpu::Device, key: integer, d: const vector<float>) {
+pub fn set_tile(self: Scene, dev: const gpu::Device, key: integer, d: const vector<single>) {
   verts = self.vertices(d);
   old = self.slots[key];
   if old != null {
@@ -346,18 +346,18 @@ fn least(a: integer, b: integer) -> integer {
 }
 
 // Every triangle in `d` that belongs to a group.
-fn walls_of(d: const vector<float>) -> vector<integer> {
+fn walls_of(d: const vector<single>) -> vector<integer> {
   out: vector<integer> = [];
   i = 0;
   while i + 7 <= len(d) {
-    group = (d[i + 1] ?? 0.0) as integer;
-    n = (d[i + 2] ?? 0.0) as integer;
+    group = ((d[i + 1] ?? 0.0f) as float) as integer;
+    n = ((d[i + 2] ?? 0.0f) as float) as integer;
     at = i + 7;
     if n < 3 || at + 6 * n > len(d) { break; }
     if group >= 0 {
       for t in 1..n - 1 {
         c: vector<float> = [];
-        for k in [0, t, t + 1] { c += [d[at + 6 * k] ?? 0.0, d[at + 6 * k + 1] ?? 0.0, d[at + 6 * k + 2] ?? 0.0]; }
+        for k in [0, t, t + 1] { c += [(d[at + 6 * k] ?? 0.0f) as float, (d[at + 6 * k + 1] ?? 0.0f) as float, (d[at + 6 * k + 2] ?? 0.0f) as float]; }
         out += wall_of(group, c);
       }
     }
@@ -384,19 +384,19 @@ pub fn tiles(self: const Scene) -> integer {
 /// The light of cells as data: `d` is the layer, the box's corner (x0, y0), its width and
 /// height, then each cell's light (0 .. 1) row by row.  The faces lit from those cells are lit
 /// by it from the next frame; no face is given again.
-pub fn set_light(self: Scene, d: const vector<float>) {
+pub fn set_light(self: Scene, d: const vector<single>) {
   if len(d) < 5 { return; }
-  z = (d[0] ?? 0.0) as integer;
-  x0 = (d[1] ?? 0.0) as integer;
-  y0 = (d[2] ?? 0.0) as integer;
-  w = (d[3] ?? 0.0) as integer;
-  h = (d[4] ?? 0.0) as integer;
+  z = ((d[0] ?? 0.0f) as float) as integer;
+  x0 = ((d[1] ?? 0.0f) as float) as integer;
+  y0 = ((d[2] ?? 0.0f) as float) as integer;
+  w = ((d[3] ?? 0.0f) as float) as integer;
+  h = ((d[4] ?? 0.0f) as float) as integer;
   if w <= 0 || h <= 0 || len(d) < 5 + w * h { return; }
   layer = ((z % LIGHT_LAYERS) + LIGHT_LAYERS) % LIGHT_LAYERS;
   // A cell at a time: a box may lie across the map's edge, where it goes on at the other side.
   for j in 0..h {
     for i in 0..w {
-      l = d[5 + j * w + i] ?? 0.0;
+      l = (d[5 + j * w + i] ?? 0.0f) as float;
       v = (if l < 0.0 { 0.0 } else if l > 1.0 { 1.0 } else { l } * 65535.0 + 0.5) as integer;
       cx = (((x0 + i) % LIGHT_CELLS) + LIGHT_CELLS) % LIGHT_CELLS;
       cy = (((y0 + j) % LIGHT_CELLS) + LIGHT_CELLS) % LIGHT_CELLS;
@@ -413,21 +413,21 @@ pub fn set_light(self: Scene, d: const vector<float>) {
 /// stands in the plane the fixed camera looks at.  The actor `keep_seen` is never hidden from
 /// the fixed camera: the wall groups in front of it are cut away, and shown again when they no
 /// longer are (-1: none).
-pub fn set_actors(self: Scene, d: const vector<float>, keep_seen: integer) {
+pub fn set_actors(self: Scene, d: const vector<single>, keep_seen: integer) {
   verts: vector<single> = [];
   hero: vector<float> = [];
   i = 0;
   while i + 11 <= len(d) {
-    pic = (d[i + 1] ?? 0.0) as integer;
-    x = d[i + 2] ?? 0.0;
-    y = d[i + 3] ?? 0.0;
-    z = d[i + 4] ?? 0.0;
-    size = d[i + 5] ?? 0.0;
-    light = d[i + 6] ?? 0.0;
-    deg = d[i + 7] ?? 0.0;
-    pu = d[i + 8] ?? 0.0;
-    pv = d[i + 9] ?? 0.0;
-    mirror = (d[i + 10] ?? 0.0) != 0.0;
+    pic = ((d[i + 1] ?? 0.0f) as float) as integer;
+    x = (d[i + 2] ?? 0.0f) as float;
+    y = (d[i + 3] ?? 0.0f) as float;
+    z = (d[i + 4] ?? 0.0f) as float;
+    size = (d[i + 5] ?? 0.0f) as float;
+    light = (d[i + 6] ?? 0.0f) as float;
+    deg = (d[i + 7] ?? 0.0f) as float;
+    pu = (d[i + 8] ?? 0.0f) as float;
+    pv = (d[i + 9] ?? 0.0f) as float;
+    mirror = ((d[i + 10] ?? 0.0f) as float) != 0.0;
     if pic >= 0 && pic < self.pictures {
       sn = sin(deg * PI / 180.0);
       cs = cos(deg * PI / 180.0);
@@ -448,7 +448,7 @@ pub fn set_actors(self: Scene, d: const vector<float>, keep_seen: integer) {
           (c[4 * k + 3] ?? 0.0) as single, sx, sy, 0.0f, 0.0f, (NO_LIGHT as float) as single, 1.0f, light as single,
         ];
       }
-      if (d[i] ?? 0.0) as integer == keep_seen {
+      if ((d[i] ?? 0.0f) as float) as integer == keep_seen {
         for k in 0..4 { hero += [c[4 * k] ?? 0.0, c[4 * k + 1] ?? 0.0, z]; }
       }
     }

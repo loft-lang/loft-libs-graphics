@@ -7,6 +7,11 @@ use gpu;
 use gpu_record;
 use scene3d;
 
+// The numbers of a face, a light box or an actor as the scene takes them: single precision.
+fn s(v: const vector<float>) -> vector<single> {
+  [for x in v { x as single }]
+}
+
 fn lines(of: const vector<text>) -> text {
   out = "";
   for l in of { out += "{l}\n"; }
@@ -67,13 +72,13 @@ fn test_a_frame_draws_each_tile_that_holds_faces_then_the_actors() {
   assert(scene.add_picture([for _ in 0..256 { 2016 as i32 }]) == 0, "the first picture is number 0");
   assert(scene.add_picture([2016 as i32]) == -1, "too few texels are no picture");
   // tile 7: two faces of four corners, six vertices each; tile 9: one; tile 8 given and dropped
-  scene.set_tile(dev, 7, ground(0.0, 0.0) + ground(1.0, 0.0));
-  scene.set_tile(dev, 8, ground(5.0, 5.0));
-  scene.set_tile(dev, 9, ground(2.0, 0.0));
+  scene.set_tile(dev, 7, s(ground(0.0, 0.0) + ground(1.0, 0.0)));
+  scene.set_tile(dev, 8, s(ground(5.0, 5.0)));
+  scene.set_tile(dev, 9, s(ground(2.0, 0.0)));
   scene.drop_tile(8);
   assert(scene.tiles() == 2, "two tiles hold faces, got {scene.tiles()}");
   // one actor of picture 0: a card of two triangles
-  scene.set_actors([1.0, 0.0, 0.5, 0.0, 0.5, 1.0, 1.0, 0.0, 0.5, 1.0, 0.0], -1);
+  scene.set_actors(s([1.0, 0.0, 0.5, 0.0, 0.5, 1.0, 1.0, 0.0, 0.5, 1.0, 0.0]), -1);
   scene.fixed_camera(0, 0);
   before = gpu_record::log();
   scene.draw(dev);
@@ -105,22 +110,22 @@ fn test_the_walls_in_front_of_the_hero_are_cut_away_and_shown_again() {
   _ = scene.add_picture([for _ in 0..256 { 2016 as i32 }]);
   // Two blocks: one on cell (4, 3), group 11, south of where the hero will stand; one on cell
   // (8, 0), group 12, far to the east.
-  scene.set_tile(dev, 1, top(4.0, 3.0, 11) + south(4.0, 3.0, 11) + top(8.0, 0.0, 12) + south(8.0, 0.0, 12));
+  scene.set_tile(dev, 1, s(top(4.0, 3.0, 11) + south(4.0, 3.0, 11) + top(8.0, 0.0, 12) + south(8.0, 0.0, 12)));
   // The hero's card: a cell wide and tall, its foot at (4.5, 0, 2.6).  On the screen it lies
   // from y = 2.6 * 40 - 48 = 56 to 104 and x = 192 to 240.  Block 11's top lies from
   // y = 3 * 40 - 48 = 72 to 112 over the same x, and is nearer (further south and higher): cut.
   // Block 12 is at x = 384 to 432: not over the card.
   hero = [1.0, 0.0, 4.5, 0.0, 2.6, 1.0, 1.0, 0.0, 0.5, 1.0, 0.0];
-  scene.set_actors(hero, 1);
+  scene.set_actors(s(hero), 1);
   assert("{scene.hidden_groups()}" == "[11]", "the block south of the hero is cut away: {scene.hidden_groups()}");
   // The hero south of the block, at z = 4.5: the block is behind it, and is shown again.
-  scene.set_actors([1.0, 0.0, 4.5, 0.0, 4.5, 1.0, 1.0, 0.0, 0.5, 1.0, 0.0], 1);
+  scene.set_actors(s([1.0, 0.0, 4.5, 0.0, 4.5, 1.0, 1.0, 0.0, 0.5, 1.0, 0.0]), 1);
   assert("{scene.hidden_groups()}" == "[]", "behind the hero it is shown again: {scene.hidden_groups()}");
   // No actor is the one never hidden: nothing is cut for it.
-  scene.set_actors(hero, -1);
+  scene.set_actors(s(hero), -1);
   assert("{scene.hidden_groups()}" == "[]", "nobody to keep in view: {scene.hidden_groups()}");
   // The free camera cuts nothing away.
   scene.free_camera((4.5, 3.0, 9.0), (4.5, 0.5, 2.6), 60.0);
-  scene.set_actors(hero, 1);
+  scene.set_actors(s(hero), 1);
   assert("{scene.hidden_groups()}" == "[]", "the free camera cuts no wall: {scene.hidden_groups()}");
 }
