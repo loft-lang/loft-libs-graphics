@@ -88,6 +88,12 @@ three-float and no integer field: declare `F4` and read three, and pass a count 
 The stacks disagree on where the field after a three-float one starts, so a block that had one
 would be read differently on each.  `gpu::layout` gives each field's first float.
 
+## From a 32-bit program
+
+A program under loft's 32-bit regime (`#width 32`, as a small machine runs it) draws through
+`gpu` as any other.  Two things do not fit its 32-bit `integer` and are declared `i64` here, so
+they cross whole: a backend's table, and a colour (write it `0xFF202020l`).
+
 ## Conventions
 
 The same on every backend: clip space has y up and depth from -1 to 1; a viewport's and a

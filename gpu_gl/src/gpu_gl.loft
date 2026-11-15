@@ -19,6 +19,6 @@ fn gq_table() -> integer;
 
 // This backend's table, for `gpu::open`; 0 on a machine it has no window host for.  `open`
 // answers null where the machine has no OpenGL.
-pub fn table() -> integer {
+pub fn table() -> i64 {
   gq_table()
 }
