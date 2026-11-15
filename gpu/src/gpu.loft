@@ -37,6 +37,18 @@ fn gp_size(dev: integer, which: integer) -> integer;
 #c "gp_size" "int64_t(int64_t, int64_t)"
 fn gp_close(dev: integer);
 #c "gp_close" "void(int64_t)"
+fn gp_event_count(dev: integer) -> integer;
+#c "gp_event_count" "int64_t(int64_t)"
+fn gp_events(dev: integer, out: vector<integer>);
+#c "gp_events" "void(int64_t, int64_t*, int64_t)"
+fn gp_key_down(dev: integer, key: integer) -> integer;
+#c "gp_key_down" "int64_t(int64_t, int64_t)"
+fn gp_pointer(dev: integer, which: integer) -> integer;
+#c "gp_pointer" "int64_t(int64_t, int64_t)"
+fn gp_text_size(dev: integer) -> integer;
+#c "gp_text_size" "int64_t(int64_t)"
+fn gp_text_copy(dev: integer, out: vector<u8>);
+#c "gp_text_copy" "void(int64_t, uint8_t*, int64_t)"
 fn gp_buffer(dev: integer, data: const vector<single>) -> integer;
 #c "gp_buffer" "int64_t(int64_t, const float*, int64_t)"
 fn gp_index_buffer(dev: integer, list: const vector<integer>) -> integer;
@@ -54,6 +66,15 @@ fn gp_texture_put(
   px: const vector<u32>
 );
 #c "gp_texture_put" "void(int64_t, int64_t, int64_t, int64_t, int64_t, const uint32_t*, int64_t)"
+fn gp_texture_put565(
+  tex: integer,
+  x: integer,
+  y: integer,
+  width: integer,
+  height: integer,
+  px: const vector<i32>
+);
+#c "gp_texture_put565" "void(int64_t, int64_t, int64_t, int64_t, int64_t, const int32_t*, int64_t)"
 fn gp_texture_nearest(tex: integer, on: integer);
 #c "gp_texture_nearest" "void(int64_t, int64_t)"
 fn gp_texture_mipmaps(tex: integer);
@@ -88,8 +109,8 @@ fn gp_end(dev: integer);
 #c "gp_end" "void(int64_t)"
 fn gp_present(dev: integer);
 #c "gp_present" "void(int64_t)"
-fn gp_capture(dev: integer, out: vector<u32>);
-#c "gp_capture" "void(int64_t, uint32_t*, int64_t)"
+fn gp_capture(dev: integer, target: integer, out: vector<u32>);
+#c "gp_capture" "void(int64_t, int64_t, uint32_t*, int64_t)"
 
 // --- What a program and a pipeline are made of ---
 
@@ -291,6 +312,51 @@ pub fn close(self: Device) {
   self.pass = -1;
 }
 
+// ── what the window's keys and pointer hold ──
+//
+// A host library reads these and gives a game its input in one form on every machine; a game
+// does not read them itself.
+
+// How many numbers an event is in `events`: a tag (1 a key down, 2 a key up, 3 text, 4 a
+// button down, 5 a button up, 6 the pointer moved, 7 the wheel, 8 to 10 a touch begun, moved
+// and ended, 11 the window resized) and four fields.
+pub const EVENT_WORDS = 5;
+
+// Whether key `key` (a code from 0 to 255) is down now.
+pub fn key_down(self: const Device, key: integer) -> boolean {
+  gp_key_down(self.handle, key) != 0
+}
+
+// The pointer's place in the window, in pixels from the top left.
+pub fn pointer_x(self: const Device) -> integer {
+  gp_pointer(self.handle, 0)
+}
+
+pub fn pointer_y(self: const Device) -> integer {
+  gp_pointer(self.handle, 1)
+}
+
+// The pointer's buttons held now: 1 the left, 2 the right, 4 the middle, added.
+pub fn buttons(self: const Device) -> integer {
+  gp_pointer(self.handle, 2)
+}
+
+// The bytes typed since the last `events` (UTF-8, the queued text events end to end).  Read
+// them before `events`, which empties the queue.
+pub fn typed(self: const Device) -> vector<u8> {
+  out: vector<u8> = [for _ in 0..gp_text_size(self.handle) { 0 as u8 }];
+  if len(out) > 0 { gp_text_copy(self.handle, out); }
+  out
+}
+
+// The events queued since the last call, oldest first, `EVENT_WORDS` numbers each; the queue
+// is empty after.
+pub fn events(self: const Device) -> vector<integer> {
+  out: vector<integer> = [for _ in 0..gp_event_count(self.handle) * EVENT_WORDS { 0 }];
+  if len(out) > 0 { gp_events(self.handle, out); }
+  out
+}
+
 // What was refused so far, oldest first: one line a call, saying which call and why.  Empty for a
 // program that keeps the rule.
 pub fn refusals(self: const Device) -> vector<text> {
@@ -386,6 +452,12 @@ pub fn put(self: const Texture, x: integer, y: integer, pixels: const vector<u32
   if len(pixels) >= width * height { gp_texture_put(self.handle, x, y, width, height, pixels); }
 }
 
+// The same from RGB565 values (5 bits red, 6 green, 5 blue, as a small machine's frame holds
+// them), every pixel opaque: a frame drawn on the CPU shown through the device.
+pub fn put_rgb565(self: const Texture, x: integer, y: integer, pixels: const vector<i32>, width: integer, height: integer) {
+  if len(pixels) >= width * height { gp_texture_put565(self.handle, x, y, width, height, pixels); }
+}
+
 // Sample the nearest pixel (pixel art), or between pixels (how a texture starts).
 pub fn nearest(self: const Texture, on: boolean) {
   gp_texture_nearest(self.handle, if on { 1 } else { 0 });
@@ -411,6 +483,8 @@ pub fn height(self: const Texture) -> integer {
 pub struct Target {
   handle: integer,
   into: integer,
+  w: integer,
+  h: integer,
 }
 
 fn OpDrop(self: Target) {
@@ -419,17 +493,17 @@ fn OpDrop(self: Target) {
 
 // A target of one colour texture.
 pub fn colour_target(self: const Device, colour: const Texture) -> Target {
-  Target { handle: gp_target(self.handle, colour.handle, 0), into: INTO_COLOUR }
+  Target { handle: gp_target(self.handle, colour.handle, 0), into: INTO_COLOUR, w: colour.w, h: colour.h }
 }
 
 // A target of a colour and a depth texture of one size.
 pub fn target(self: const Device, colour: const Texture, depth: const Texture) -> Target {
-  Target { handle: gp_target(self.handle, colour.handle, depth.handle), into: INTO_COLOUR_DEPTH }
+  Target { handle: gp_target(self.handle, colour.handle, depth.handle), into: INTO_COLOUR_DEPTH, w: colour.w, h: colour.h }
 }
 
 // A target of a depth texture alone: no colour is drawn.
 pub fn depth_target(self: const Device, depth: const Texture) -> Target {
-  Target { handle: gp_target(self.handle, 0, depth.handle), into: INTO_DEPTH }
+  Target { handle: gp_target(self.handle, 0, depth.handle), into: INTO_DEPTH, w: depth.w, h: depth.h }
 }
 
 // --- Pipelines and blocks ---
@@ -762,6 +836,15 @@ pub fn present(self: Device) {
 // The window's pixels as they are now, 0xAARRGGBB, top row first, `width()` to a row.
 pub fn capture(self: const Device) -> vector<u32> {
   out: vector<u32> = [for _ in 0..self.width() * self.height() { 0 as u32 }];
-  gp_capture(self.handle, out);
+  gp_capture(self.handle, 0, out);
+  out
+}
+
+// The colour a target holds now, 0xAARRGGBB, the top row first, its width to a row: what a
+// pass into it drew, read back without showing it.  Empty for a target with no colour.
+pub fn capture_of(self: const Device, target: const Target) -> vector<u32> {
+  if target.into == INTO_DEPTH { return []; }
+  out: vector<u32> = [for _ in 0..target.w * target.h { 0 as u32 }];
+  gp_capture(self.handle, target.handle, out);
   out
 }

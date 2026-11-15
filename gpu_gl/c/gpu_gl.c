@@ -204,6 +204,54 @@ static int64_t gq_t_target(int64_t dev, int64_t colour, int64_t depth) {
     return fb;
 }
 
+/* RGB565 values as 0xAARRGGBB, each opaque, a channel's high bits repeated in its low ones so
+ * the brightest value is 255. */
+static void gq_t_texture_put565(int64_t tex, int64_t x, int64_t y, int64_t w, int64_t h,
+                                const int32_t *px, int64_t n) {
+    uint32_t *wide;
+    int64_t i, count = w * h;
+    if (count <= 0 || n < count) return;
+    wide = (uint32_t *) malloc((size_t) count * sizeof(uint32_t));
+    if (!wide) return;
+    for (i = 0; i < count; i++) {
+        uint32_t v = (uint32_t) px[i];
+        uint32_t r = (v >> 11) & 31u, g = (v >> 5) & 63u, b = v & 31u;
+        wide[i] = 0xFF000000u | ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
+    }
+    gq_texture_put(tex, x, y, w, h, wide, count);
+    free(wide);
+}
+
+/* The pixels of `target`'s colour, or the window's, the top row first. */
+static void gq_t_capture(int64_t dev, int64_t target, uint32_t *out, int64_t n) {
+    gq_window *w = gq_of(dev);
+    gq_res *f = gq_res_of(target);
+    unsigned char *rgba;
+    int64_t x, y;
+    if (!f) {
+        gq_read_pixels(dev, out, n);
+        return;
+    }
+    if (f->kind != GQ_FRAMEBUFFER || !f->has_colour || !gq_use(w, "gpu capture")) return;
+    if (n != (int64_t) f->width * f->height || n <= 0) return;
+    rgba = (unsigned char *) malloc((size_t) n * 4u);
+    if (!rgba) return;
+    w->api.glBindFramebuffer(GL_FRAMEBUFFER, f->id);
+    w->api.glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    w->api.glReadBuffer(GL_COLOR_ATTACHMENT0);
+    w->api.glReadPixels(0, 0, f->width, f->height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    w->api.glBindFramebuffer(GL_FRAMEBUFFER, w->target);
+    for (y = 0; y < f->height; y++) {
+        const unsigned char *row = rgba + (size_t) (f->height - 1 - y) * f->width * 4u;
+        for (x = 0; x < f->width; x++) {
+            const unsigned char *p = row + x * 4;
+            out[y * f->width + x] = ((uint32_t) p[3] << 24) | ((uint32_t) p[0] << 16) |
+                                    ((uint32_t) p[1] << 8) | p[2];
+        }
+    }
+    free(rgba);
+}
+
 /* ── pipelines ─────────────────────────────────────────────────────────────────────────────── */
 
 /* Whether the linked program's uniform block is laid out as the layer laid `p` out: the same
@@ -450,10 +498,12 @@ static void gq_t_end(int64_t dev) {
 static const gpu_backend gq_tab = {
     GPU_BACKEND_VERSION, "gpu_gl", "glsl-330",
     gq_t_open, gq_poll, gq_event_count, gq_events, gq_t_size, gq_t_close,
+    gq_key_down, gq_mouse, gq_text_size, gq_text_copy,
     gq_t_buffer, gq_t_index_buffer, gq_buffer_update, gq_t_texture, gq_texture_put,
+    gq_t_texture_put565,
     gq_texture_filter, gq_texture_mipmaps, gq_t_target, gq_t_pipeline, gq_t_release,
     gq_t_begin, gq_t_use, gq_t_uniforms, gq_t_sample, gq_t_vertices, gq_t_instances,
-    gq_t_indices, gq_viewport, gq_t_scissor, gq_t_draw, gq_t_end, gq_swap, gq_read_pixels,
+    gq_t_indices, gq_viewport, gq_t_scissor, gq_t_draw, gq_t_end, gq_swap, gq_t_capture,
 };
 
 /* This backend's table: OpenGL is looked for when a device opens, so the table is there on

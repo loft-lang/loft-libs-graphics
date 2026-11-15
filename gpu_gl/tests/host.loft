@@ -1,0 +1,120 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// What a host needs of a device beyond drawing: a target's pixels read back, a small machine's
+// RGB565 frame taken as a texture, and the window's keys and pointer.  The colours are computed
+// by hand.  Without a display every test returns at once (`DISPLAY`, or
+// `GRAPHICS_TEST_WINDOW=1` on a Mac).
+use gpu;
+use gpu_gl;
+
+fn display() -> boolean {
+  (env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1"
+}
+
+const SHOW_V: text = `
+#version 330 core
+layout(location = 0) in vec2 pos;
+out vec2 v_uv;
+void main() {{ v_uv = (pos + 1.0) / 2.0; gl_Position = vec4(pos, 0.0, 1.0); }}
+`;
+
+const SHOW_F: text = `
+#version 330 core
+uniform sampler2D tex0;
+in vec2 v_uv;
+out vec4 frag;
+void main() {{ frag = texture(tex0, v_uv); }}
+`;
+
+// A texture over the whole target: texture coordinate (0, 0) at clip (-1, -1).
+fn show() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F2],
+    instance: [],
+    block: [],
+    textures: 1,
+    sources: [gpu::source("glsl-330", SHOW_V, SHOW_F)],
+  }
+}
+
+fn frame() -> vector<single> {
+  [-1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f]
+}
+
+fn test_a_small_machines_frame_is_shown_in_its_colours() {
+  if !display() { return; }
+  dev = gpu::open(gpu_gl::table(), 64, 48, "host-565") ?? return assert(false, "no device");
+  pipe = dev.pipeline(show(), gpu::State {}) ?? return assert(false, "pipeline");
+  quad = dev.buffer(frame());
+  // Two by two.  Red, green and blue at their brightest, and a mixed one: red 16 of 31,
+  // green 32 of 63, blue 8 of 31 is 16 * 2048 + 32 * 32 + 8 = 33800, which widens to
+  // (16 << 3 | 16 >> 2, 32 << 2 | 32 >> 4, 8 << 3 | 8 >> 2) = (132, 130, 66).
+  t = dev.texture(2, 2);
+  t.nearest(true);
+  t.put_rgb565(0, 0, [63488 as i32, 2016 as i32, 31 as i32, 33800 as i32], 2, 2);
+  dev.begin_window(gpu::CLEAR, 0xFF000000);
+  dev.bind(pipe);
+  dev.sample(0, t);
+  dev.vertices(quad);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture();
+  // The texture's first row is at the bottom of the frame (clip y = -1), and a capture's first
+  // row is the top: the first two values are in the lower half, the last two in the upper.
+  low_left = c[40 * 64 + 8] ?? 0;
+  low_right = c[40 * 64 + 56] ?? 0;
+  up_left = c[8 * 64 + 8] ?? 0;
+  up_right = c[8 * 64 + 56] ?? 0;
+  assert(low_left == 0xFFFF0000, "five bits of red are full red: {low_left:x}");
+  assert(low_right == 0xFF00FF00, "six of green full green: {low_right:x}");
+  assert(up_left == 0xFF0000FF, "five of blue full blue: {up_left:x}");
+  assert(up_right == 0xFF848242, "a mixed one widens by repeating its high bits: {up_right:x}");
+}
+
+fn test_a_targets_pixels_are_what_the_window_shows_of_it() {
+  if !display() { return; }
+  dev = gpu::open(gpu_gl::table(), 64, 48, "host-target") ?? return assert(false, "no device");
+  into_colour = dev.pipeline(show(), gpu::State { into: gpu::INTO_COLOUR }) ?? return assert(false, "pipeline");
+  into_window = dev.pipeline(show(), gpu::State {}) ?? return assert(false, "pipeline");
+  quad = dev.buffer(frame());
+  picture = dev.texture_from([0xFF102030 as u32, 0xFF405060 as u32, 0xFF708090 as u32, 0xFFA0B0C0 as u32], 2, 2);
+  picture.nearest(true);
+  // The picture drawn into a 64 x 48 target, then that target drawn over the window.
+  held = dev.texture(64, 48);
+  held.nearest(true);
+  target = dev.colour_target(held);
+  dev.begin(target, gpu::CLEAR, 0xFF000000);
+  dev.bind(into_colour);
+  dev.sample(0, picture);
+  dev.vertices(quad);
+  dev.draw(0, 6);
+  dev.end();
+  // A pass into the window in between: the target is read, not whatever was drawn into last.
+  dev.begin_window(gpu::CLEAR, 0xFF00FF00);
+  dev.end();
+  read = dev.capture_of(target);
+  dev.begin_window(gpu::CLEAR, 0xFFFFFFFF);
+  dev.bind(into_window);
+  dev.sample(0, held);
+  dev.vertices(quad);
+  dev.draw(0, 6);
+  dev.end();
+  seen = dev.capture();
+  assert(len(read) == 64 * 48 && len(seen) == len(read), "both are 64 x 48: {len(read)} and {len(seen)}");
+  differ = 0;
+  for p in read { if p != (seen[p#index] ?? 0) { differ += 1; } }
+  assert(differ == 0, "{differ} pixels of the target read back differ from the window showing it");
+  // by hand: the picture's first pixel is at the bottom left, so the capture's last row starts with it
+  assert((read[47 * 64] ?? 0) == 0xFF102030 && (read[63] ?? 0) == 0xFFA0B0C0, "the corners: {read[47 * 64] ?? 0:x} {read[63] ?? 0:x}");
+}
+
+fn test_a_window_nobody_touches_holds_no_key_and_no_text() {
+  if !display() { return; }
+  dev = gpu::open(gpu_gl::table(), 64, 48, "host-input") ?? return assert(false, "no device");
+  _ = dev.poll();
+  assert(!dev.key_down(65), "no key is down");
+  assert(dev.buttons() == 0, "no button is held");
+  assert(len(dev.typed()) == 0, "nothing was typed");
+  assert(len(dev.events()) % gpu::EVENT_WORDS == 0, "events come whole");
+}
