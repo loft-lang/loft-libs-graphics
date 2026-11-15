@@ -276,3 +276,31 @@ fn test_a_backend_that_compiles_nothing_refuses_a_source_and_takes_a_blob() {
 fn test_no_table_opens_no_device() {
   assert(gpu::open(0, 64, 48, "none") == null, "a backend whose stack is absent answers table 0");
 }
+
+fn test_input_a_small_machines_pixels_and_a_targets_pixels_reach_the_backend() {
+  dev = open();
+  // the recording backend has no keys, no pointer and no events: each answers nothing
+  assert(!dev.key_down(65) && dev.pointer_x() == 0 && dev.pointer_y() == 0 && dev.buttons() == 0, "no input");
+  assert(len(dev.typed()) == 0 && len(dev.events()) == 0, "no text, no events");
+  t = dev.texture(2, 1);
+  // 63488 is five bits of red (f800), 2016 six of green
+  t.put_rgb565(0, 0, [63488 as i32, 2016 as i32], 2, 1);
+  t.put_rgb565(0, 0, [63488 as i32], 2, 1); // too few values: not sent
+  target = dev.colour_target(t);
+  got = dev.capture_of(target);
+  assert(len(got) == 2, "a target's capture is its own size, got {len(got)}");
+  deep = dev.depth_target(dev.depth_texture(4, 4));
+  assert(len(dev.capture_of(deep)) == 0, "a target with no colour has no pixels to read");
+  whole = dev.capture();
+  assert(len(whole) == 64 * 48, "the window's capture is the window's size");
+  want = lines([
+    "texture 2 2x1 colour",
+    "texture_put565 2 at 0,0 2x1 first f800",
+    "target 3 colour 2 depth 0",
+    "capture 3 pixels 2",
+    "texture 4 4x4 depth",
+    "target 5 colour 0 depth 4",
+    "capture 0 pixels 3072",
+  ]);
+  assert(after_open().starts_with(want), "what arrived:\n{after_open()}");
+}

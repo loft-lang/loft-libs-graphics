@@ -24,6 +24,12 @@ int64_t gp_open(int64_t w, int64_t h, const char *title, int64_t fullscreen) {
 int64_t gp_poll(int64_t dev) { return gp_tab ? gp_tab->poll(dev) : 0; }
 int64_t gp_size(int64_t dev, int64_t which) { return gp_tab ? gp_tab->size(dev, which) : 0; }
 void gp_close(int64_t dev) { if (gp_tab) { gp_tab->close(dev); } }
+int64_t gp_event_count(int64_t dev) { return gp_tab ? gp_tab->event_count(dev) : 0; }
+void gp_events(int64_t dev, int64_t *out, int64_t n) { if (gp_tab) { gp_tab->events(dev, out, n); } }
+int64_t gp_key_down(int64_t dev, int64_t key) { return gp_tab ? gp_tab->key_down(dev, key) : 0; }
+int64_t gp_pointer(int64_t dev, int64_t which) { return gp_tab ? gp_tab->pointer(dev, which) : 0; }
+int64_t gp_text_size(int64_t dev) { return gp_tab ? gp_tab->text_size(dev) : 0; }
+void gp_text_copy(int64_t dev, uint8_t *out, int64_t n) { if (gp_tab) { gp_tab->text_copy(dev, out, n); } }
 
 int64_t gp_buffer(int64_t dev, const float *data, int64_t n) {
     return gp_tab ? gp_tab->buffer(dev, data, n) : 0;
@@ -40,6 +46,10 @@ int64_t gp_texture(int64_t dev, int64_t w, int64_t h, int64_t depth) {
 void gp_texture_put(int64_t tex, int64_t x, int64_t y, int64_t w, int64_t h,
                     const uint32_t *px, int64_t n) {
     if (gp_tab) { gp_tab->texture_put(tex, x, y, w, h, px, n); }
+}
+void gp_texture_put565(int64_t tex, int64_t x, int64_t y, int64_t w, int64_t h,
+                       const int32_t *px, int64_t n) {
+    if (gp_tab) { gp_tab->texture_put565(tex, x, y, w, h, px, n); }
 }
 void gp_texture_nearest(int64_t tex, int64_t on) { if (gp_tab) { gp_tab->texture_nearest(tex, on); } }
 void gp_texture_mipmaps(int64_t tex) { if (gp_tab) { gp_tab->texture_mipmaps(tex); } }
@@ -107,4 +117,6 @@ void gp_draw(int64_t dev, int64_t first, int64_t count, int64_t indexed, int64_t
 }
 void gp_end(int64_t dev) { if (gp_tab) { gp_tab->end(dev); } }
 void gp_present(int64_t dev) { if (gp_tab) { gp_tab->present(dev); } }
-void gp_capture(int64_t dev, uint32_t *out, int64_t n) { if (gp_tab) { gp_tab->capture(dev, out, n); } }
+void gp_capture(int64_t dev, int64_t target, uint32_t *out, int64_t n) {
+    if (gp_tab) { gp_tab->capture(dev, target, out, n); }
+}

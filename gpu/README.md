@@ -67,6 +67,20 @@ Render state is fixed for a pipeline's life: what it draws (`TRIANGLES`, `LINES`
 `DEPTH_*`, `blend(source, destination)`, `CULL_*`, and what it draws `INTO_*`.  Two states are
 two pipelines.
 
+## What a host reads of a device
+
+A host library gives a game its window, its input and its frame in one form on every machine,
+whether the frame was drawn on the GPU or on the CPU.  For it a device also answers:
+
+| Call | What it answers |
+|---|---|
+| `dev.key_down(key)`, `pointer_x()`, `pointer_y()`, `buttons()` | What the window's keys and pointer hold now |
+| `dev.typed()`, then `dev.events()` | The bytes typed and the events queued since the last call (`EVENT_WORDS` numbers each) |
+| `texture.put_rgb565(x, y, pixels, w, h)` | A frame a small machine's renderer drew, taken as it is: 5 bits red, 6 green, 5 blue |
+| `dev.capture_of(target)` | A target's colour read back, the top row first, without showing it |
+
+A game does not read input here: it asks its host.
+
 ## Uniform blocks
 
 A block field is `F1`, `F2`, `F4`, `MAT4` or `f4s(n)` (an array of `F4`).  There is no

@@ -60,6 +60,10 @@ static int64_t rec_size(int64_t dev, int64_t which) {
     if (!rec_is(dev, 'd')) { return 0; }
     return which ? rec_height[dev] : rec_width[dev];
 }
+static int64_t rec_key_down(int64_t dev, int64_t key) { (void) dev; (void) key; return 0; }
+static int64_t rec_pointer(int64_t dev, int64_t which) { (void) dev; (void) which; return 0; }
+static int64_t rec_text_size(int64_t dev) { (void) dev; return 0; }
+static void rec_text_copy(int64_t dev, uint8_t *out, int64_t n) { (void) dev; (void) out; (void) n; }
 static void rec_close(int64_t dev) {
     int64_t h;
     if (!rec_is(dev, 'd')) { return; }
@@ -97,6 +101,13 @@ static void rec_texture_put(int64_t tex, int64_t x, int64_t y, int64_t w, int64_
     if (!rec_is(tex, 't')) { return; }
     rec_line("texture_put %lld at %lld,%lld %lldx%lld first %08x", (long long) tex, (long long) x,
              (long long) y, (long long) w, (long long) h, n > 0 ? (unsigned) px[0] : 0u);
+}
+static void rec_texture_put565(int64_t tex, int64_t x, int64_t y, int64_t w, int64_t h,
+                               const int32_t *px, int64_t n) {
+    if (!rec_is(tex, 't')) { return; }
+    rec_line("texture_put565 %lld at %lld,%lld %lldx%lld first %04x", (long long) tex,
+             (long long) x, (long long) y, (long long) w, (long long) h,
+             n > 0 ? (unsigned) px[0] & 0xFFFFu : 0u);
 }
 static void rec_texture_nearest(int64_t tex, int64_t on) {
     if (rec_is(tex, 't')) { rec_line("texture_nearest %lld %s", (long long) tex, on ? "on" : "off"); }
@@ -179,16 +190,18 @@ static void rec_draw(int64_t dev, int64_t first, int64_t count, int64_t indexed,
 }
 static void rec_end(int64_t dev) { (void) dev; rec_line("end"); }
 static void rec_present(int64_t dev) { (void) dev; rec_line("present"); }
-static void rec_capture(int64_t dev, uint32_t *out, int64_t n) {
+static void rec_capture(int64_t dev, int64_t target, uint32_t *out, int64_t n) {
     (void) dev;
     if (n > 0) { memset(out, 0, (size_t) n * sizeof *out); }
-    rec_line("capture pixels %lld", (long long) n);
+    rec_line("capture %lld pixels %lld", (long long) target, (long long) n);
 }
 
 static const gpu_backend rec_tab = {
     GPU_BACKEND_VERSION, "gpu_record", "record",
     rec_open, rec_poll, rec_event_count, rec_events, rec_size, rec_close,
+    rec_key_down, rec_pointer, rec_text_size, rec_text_copy,
     rec_buffer, rec_index_buffer, rec_buffer_update, rec_texture, rec_texture_put,
+    rec_texture_put565,
     rec_texture_nearest, rec_texture_mipmaps, rec_target, rec_pipeline, rec_release,
     rec_begin, rec_use, rec_uniforms, rec_sample, rec_vertices, rec_instances, rec_indices,
     rec_viewport, rec_scissor, rec_draw, rec_end, rec_present, rec_capture,

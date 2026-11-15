@@ -11,7 +11,7 @@
 #define GPU_BACKEND_H
 #include <stdint.h>
 
-#define GPU_BACKEND_VERSION 1
+#define GPU_BACKEND_VERSION 2
 #define GPU_MAX_INPUTS 16
 #define GPU_MAX_FIELDS 32
 
@@ -57,6 +57,13 @@ typedef struct {
     void (*events)(int64_t dev, int64_t *out, int64_t n);
     int64_t (*size)(int64_t dev, int64_t which);
     void (*close)(int64_t dev);
+    /* what the window's keys, pointer and keyboard hold now: a key code is down or not;
+     * `which` 0 the pointer's x, 1 its y, 2 its buttons (1 left, 2 right, 4 middle); the
+     * bytes of the queued text events, to copy before `events` empties the queue */
+    int64_t (*key_down)(int64_t dev, int64_t key);
+    int64_t (*pointer)(int64_t dev, int64_t which);
+    int64_t (*text_size)(int64_t dev);
+    void (*text_copy)(int64_t dev, uint8_t *out, int64_t n);
     /* resources */
     int64_t (*buffer)(int64_t dev, const float *data, int64_t n);
     int64_t (*index_buffer)(int64_t dev, const int64_t *idx, int64_t n);
@@ -64,6 +71,9 @@ typedef struct {
     int64_t (*texture)(int64_t dev, int64_t width, int64_t height, int64_t depth);
     void (*texture_put)(int64_t tex, int64_t x, int64_t y, int64_t w, int64_t h,
                         const uint32_t *px, int64_t n);
+    /* the same from RGB565 values (5 bits red, 6 green, 5 blue), each opaque */
+    void (*texture_put565)(int64_t tex, int64_t x, int64_t y, int64_t w, int64_t h,
+                           const int32_t *px, int64_t n);
     void (*texture_nearest)(int64_t tex, int64_t on);
     void (*texture_mipmaps)(int64_t tex);
     int64_t (*target)(int64_t dev, int64_t colour, int64_t depth);
@@ -82,6 +92,7 @@ typedef struct {
     void (*draw)(int64_t dev, int64_t first, int64_t count, int64_t indexed, int64_t copies);
     void (*end)(int64_t dev);
     void (*present)(int64_t dev);
-    void (*capture)(int64_t dev, uint32_t *out, int64_t n);
+    /* the pixels of `target` (0: the window), 0xAARRGGBB, the top row first */
+    void (*capture)(int64_t dev, int64_t target, uint32_t *out, int64_t n);
 } gpu_backend;
 #endif
