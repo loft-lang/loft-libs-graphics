@@ -170,7 +170,7 @@ pub struct Scene {
 /// A scene for passes into `into` (`gpu::INTO_WINDOW`, `gpu::INTO_COLOUR_DEPTH` for a target
 /// with depth), `sky` (0xAARRGGBB) where nothing is, on a screen the size of the device's
 /// window.  Null on a device whose backend this library has no shader source for.
-pub fn new_scene(dev: const gpu::Device, into: integer, sky: integer) -> Scene? {
+pub fn new_scene(dev: const gpu::Device, into: integer, sky: i64) -> Scene? {
   land = dev.pipeline(land_program(), gpu::State { depth: gpu::DEPTH_TEST_WRITE, into: into }) ?? return null;
   over = dev.pipeline(over_program(), gpu::State { into: into }) ?? return null;
   atlas = dev.texture(ATLAS, ATLAS);

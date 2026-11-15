@@ -1,0 +1,31 @@
+#width 32
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// A 32-bit view (`#width 32`, as the scene contract's CPU side is written) gives its scene to
+// this library: the arrays are the single-precision ones it builds, the sky a 64-bit literal.
+// Read from the recording backend: no display is needed.
+use gpu;
+use gpu_record;
+use scene3d;
+
+fn test_a_32_bit_view_gives_its_arrays_as_they_are() {
+  gpu_record::reset();
+  dev = gpu::open(gpu_record::table(), 800, 480, "w32") ?? return assert(false, "no device");
+  scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, 0xFF94BFE6l) ?? return assert(false, "no scene");
+  assert(scene.add_picture([for _ in 0..256 { 2016 }]) == 0, "a picture");
+  // a block's top on cell (4, 3), group 11, and the hero's card behind it: here a number
+  // written 4.0 is a single, and the vector is what `raster3d` takes too
+  top = [0.0, 11.0, 4.0, 0.0, 0.0, -1000000.0, 1.0,
+    4.0, 1.0, 3.0, 0.0, 0.0, 1.0, 5.0, 1.0, 3.0, 1.0, 0.0, 1.0, 5.0, 1.0, 4.0, 1.0, 1.0, 1.0, 4.0, 1.0, 4.0, 0.0, 1.0, 1.0];
+  scene.set_tile(dev, 1, top);
+  scene.set_light([0.0, 0.0, 0.0, 1.0, 1.0, 0.5]);
+  scene.set_actors([1.0, 0.0, 4.5, 0.0, 2.6, 1.0, 1.0, 0.0, 0.5, 1.0, 0.0], 1);
+  assert("{scene.hidden_groups()}" == "[11]", "the block in front of the hero is cut away: {scene.hidden_groups()}");
+  scene.fixed_camera(0, 0);
+  scene.draw(dev);
+  log = gpu_record::log();
+  // the tile's vertices are all hidden, so the frame draws the hero's card alone, over the sky
+  assert(log.ends_with("begin 0 clear ff94bfe6\n  bind 2\n  uniforms floats 16 first 0.120 last 1.000\n  sample 0 texture 4\n  sample 1 texture 5\n  vertices 6\n  draw from 0 count 6 copies 0\nend\n"), "the frame:\n{log}");
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+}

@@ -74,7 +74,7 @@ whether the frame was drawn on the GPU or on the CPU.  For it a device also answ
 
 | Call | What it answers |
 |---|---|
-| `dev.key_down(key)`, `pointer_x()`, `pointer_y()`, `buttons()` | What the window's keys and pointer hold now |
+| `dev.keys()`, `dev.key_down(key)`, `pointer_x()`, `pointer_y()`, `buttons()` | What the window's keys and pointer hold now; `keys()` is 256 flags in `screen::keys()`'s form and codes |
 | `dev.typed()`, then `dev.events()` | The bytes typed and the events queued since the last call (`EVENT_WORDS` numbers each) |
 | `texture.put_rgb565(x, y, pixels, w, h)` | A frame a small machine's renderer drew, taken as it is: 5 bits red, 6 green, 5 blue |
 | `dev.capture_of(target)` | A target's colour read back, the top row first, without showing it |
@@ -87,6 +87,12 @@ A block field is `F1`, `F2`, `F4`, `MAT4` or `f4s(n)` (an array of `F4`).  There
 three-float and no integer field: declare `F4` and read three, and pass a count as a float.
 The stacks disagree on where the field after a three-float one starts, so a block that had one
 would be read differently on each.  `gpu::layout` gives each field's first float.
+
+## From a 32-bit program
+
+A program under loft's 32-bit regime (`#width 32`, as a small machine runs it) draws through
+`gpu` as any other.  Two things do not fit its 32-bit `integer` and are declared `i64` here, so
+they cross whole: a backend's table, and a colour (write it `0xFF202020l`).
 
 ## Conventions
 

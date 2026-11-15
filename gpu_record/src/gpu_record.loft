@@ -24,7 +24,7 @@ fn rec_refuse_source(on: integer);
 #c "rec_refuse_source" "void(int64_t)"
 
 // This backend's table, for `gpu::open`.  It is there on every machine.
-pub fn table() -> integer {
+pub fn table() -> i64 {
   rec_table()
 }
 

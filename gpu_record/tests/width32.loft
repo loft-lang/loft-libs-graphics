@@ -1,0 +1,30 @@
+#width 32
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// A 32-bit program (`#width 32`, as a small machine runs loft) draws through `gpu`.  Here a
+// plain `integer` holds 32 bits, and a backend's table is an address and a colour is
+// 0xAARRGGBB, neither of which fits: both cross as `i64`, whole.
+use gpu;
+use gpu_record;
+
+fn test_a_32_bit_program_opens_a_device_and_clears_to_its_colour() {
+  gpu_record::reset();
+  table = gpu_record::table();
+  assert(table != 0l, "the table arrives whole, not as null");
+  dev = gpu::open(table, 64, 48, "w32") ?? return assert(false, "no device from a 32-bit program");
+  mesh = dev.buffer([0.0, 0.0, 0.0]);
+  p = gpu::Program { vertex: [gpu::F3], instance: [], block: [gpu::F2], textures: 0, sources: [gpu::source("record", "", "")] };
+  pipe = dev.pipeline(p, gpu::State {}) ?? return assert(false, "no pipeline");
+  u = pipe.block();
+  u.f2(0, 3.0, 4.0);
+  dev.begin_window(gpu::CLEAR, 0xFF102030l);
+  dev.bind(pipe);
+  dev.uniforms(u);
+  dev.vertices(mesh);
+  dev.draw(0, 1);
+  dev.end();
+  log = gpu_record::log();
+  assert(log.ends_with("begin 0 clear ff102030\n  bind 3\n  uniforms floats 4 first 3.000 last 0.000\n  vertices 2\n  draw from 0 count 1 copies 0\nend\n"), "the frame, its colour whole:\n{log}");
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+}

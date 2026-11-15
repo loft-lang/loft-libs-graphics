@@ -261,11 +261,14 @@ fn OpDrop(self: Device) {
   if self.handle != 0 { gp_close(self.handle); }
 }
 
+// A table and a colour are `i64`: a 32-bit program (`#width 32`) hands them on whole, where a
+// plain `integer` of its own holds 32 bits.
+
 // Open a window of `width` x `height` pixels through the backend whose table is `table` (a
 // backend library's `table()`).  Null when the table is none — its stack is absent on this
 // machine — or the window does not open.  A game does not call this: its host package asks each
 // backend in turn.
-pub fn open(table: integer, width: integer, height: integer, title: text) -> Device? {
+pub fn open(table: i64, width: integer, height: integer, title: text) -> Device? {
   if gp_use(table) == 0 { return null; }
   h = gp_open(width, height, title, 0);
   if h == 0 { return null; }
@@ -325,6 +328,16 @@ pub const EVENT_WORDS = 5;
 // Whether key `key` (a code from 0 to 255) is down now.
 pub fn key_down(self: const Device, key: integer) -> boolean {
   gp_key_down(self.handle, key) != 0
+}
+
+// Which keys are down now: 256 flags by key code, the form `screen::keys()` answers and
+// `input::input_tick_from_state` takes, in the same codes (a letter its lower-case character,
+// the arrows 128 to 131, F1 to F12 135 to 146) — so a view in a device's window reads its keys
+// as one in `screen`'s does.
+pub fn keys(self: const Device) -> vector<boolean> {
+  out: vector<boolean> = [];
+  for k in 0..256 { out += [gp_key_down(self.handle, k) != 0]; }
+  out
 }
 
 // The pointer's place in the window, in pixels from the top left.
@@ -645,12 +658,12 @@ pub fn floats(self: const Block) -> vector<single> {
 // --- A pass ---
 
 // Start a pass that draws into the window, cleared to `colour` (0xAARRGGBB) or kept.
-pub fn begin_window(self: Device, load: integer, colour: integer) {
+pub fn begin_window(self: Device, load: integer, colour: i64) {
   self.start(0, INTO_WINDOW, load, colour);
 }
 
 // Start a pass that draws into `target`.
-pub fn begin(self: Device, target: const Target, load: integer, colour: integer) {
+pub fn begin(self: Device, target: const Target, load: integer, colour: i64) {
   self.start(target.handle, target.into, load, colour);
 }
 
