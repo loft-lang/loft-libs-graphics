@@ -1,0 +1,126 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// What a scene asks of a backend, read from the recording one, and which walls it cuts away:
+// no display is needed.  The expected logs and groups are worked out by hand.
+use gpu;
+use gpu_record;
+use scene3d;
+
+fn lines(of: const vector<text>) -> text {
+  out = "";
+  for l in of { out += "{l}\n"; }
+  out
+}
+
+// A face of four corners: the picture, its group, where its light comes from, the corners.
+fn quad(pic: integer, group: integer, lit: (integer, integer, integer), corners: const vector<float>) -> vector<float> {
+  out = [pic as float, group as float, 4.0, lit.0 as float, lit.1 as float, lit.2 as float, 1.0];
+  out += corners;
+  out
+}
+
+// The ground of cell (x, z) on layer 0, lit from its own cell.
+fn ground(x: float, z: float) -> vector<float> {
+  quad(0, -1, (x as integer, z as integer, 0), [x, 0.0, z, 0.0, 0.0, 1.0, x + 1.0, 0.0, z, 1.0, 0.0, 1.0, x + 1.0, 0.0, z + 1.0, 1.0, 1.0, 1.0, x, 0.0, z + 1.0, 0.0, 1.0, 1.0])
+}
+
+// The south side of a block a layer high on cell (x, z), in group `group`.
+fn south(x: float, z: float, group: integer) -> vector<float> {
+  quad(0, group, (0, 0, scene3d::NO_LIGHT), [x, 1.0, z + 1.0, 0.0, 0.0, 1.0, x + 1.0, 1.0, z + 1.0, 1.0, 0.0, 1.0, x + 1.0, 0.0, z + 1.0, 1.0, 1.0, 1.0, x, 0.0, z + 1.0, 0.0, 1.0, 1.0])
+}
+
+// The top of that block.
+fn top(x: float, z: float, group: integer) -> vector<float> {
+  quad(0, group, (0, 0, scene3d::NO_LIGHT), [x, 1.0, z, 0.0, 0.0, 1.0, x + 1.0, 1.0, z, 1.0, 0.0, 1.0, x + 1.0, 1.0, z + 1.0, 1.0, 1.0, 1.0, x, 1.0, z + 1.0, 0.0, 1.0, 1.0])
+}
+
+fn open() -> gpu::Device {
+  gpu_record::reset();
+  gpu::open(gpu_record::table(), 800, 480, "scene")!
+}
+
+fn test_a_scene_is_two_pipelines_an_atlas_and_a_light_map() {
+  dev = open();
+  scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, 0xFF94BFE6)!;
+  // The land pipeline: a place, a point on the picture, the picture's slot, the light's cell
+  // and factor, an own light; one matrix; the atlas and the light map.  It tests and writes
+  // depth (2).  The overlay's: a place and a point on the picture, one texture, no depth.
+  made = lines([
+    "open 1 800x480 \"scene\"",
+    "pipeline 2 vertex 3 2 2 4 1 instance block 16x1@0 size 16 textures 2",
+    "  state shape 0 depth 2 blend 0 cull 0 into 0",
+    "pipeline 3 vertex 2 2 instance block size 0 textures 1",
+    "  state shape 0 depth 0 blend 0 cull 0 into 0",
+    "texture 4 1024x1024 colour",
+    "texture_nearest 4 on",
+    "texture 5 256x2048 colour",
+    "texture_nearest 5 on",
+  ]);
+  assert(gpu_record::log().starts_with(made), "what a scene is made of:\n{gpu_record::log()}");
+  assert(scene.offers_free_camera(), "an implementation on a GPU offers the free camera");
+}
+
+fn test_a_frame_draws_each_tile_that_holds_faces_then_the_actors() {
+  dev = open();
+  scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, 0xFF94BFE6)!;
+  assert(scene.add_picture([for _ in 0..256 { 2016 as i32 }]) == 0, "the first picture is number 0");
+  assert(scene.add_picture([2016 as i32]) == -1, "too few texels are no picture");
+  // tile 7: two faces of four corners, six vertices each; tile 9: one; tile 8 given and dropped
+  scene.set_tile(dev, 7, ground(0.0, 0.0) + ground(1.0, 0.0));
+  scene.set_tile(dev, 8, ground(5.0, 5.0));
+  scene.set_tile(dev, 9, ground(2.0, 0.0));
+  scene.drop_tile(8);
+  assert(scene.tiles() == 2, "two tiles hold faces, got {scene.tiles()}");
+  // one actor of picture 0: a card of two triangles
+  scene.set_actors([1.0, 0.0, 0.5, 0.0, 0.5, 1.0, 1.0, 0.0, 0.5, 1.0, 0.0], -1);
+  scene.fixed_camera(0, 0);
+  before = gpu_record::log();
+  scene.draw(dev);
+  // The matrix's first float is 2 * 48 / 800 = 0.12 and its last is 1.  Handles: the device,
+  // two pipelines, the atlas and the light map, the cards (6), the overlay's quad (7) and
+  // picture (8), then the tiles' buffers 9, 10 and 11.
+  drawn = lines([
+    "begin 0 clear ff94bfe6",
+    "  bind 2",
+    "  uniforms floats 16 first 0.120 last 1.000",
+    "  sample 0 texture 4",
+    "  sample 1 texture 5",
+    "  vertices 9",
+    "  draw from 0 count 12 copies 0",
+    "  vertices 11",
+    "  draw from 0 count 6 copies 0",
+    "  vertices 6",
+    "  draw from 0 count 6 copies 0",
+    "end",
+  ]);
+  got = gpu_record::log()[len(before)..];
+  assert(got == drawn, "a frame:\n{got}");
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+}
+
+fn test_the_walls_in_front_of_the_hero_are_cut_away_and_shown_again() {
+  dev = open();
+  scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, 0xFF94BFE6)!;
+  _ = scene.add_picture([for _ in 0..256 { 2016 as i32 }]);
+  // Two blocks: one on cell (4, 3), group 11, south of where the hero will stand; one on cell
+  // (8, 0), group 12, far to the east.
+  scene.set_tile(dev, 1, top(4.0, 3.0, 11) + south(4.0, 3.0, 11) + top(8.0, 0.0, 12) + south(8.0, 0.0, 12));
+  // The hero's card: a cell wide and tall, its foot at (4.5, 0, 2.6).  On the screen it lies
+  // from y = 2.6 * 40 - 48 = 56 to 104 and x = 192 to 240.  Block 11's top lies from
+  // y = 3 * 40 - 48 = 72 to 112 over the same x, and is nearer (further south and higher): cut.
+  // Block 12 is at x = 384 to 432: not over the card.
+  hero = [1.0, 0.0, 4.5, 0.0, 2.6, 1.0, 1.0, 0.0, 0.5, 1.0, 0.0];
+  scene.set_actors(hero, 1);
+  assert("{scene.hidden_groups()}" == "[11]", "the block south of the hero is cut away: {scene.hidden_groups()}");
+  // The hero south of the block, at z = 4.5: the block is behind it, and is shown again.
+  scene.set_actors([1.0, 0.0, 4.5, 0.0, 4.5, 1.0, 1.0, 0.0, 0.5, 1.0, 0.0], 1);
+  assert("{scene.hidden_groups()}" == "[]", "behind the hero it is shown again: {scene.hidden_groups()}");
+  // No actor is the one never hidden: nothing is cut for it.
+  scene.set_actors(hero, -1);
+  assert("{scene.hidden_groups()}" == "[]", "nobody to keep in view: {scene.hidden_groups()}");
+  // The free camera cuts nothing away.
+  scene.free_camera((4.5, 3.0, 9.0), (4.5, 0.5, 2.6), 60.0);
+  scene.set_actors(hero, 1);
+  assert("{scene.hidden_groups()}" == "[]", "the free camera cuts no wall: {scene.hidden_groups()}");
+}
