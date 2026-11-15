@@ -26,6 +26,6 @@ fn test_a_32_bit_view_gives_its_arrays_as_they_are() {
   scene.draw(dev);
   log = gpu_record::log();
   // the tile's vertices are all hidden, so the frame draws the hero's card alone, over the sky
-  assert(log.ends_with("begin 0 clear ff94bfe6\n  bind 2\n  uniforms floats 16 first 0.120 last 1.000\n  sample 0 texture 4\n  sample 1 texture 5\n  vertices 6\n  draw from 0 count 6 copies 0\nend\n"), "the frame:\n{log}");
+  assert(log.ends_with("begin 0 clear ff94bfe6\n  bind 2\n  uniforms floats 528 first 0.120 last 0.000\n  sample 0 texture 4\n  sample 1 texture 5\n  sample 2 texture 6\n  sample 3 texture 7\n  vertices 8\n  draw from 0 count 6 copies 0\nend\n"), "the frame:\n{log}");
   assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
 }

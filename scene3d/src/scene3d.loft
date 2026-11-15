@@ -38,6 +38,11 @@ const ATLAS = 1024;
 // The light map: cells each way on a layer, and the layers it holds, one above the other.
 const LIGHT_CELLS = 256;
 const LIGHT_LAYERS = 8;
+// How many torches a scene draws, the cells a torch's reach is across at most, and the reach
+// atlas: a square of REACH + 1 texels a torch, ATLAS_ROW squares a row.
+const TORCHES = 64;
+const REACH = 15;
+const ATLAS_ROW = 8;
 // Floats a vertex: its place (3), where it lies on its picture (2), its picture's slot (2), the
 // cell its light comes from and the factor (4), its own light (1).
 const VERTEX = 12;
@@ -49,20 +54,29 @@ layout (location = 1) in vec2 aUV;
 layout (location = 2) in vec2 aSlot;
 layout (location = 3) in vec4 aLit;
 layout (location = 4) in float aOwn;
-layout (std140) uniform Block {{ mat4 uView; }};
+layout (std140) uniform Block {{ mat4 uView; vec4 uPlace[64]; vec4 uColour[64]; }};
 uniform sampler2D tex1;
+uniform sampler2D tex2;
 out vec2 vUV;
 flat out vec2 vSlot;
 out float vLight;
+out vec2 vGrid;
+flat out vec4 vTorch;
 void main() {{
     gl_Position = uView * vec4(aPos, 1.0);
     vUV = aUV;
     vSlot = aSlot;
+    vGrid = aPos.xz;
+    vTorch = vec4(0.0);
     float l = aOwn;
     if (aLit.z > -999999.0) {{
         vec2 at = vec2(mod(aLit.x, 256.0) + 0.5, mod(aLit.y, 256.0) + 0.5 + 256.0 * mod(aLit.z, 8.0));
-        vec4 c = textureLod(tex1, at / vec2(256.0, 2048.0), 0.0);
-        if (c.a > 0.5) l = (c.r * 255.0 * 256.0 + c.g * 255.0) / 65535.0 * aLit.w;
+        // a factor under 0 marks a card: its own light, and the torches of the cell it stands on
+        if (aLit.w >= 0.0) {{
+            vec4 c = textureLod(tex1, at / vec2(256.0, 2048.0), 0.0);
+            if (c.a > 0.5) l = (c.r * 255.0 * 256.0 + c.g * 255.0) / 65535.0 * aLit.w;
+        }}
+        vTorch = textureLod(tex2, at / vec2(256.0, 2048.0), 0.0) * 255.0;
     }}
     vLight = clamp(l, 0.0, 1.0);
 }}
@@ -70,16 +84,33 @@ void main() {{
 
 const LAND_FRAGMENT_GLSL: text = `
 #version 330 core
+layout (std140) uniform Block {{ mat4 uView; vec4 uPlace[64]; vec4 uColour[64]; }};
 in vec2 vUV;
 flat in vec2 vSlot;
 in float vLight;
+in vec2 vGrid;
+flat in vec4 vTorch;
 uniform sampler2D tex0;
+uniform sampler2D tex3;
 out vec4 FragColor;
+// The light a torch (its square in the atlas plus one; 0: none) gives this point: its reach
+// read between the cells' middles, times its glow and colour.  The point is kept inside the
+// torch's own square, whose last row and column are dark.
+vec3 torch(float id) {{
+    if (id < 0.5) return vec3(0.0);
+    int s = int(id + 0.5) - 1;
+    vec4 p = uPlace[s];
+    vec2 t = clamp(vGrid - p.xy, 0.5, 15.5);
+    vec2 o = vec2(float(s - 8 * (s / 8)), float(s / 8)) * 16.0;
+    vec4 c = texture(tex3, (o + t) / 128.0);
+    return (c.r * 255.0 * 256.0 + c.g * 255.0) / 65535.0 * p.z * uColour[s].rgb;
+}}
 void main() {{
     vec2 t = clamp(floor(vUV * 16.0), 0.0, 15.0);
     vec4 c = texture(tex0, (vSlot * 16.0 + t + 0.5) / 1024.0);
     if (c.a < 0.5) discard;
-    FragColor = vec4(c.rgb * vLight, 1.0);
+    vec3 light = max(max(vec3(vLight), max(torch(vTorch.x), torch(vTorch.y))), max(torch(vTorch.z), torch(vTorch.w)));
+    FragColor = vec4(c.rgb * min(light, vec3(1.0)), 1.0);
 }}
 `;
 
@@ -87,8 +118,8 @@ fn land_program() -> gpu::Program {
   gpu::Program {
     vertex: [gpu::F3, gpu::F2, gpu::F2, gpu::F4, gpu::F1],
     instance: [],
-    block: [gpu::MAT4],
-    textures: 2,
+    block: [gpu::MAT4, gpu::f4s(TORCHES), gpu::f4s(TORCHES)],
+    textures: 4,
     sources: [gpu::source("glsl-330", LAND_VERTEX_GLSL, LAND_FRAGMENT_GLSL), gpu::source("record", "", "")],
   }
 }
@@ -139,6 +170,18 @@ pub struct Scene {
   values: gpu::Block,
   atlas: gpu::Texture,
   lights: gpu::Texture,
+  // The four torches strongest at each cell, laid out as `lights`: the torches' squares plus
+  // one in red, green, blue and alpha, 0 for none.
+  torch_map: gpu::Texture,
+  // The torches' reaches, a square each.
+  reach_atlas: gpu::Texture,
+  // For each square: the torch's id (-1: free), its reach as it was given (the layer, the
+  // box's corner, its width and height, then the reach of each cell), its glow and colour
+  // this frame.
+  torch_ids: vector<integer>,
+  reaches: vector<vector<single>>,
+  glows: vector<float>,
+  colours: vector<float>,
   pictures: integer,
   slots: hash<Slot[key]>,
   // A tile's faces as they were given, its vertices on the GPU and how many it has; a dropped
@@ -179,6 +222,12 @@ pub fn new_scene(dev: const gpu::Device, into: integer, sky: i64) -> Scene? {
   lights.nearest(true);
   // nothing is lit from a cell until its light is given
   lights.put(0, 0, [for _ in 0..LIGHT_CELLS * LIGHT_CELLS * LIGHT_LAYERS { 0 as u32 }], LIGHT_CELLS, LIGHT_CELLS * LIGHT_LAYERS);
+  torch_map = dev.texture(LIGHT_CELLS, LIGHT_CELLS * LIGHT_LAYERS);
+  torch_map.nearest(true);
+  torch_map.put(0, 0, [for _ in 0..LIGHT_CELLS * LIGHT_CELLS * LIGHT_LAYERS { 0 as u32 }], LIGHT_CELLS, LIGHT_CELLS * LIGHT_LAYERS);
+  side = ATLAS_ROW * (REACH + 1);
+  reach_atlas = dev.texture(side, side);
+  reach_atlas.put(0, 0, [for _ in 0..side * side { 0 as u32 }], side, side);
   Scene {
     into: into,
     sky: sky,
@@ -186,6 +235,12 @@ pub fn new_scene(dev: const gpu::Device, into: integer, sky: i64) -> Scene? {
     land: land,
     atlas: atlas,
     lights: lights,
+    torch_map: torch_map,
+    reach_atlas: reach_atlas,
+    torch_ids: [for _ in 0..TORCHES { -1 }],
+    reaches: [for _ in 0..TORCHES { [] }],
+    glows: [for _ in 0..4 * TORCHES { 0.0 }],
+    colours: [for _ in 0..4 * TORCHES { 0.0 }],
     pictures: 0,
     slots: [],
     faces: [],
@@ -392,13 +447,19 @@ pub fn set_light(self: Scene, d: const vector<single>) {
   w = ((d[3] ?? 0.0f) as float) as integer;
   h = ((d[4] ?? 0.0f) as float) as integer;
   if w <= 0 || h <= 0 || len(d) < 5 + w * h { return; }
+  write_cells(self.lights, z, x0, y0, w, h, light_texels(d, 5, w * h));
+}
+
+// Write the texels of the cells x0 .. x0 + w - 1, y0 .. y0 + h - 1 on layer z, row by row, into
+// a map laid out as the light's: the whole box in one write where it lies inside the map;
+// where it crosses the map's edge it goes on at the other side, so it is written a run of
+// cells at a time.
+fn write_cells(map: const gpu::Texture, z: integer, x0: integer, y0: integer, w: integer, h: integer, texels: const vector<u32>) {
   layer = ((z % LIGHT_LAYERS) + LIGHT_LAYERS) % LIGHT_LAYERS;
   cx0 = ((x0 % LIGHT_CELLS) + LIGHT_CELLS) % LIGHT_CELLS;
   cy0 = ((y0 % LIGHT_CELLS) + LIGHT_CELLS) % LIGHT_CELLS;
-  // The whole box in one write where it lies inside the map; where it crosses the map's edge
-  // it goes on at the other side, so it is written a run of cells at a time.
   if cx0 + w <= LIGHT_CELLS && cy0 + h <= LIGHT_CELLS {
-    self.lights.put(cx0, cy0 + LIGHT_CELLS * layer, light_texels(d, 5, w * h), w, h);
+    map.put(cx0, cy0 + LIGHT_CELLS * layer, texels, w, h);
     return;
   }
   for j in 0..h {
@@ -407,7 +468,7 @@ pub fn set_light(self: Scene, d: const vector<single>) {
     while i < w {
       cx = (cx0 + i) % LIGHT_CELLS;
       run = least(w - i, LIGHT_CELLS - cx);
-      self.lights.put(cx, cy + LIGHT_CELLS * layer, light_texels(d, 5 + j * w + i, run), run, 1);
+      map.put(cx, cy + LIGHT_CELLS * layer, texels[j * w + i..j * w + i + run], run, 1);
       i += run;
     }
   }
@@ -423,6 +484,152 @@ fn light_texels(d: const vector<single>, first: integer, count: integer) -> vect
     out += [((0xFF000000 | ((v >> 8) << 16) | ((v & 255) << 8)) & 4294967295) as u32];
   }
   out
+}
+
+// ── torches ──
+
+/// Whether this implementation lights torches of their own: it does.  One that does not is
+/// given the cells' light with the torches in it.
+pub fn offers_torches(self: const Scene) -> boolean {
+  self.into >= 0
+}
+
+// The square torch `id` has, or a free one for it; -1 when every square is taken.
+fn square_of(self: const Scene, id: integer, take: boolean) -> integer {
+  free = -1;
+  for t in self.torch_ids {
+    if t == id { return t#index; }
+    if t < 0 && free < 0 { free = t#index; }
+  }
+  if take { free } else { -1 }
+}
+
+// The reach torch square `sq` gives cell (x, y) on `layer`: 0 where it does not reach.
+fn reach_at(self: const Scene, sq: integer, layer: integer, x: integer, y: integer) -> float {
+  r = self.reaches[sq] ?? [];
+  if len(r) < 5 || ((r[0] ?? 0.0f) as float) as integer != layer { return 0.0; }
+  i = x - ((r[1] ?? 0.0f) as float) as integer;
+  j = y - ((r[2] ?? 0.0f) as float) as integer;
+  w = ((r[3] ?? 0.0f) as float) as integer;
+  h = ((r[4] ?? 0.0f) as float) as integer;
+  if i < 0 || j < 0 || i >= w || j >= h { return 0.0; }
+  (r[5 + j * w + i] ?? 0.0f) as float
+}
+
+// Work out again, for every cell of a box, which four torches reach it most, and write them:
+// their squares plus one, the strongest in red, then green, blue and alpha; 0 for none.
+fn rank_cells(self: Scene, layer: integer, x0: integer, y0: integer, w: integer, h: integer) {
+  texels: vector<u32> = [];
+  for j in 0..h {
+    for i in 0..w {
+      // the four strongest so far, strongest first, and their reaches
+      who = [0, 0, 0, 0];
+      how = [0.0, 0.0, 0.0, 0.0];
+      for t in self.torch_ids {
+        if t < 0 { continue; }
+        v = self.reach_at(t#index, layer, x0 + i, y0 + j);
+        at = 4;
+        for k in rev(0..4) { if v > how[k] { at = k; } }
+        if at < 4 {
+          for k in rev(at + 1..4) {
+            who[k] = who[k - 1];
+            how[k] = how[k - 1];
+          }
+          who[at] = t#index + 1;
+          how[at] = v;
+        }
+      }
+      texels += [(((who[3] << 24) | (who[0] << 16) | (who[1] << 8) | who[2]) & 4294967295) as u32];
+    }
+  }
+  write_cells(self.torch_map, layer, x0, y0, w, h, texels);
+}
+
+/// A torch's reach: `d` is its id, the layer, the box's corner (x0, y0), its width and height
+/// (15 cells at most each way), then the light it gives each cell of the box (0 .. 1) row by
+/// row, 0 where it does not reach.  Given when the torch is new, has moved, or burns
+/// otherwise; walls stop it where the reach says so.  False, and nothing kept, when the box is
+/// too large or the scene holds its 64 torches already.
+pub fn set_torch_reach(self: Scene, d: const vector<single>) -> boolean {
+  if len(d) < 6 { return false; }
+  id = ((d[0] ?? 0.0f) as float) as integer;
+  layer = ((d[1] ?? 0.0f) as float) as integer;
+  x0 = ((d[2] ?? 0.0f) as float) as integer;
+  y0 = ((d[3] ?? 0.0f) as float) as integer;
+  w = ((d[4] ?? 0.0f) as float) as integer;
+  h = ((d[5] ?? 0.0f) as float) as integer;
+  if id < 0 || w <= 0 || h <= 0 || w > REACH || h > REACH || len(d) < 6 + w * h { return false; }
+  sq = self.square_of(id, true);
+  if sq < 0 { return false; }
+  // where it reached before is ranked again too, once it is replaced: read before it is
+  old = self.box_of(sq);
+  self.torch_ids[sq] = id;
+  self.reaches[sq] = d[1..6 + w * h];
+  // its square of the atlas: the reach, the rest dark
+  side = REACH + 1;
+  texels: vector<u32> = [];
+  for j in 0..side {
+    for i in 0..side {
+      l = if i < w && j < h { (d[6 + j * w + i] ?? 0.0f) as float } else { 0.0 };
+      v = (if l < 0.0 { 0.0 } else if l > 1.0 { 1.0 } else { l } * 65535.0 + 0.5) as integer;
+      texels += [((0xFF000000 | ((v >> 8) << 16) | ((v & 255) << 8)) & 4294967295) as u32];
+    }
+  }
+  self.reach_atlas.put((sq % ATLAS_ROW) * side, (sq / ATLAS_ROW) * side, texels, side, side);
+  self.glows[4 * sq] = x0 as float;
+  self.glows[4 * sq + 1] = y0 as float;
+  self.glows[4 * sq + 3] = layer as float;
+  if len(old) == 5 { self.rank_cells(old[0] ?? 0, old[1] ?? 0, old[2] ?? 0, old[3] ?? 0, old[4] ?? 0); }
+  self.rank_cells(layer, x0, y0, w, h);
+  true
+}
+
+// The box torch square `sq` reaches, as five whole numbers of its own — the layer, the corner
+// (x0, y0), the width and height — or none when the square holds no reach.
+fn box_of(self: const Scene, sq: integer) -> vector<integer> {
+  r = self.reaches[sq] ?? [];
+  if len(r) < 5 { return []; }
+  [for k in 0..5 { ((r[k] ?? 0.0f) as float) as integer }]
+}
+
+/// Torch `id` gone: its light with it.
+pub fn drop_torch(self: Scene, id: integer) {
+  sq = self.square_of(id, false);
+  if sq < 0 { return; }
+  old = self.box_of(sq);
+  self.torch_ids[sq] = -1;
+  self.reaches[sq] = [];
+  self.glows[4 * sq + 2] = 0.0;
+  if len(old) == 5 { self.rank_cells(old[0] ?? 0, old[1] ?? 0, old[2] ?? 0, old[3] ?? 0, old[4] ?? 0); }
+}
+
+/// This frame's torches, nine numbers each in `d`: its id, its place (x, y, z as a face's
+/// corners), the shade
+/// it starts at, its glow (0 .. 1: how brightly it burns now, a flicker eased), and its colour
+/// (red, green, blue, 0 .. 1).  A torch whose reach was given and that is not named burns
+/// dark this frame; one named with no reach given is not drawn.  A flicker is these numbers
+/// alone: nothing else is given again.
+pub fn set_torches(self: Scene, d: const vector<single>) {
+  for sq in 0..TORCHES { self.glows[4 * sq + 2] = 0.0; }
+  self.colours = [for _ in 0..4 * TORCHES { 0.0 }];
+  i = 0;
+  while i + 9 <= len(d) {
+    sq = self.square_of(((d[i] ?? 0.0f) as float) as integer, false);
+    if sq >= 0 {
+      self.glows[4 * sq + 2] = (d[i + 5] ?? 0.0f) as float;
+      self.colours[4 * sq] = (d[i + 6] ?? 0.0f) as float;
+      self.colours[4 * sq + 1] = (d[i + 7] ?? 0.0f) as float;
+      self.colours[4 * sq + 2] = (d[i + 8] ?? 0.0f) as float;
+    }
+    i += 9;
+  }
+}
+
+/// How many torches' reaches the scene holds.
+pub fn torches(self: const Scene) -> integer {
+  n = 0;
+  for t in self.torch_ids { if t >= 0 { n += 1; } }
+  n
 }
 
 /// This frame's actors, eleven numbers each in `d`: an id, the picture, the bottom middle
@@ -464,7 +671,7 @@ pub fn set_actors(self: Scene, d: const vector<single>, keep_seen: integer) {
       for k in [0, 1, 2, 0, 2, 3] {
         verts += [
           (c[4 * k] ?? 0.0) as single, (c[4 * k + 1] ?? 0.0) as single, z as single, (c[4 * k + 2] ?? 0.0) as single,
-          (c[4 * k + 3] ?? 0.0) as single, sx, sy, 0.0f, 0.0f, (NO_LIGHT as float) as single, 1.0f, light as single,
+          (c[4 * k + 3] ?? 0.0) as single, sx, sy, floor_of(x) as single, floor_of(z) as single, floor_of(y) as single, -1.0f, light as single,
         ];
       }
       if ((d[i] ?? 0.0f) as float) as integer == keep_seen {
@@ -656,10 +863,16 @@ fn fixed_matrix(self: const Scene) -> vector<float> {
 // Draw the scene inside the pass in progress.
 fn draw_in(self: Scene, dev: gpu::Device) {
   self.values.mat4(0, if self.free { self.view } else { self.fixed_matrix() });
+  for sq in 0..TORCHES {
+    self.values.f4_at(1, sq, self.glows[4 * sq] ?? 0.0, self.glows[4 * sq + 1] ?? 0.0, self.glows[4 * sq + 2] ?? 0.0, self.glows[4 * sq + 3] ?? 0.0);
+    self.values.f4_at(2, sq, self.colours[4 * sq] ?? 0.0, self.colours[4 * sq + 1] ?? 0.0, self.colours[4 * sq + 2] ?? 0.0, 0.0);
+  }
   dev.bind(self.land);
   dev.uniforms(self.values);
   dev.sample(0, self.atlas);
   dev.sample(1, self.lights);
+  dev.sample(2, self.torch_map);
+  dev.sample(3, self.reach_atlas);
   for b in self.buffers {
     n = self.counts[b#index] ?? 0;
     if n > 0 {

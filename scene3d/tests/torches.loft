@@ -1,0 +1,185 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Torchlight drawn by `gpu_gl`, against values worked out by hand.  The window is 64 x 48 and
+// the fixed camera's top-left is the world's origin: a cell is 48 pixels across and 40 deep, so
+// pixel (px, py) shows the ground at x = (px + 0.5) / 48, y = (py + 0.5) / 40.  The picture is
+// white, so a pixel shows the light itself.  A reach is read between the cells' middles: at
+// (x, y) it is the four nearest cells' reach, weighed by how near each middle is.  A colour is
+// compared within 3 of 255: the reach is kept in 16 bits and the frame in 8.  Without a display
+// every test returns at once (`DISPLAY`, or `GRAPHICS_TEST_WINDOW=1` on a Mac).
+use gpu;
+use gpu_gl;
+use scene3d;
+
+fn s(v: const vector<float>) -> vector<single> {
+  [for x in v { x as single }]
+}
+
+fn display() -> boolean {
+  (env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1"
+}
+
+// The ground of cell (x, 0) on layer 0, lit from its own cell.
+fn ground(x: float) -> vector<float> {
+  [0.0, -1.0, 4.0, x, 0.0, 0.0, 1.0,
+   x, 0.0, 0.0, 0.0, 0.0, 1.0, x + 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, x + 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, x, 0.0, 1.0, 0.0, 1.0, 1.0]
+}
+
+// Whether pixel (x, y) of `c` is the colour (r, g, b), each within 3.
+fn near(c: const vector<u32>, x: integer, y: integer, rgb: (integer, integer, integer)) -> boolean {
+  p = c[y * 64 + x] ?? 0;
+  dr = ((p >> 16) & 255) - rgb.0;
+  dg = ((p >> 8) & 255) - rgb.1;
+  db = (p & 255) - rgb.2;
+  dr >= -3 && dr <= 3 && dg >= -3 && dg <= 3 && db >= -3 && db <= 3
+}
+
+fn hex(c: const vector<u32>, x: integer, y: integer) -> text {
+  "{c[y * 64 + x] ?? 0:x}"
+}
+
+// A scene of two dark cells, (0, 0) and (1, 0), in a white picture.
+fn dark(dev: const gpu::Device) -> scene3d::Scene {
+  scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, 0xFF000040)!;
+  // 65535 is every bit of red, green and blue: white
+  _ = scene.add_picture([for _ in 0..256 { 65535 as i32 }]);
+  scene.set_tile(dev, 1, s(ground(0.0) + ground(1.0)));
+  scene.set_light(s([0.0, 0.0, 0.0, 2.0, 1.0, 0.0, 0.0]));
+  scene.fixed_camera(0, 0);
+  scene
+}
+
+// A torch on cell (0, 0): full there, half on the eight cells round it.
+fn ring() -> vector<float> {
+  [1.0, 0.0, -1.0, -1.0, 3.0, 3.0, 0.5, 0.5, 0.5, 0.5, 1.0, 0.5, 0.5, 0.5, 0.5]
+}
+
+fn test_a_torch_lights_smoothly_across_the_cells_it_reaches() {
+  if !display() { return; }
+  dev = gpu::open(gpu_gl::table(), 64, 48, "torch-smooth") ?? return assert(false, "no device");
+  scene = dark(dev);
+  scene.draw(dev);
+  c = dev.capture();
+  assert(near(c, 24, 20, (0, 0, 0)), "no torch yet: dark, {hex(c, 24, 20)}");
+  assert(scene.set_torch_reach(s(ring())), "the reach");
+  // its glow full, its colour yellow
+  scene.set_torches(s([1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0]));
+  scene.draw(dev);
+  c = dev.capture();
+  // Near the torch cell's middle (x 0.5104, y 0.5125): 1 - 0.0104 * 0.5 along the row, then
+  // 0.9948 * 0.9875 + 0.5 * 0.0125 = 0.9886 of 255 is 252.
+  assert(near(c, 24, 20, (252, 252, 0)), "by the torch: {hex(c, 24, 20)}");
+  // At the cell's east edge (x 0.9896): 1 - 0.4896 * 0.5 = 0.7552, then 0.7520: 192.  Just
+  // past it, in the next cell (x 1.0104): 0.7448, then 0.7417: 189.  No step at the edge.
+  assert(near(c, 47, 20, (192, 192, 0)), "at its cell's edge: {hex(c, 47, 20)}");
+  assert(near(c, 48, 20, (189, 189, 0)), "just past the edge: {hex(c, 48, 20)}");
+  // Further into the next cell (x 1.2604): 1 - 0.7604 * 0.5 = 0.6198, then 0.6183: 158.
+  assert(near(c, 60, 20, (158, 158, 0)), "into the next cell: {hex(c, 60, 20)}");
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+}
+
+fn test_a_cell_a_torch_does_not_reach_stays_dark() {
+  if !display() { return; }
+  dev = gpu::open(gpu_gl::table(), 64, 48, "torch-mask") ?? return assert(false, "no device");
+  scene = dark(dev);
+  // A reach of one cell: a wall stands east of it.
+  assert(scene.set_torch_reach(s([1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0])), "the reach");
+  scene.set_torches(s([1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0]));
+  scene.draw(dev);
+  c = dev.capture();
+  // (1 - 0.0104) * (1 - 0.0125) = 0.9772: 249.  It fades towards its own edge
+  // ((1 - 0.4896) * 0.9875 = 0.5040: 129), and the cell beyond is not lit at all.
+  assert(near(c, 24, 20, (249, 249, 0)), "by the torch: {hex(c, 24, 20)}");
+  assert(near(c, 47, 20, (129, 129, 0)), "fading to its edge: {hex(c, 47, 20)}");
+  assert(near(c, 48, 20, (0, 0, 0)) && near(c, 60, 20, (0, 0, 0)), "past the wall: {hex(c, 48, 20)} {hex(c, 60, 20)}");
+}
+
+fn test_the_brightest_of_the_cells_light_and_the_torch_a_channel_at_a_time() {
+  if !display() { return; }
+  dev = gpu::open(gpu_gl::table(), 64, 48, "torch-channels") ?? return assert(false, "no device");
+  scene = dark(dev);
+  scene.set_light(s([0.0, 0.0, 0.0, 1.0, 1.0, 0.5]));
+  assert(scene.set_torch_reach(s(ring())), "the reach");
+  // A red torch over a cell half lit: red from the torch (0.9886: 252), green and blue from
+  // the cell (0.5: 128).
+  scene.set_torches(s([1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0]));
+  scene.draw(dev);
+  c = dev.capture();
+  assert(near(c, 24, 20, (252, 128, 128)), "a red torch in half light: {hex(c, 24, 20)}");
+  // Its glow a quarter: 0.247 is under the cell's 0.5, which wins every channel.
+  scene.set_torches(s([1.0, 0.0, 0.0, 0.0, 1.0, 0.25, 1.0, 0.0, 0.0]));
+  scene.draw(dev);
+  c = dev.capture();
+  assert(near(c, 24, 20, (128, 128, 128)), "a faint torch under the cell's light: {hex(c, 24, 20)}");
+}
+
+fn test_a_glow_dims_a_torch_and_one_not_named_is_dark() {
+  if !display() { return; }
+  dev = gpu::open(gpu_gl::table(), 64, 48, "torch-glow") ?? return assert(false, "no device");
+  scene = dark(dev);
+  assert(scene.set_torch_reach(s(ring())), "the reach");
+  // 0.9886 * 0.5 = 0.4943: 126
+  scene.set_torches(s([1.0, 0.0, 0.0, 0.0, 1.0, 0.5, 1.0, 1.0, 0.0]));
+  scene.draw(dev);
+  c = dev.capture();
+  assert(near(c, 24, 20, (126, 126, 0)), "at half its glow: {hex(c, 24, 20)}");
+  scene.set_torches(s([]));
+  scene.draw(dev);
+  c = dev.capture();
+  assert(near(c, 24, 20, (0, 0, 0)), "not named this frame: {hex(c, 24, 20)}");
+  // named again, it burns again: nothing but the nine numbers was given
+  scene.set_torches(s([1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0]));
+  scene.draw(dev);
+  c = dev.capture();
+  assert(near(c, 24, 20, (252, 252, 0)), "named again: {hex(c, 24, 20)}");
+}
+
+fn test_the_four_strongest_torches_light_a_cell_and_a_dropped_one_gives_way() {
+  if !display() { return; }
+  dev = gpu::open(gpu_gl::table(), 64, 48, "torch-four") ?? return assert(false, "no device");
+  scene = dark(dev);
+  // Five torches reach cell (0, 0) alone: red at 1, blue at 0.8, red at 0.5, blue at 0.4, and
+  // the weakest, green, at 0.3.
+  reaches = [1.0, 0.8, 0.5, 0.4, 0.3];
+  colours = [(1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, 1.0, 0.0)];
+  all: vector<float> = [];
+  for r in reaches {
+    id = (r#index + 1) as float;
+    assert(scene.set_torch_reach(s([id, 0.0, 0.0, 0.0, 1.0, 1.0, r])), "reach {r#index}");
+    tint = colours[r#index] ?? (0.0, 0.0, 0.0);
+    all += [id, 0.0, 0.0, 0.0, 1.0, 1.0, tint.0, tint.1, tint.2];
+  }
+  scene.set_torches(s(all));
+  scene.draw(dev);
+  c = dev.capture();
+  // red 0.9772 (249), blue 0.8 * 0.9772 = 0.7818 (199); the fifth torch, the green, is not drawn
+  assert(near(c, 24, 20, (249, 0, 199)), "the four strongest: {hex(c, 24, 20)}");
+  // The strongest dropped: the green one is among the four now.  Red 0.5 * 0.9772 = 0.4886
+  // (125), green 0.3 * 0.9772 = 0.2932 (75).
+  scene.drop_torch(1);
+  scene.set_torches(s(all));
+  scene.draw(dev);
+  c = dev.capture();
+  assert(near(c, 24, 20, (125, 75, 199)), "the strongest dropped: {hex(c, 24, 20)}");
+}
+
+fn test_a_card_is_lit_by_the_torches_of_the_cell_it_stands_on() {
+  if !display() { return; }
+  dev = gpu::open(gpu_gl::table(), 64, 48, "torch-card") ?? return assert(false, "no device");
+  scene = dark(dev);
+  assert(scene.set_torch_reach(s(ring())), "the reach");
+  scene.set_torches(s([1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0]));
+  // A white card with no light of its own, half a cell wide and tall, its foot in the middle
+  // of the torch's cell (x 12 .. 35, y -4 .. 19 on the screen).  Its plane is at y 0.5, the
+  // row's middle: at x 0.5104 the reach is 1 - 0.0104 * 0.5 = 0.9948: 254.
+  scene.set_actors(s([1.0, 0.0, 0.5, 0.0, 0.5, 0.5, 0.0, 0.0, 0.5, 1.0, 0.0]), -1);
+  scene.draw(dev);
+  c = dev.capture();
+  assert(near(c, 24, 10, (254, 254, 0)), "the card in the torch's light: {hex(c, 24, 10)}");
+  // With a light of its own it keeps the brighter, a channel at a time.
+  scene.set_actors(s([1.0, 0.0, 0.5, 0.0, 0.5, 0.5, 0.6, 0.0, 0.5, 1.0, 0.0]), -1);
+  scene.draw(dev);
+  c = dev.capture();
+  assert(near(c, 24, 10, (254, 254, 153)), "and its own light in blue: {hex(c, 24, 10)}");
+}

@@ -50,6 +50,35 @@ none), its corners n, the cell its light comes from (x, y, its layer, a factor; 
 as it stands unturned, its size in cells, its light, degrees turned clockwise, the point it
 turns about (u, v) and whether it is mirrored.
 
+## Torches
+
+A view that asks `offers_torches()` and hears yes gives the cells' light **without** its
+torches, and the torches themselves:
+
+| Call | When | What it is |
+|---|---|---|
+| `set_torch_reach(d)` | A torch is new, has moved, or burns otherwise | Its id, the layer, a box of at most 15 x 15 cells and the light it gives each cell: 0 where a wall stops it |
+| `set_torches(d)` | Every frame | Nine numbers a torch: its id, its place (x, y, z as a face's corners), the shade it starts at, its glow, its colour |
+| `drop_torch(id)` | It is gone | — |
+
+What is drawn:
+
+- **Smoothly.**  A point is lit by the reach read between the middles of the four cells round
+  it, times the torch's glow and colour: no step from one cell to the next.
+- **Only where it reaches.**  A cell the reach does not name is not lit by that torch, however
+  near: light does not pass a wall the rules stop it at.
+- **The brightest wins, a channel at a time**: of the cell's own light and the four torches
+  whose reach is strongest at that cell.  A fifth torch at a cell is not drawn.  The contract
+  asks for the two strongest by reach times glow; a glow is between 0.86 and 1, so those two
+  are among the four unless five torches reach one cell within a seventh of each other.
+- **A flicker costs nine numbers.**  Nothing is written to a texture for a torch whose reach
+  is as it was.
+- **A card** is lit by the torches of the cell it stands on, and by its own light where that
+  is brighter.
+
+A scene holds 64 torches; a 65th reach is refused.  A torch's id is given as a single, which
+holds a whole number exactly up to 16,777,216: two ids that round to one number are one torch.
+
 ## The cameras
 
 - **Fixed**: a parallel projection from the south, a cell 48 pixels across, its ground 40
@@ -70,6 +99,7 @@ facing south for both.
 - The light map holds 256 x 256 cells on 8 layers and wraps: a scene wider than that reads a
   far cell's light for a near one.
 - The cut-away for the free camera, and cards turned to face it.
+- More than four torches a cell, and a torch's reach wider than 15 cells.
 
 ## Verified
 
@@ -88,5 +118,8 @@ facing south for both.
   over both; the free camera puts a cell's four corners where a projection worked out by hand
   puts them.  `tests/record.loft` (no display): what a scene asks of a backend, and which
   walls are cut away and shown again.
+- **Torches** (`tests/torches.loft`): the light at a pixel against the reach weighed by
+  hand between its four cells — by the torch, at its cell's edge and just past it, past a wall,
+  under the cell's own light, at half its glow, with five torches at a cell, on a card.
 - On a Mac on the interpreter, the C backend, the Rust backend and a shipped program, and in
   both writers' browser pages.  Ten planted breaks each turn a test red.  Not run: X11.
