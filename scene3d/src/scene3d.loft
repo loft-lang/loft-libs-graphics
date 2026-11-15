@@ -627,7 +627,10 @@ fn fixed_matrix(self: const Scene) -> vector<float> {
     (WIDE as float * 2.0 / w) ?? 0.0, 0.0, 0.0, 0.0,
     0.0, (TALL as float * 2.0 / h) ?? 0.0, (-(DEEP as float) / far) ?? 0.0, 0.0,
     0.0, (-(DEEP as float) * 2.0 / h) ?? 0.0, (-(TALL as float) / far) ?? 0.0, 0.0,
-    ((-2.0 * self.cam_x as float / w) ?? 0.0) - 1.0, 1.0 + ((2.0 * self.cam_y as float / h) ?? 0.0), 0.0, 1.0,
+    ((-2.0 * self.cam_x as float / w) ?? 0.0) - 1.0, 1.0 + ((2.0 * self.cam_y as float / h) ?? 0.0),
+    // the depth measured from the ground of the row at the screen's middle: a scene far from the
+    // origin is inside the depth's range as one near it is
+    ((TALL as float * (self.cam_y as float + h / 2.0) / DEEP as float) / far) ?? 0.0, 1.0,
   ]
 }
 
