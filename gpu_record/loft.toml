@@ -16,7 +16,7 @@ gpu = ">=0.2.0"
 [library]
 entry = "src/gpu_record.loft"
 
-# The backend's table and its log, in C99 (c/gpu_record.c); it includes gpu's header by a path
-# relative to this package.  Pure computation: it opens nothing.
+# The backend's table and its log, in C99 (c/gpu_record.c); it includes gpu's header by the
+# dependency's name ("gpu/gpu_backend.h").  Pure computation: it opens nothing.
 [c]
 shim = "c/gpu_record.c"

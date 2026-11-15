@@ -2,7 +2,8 @@
  * SPDX-License-Identifier: LGPL-3.0-or-later */
 /* The table a GPU backend exports and `gpu` calls through.
  *
- * A backend's C includes this file by a path relative to its own package and answers the
+ * A backend declares `gpu` as a dependency, includes this file as "gpu/gpu_backend.h" (loft
+ * puts a declared dependency's headers where a package's C finds them) and answers the
  * address of one `gpu_backend` (0 where its stack is absent on this machine).  Handles are the
  * backend's own numbers, 0 for none.  `gpu` checks every call before it arrives here: a
  * backend sees a draw only inside a pass, with a pipeline built for that pass's target, its
