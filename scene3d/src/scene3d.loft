@@ -393,17 +393,36 @@ pub fn set_light(self: Scene, d: const vector<single>) {
   h = ((d[4] ?? 0.0f) as float) as integer;
   if w <= 0 || h <= 0 || len(d) < 5 + w * h { return; }
   layer = ((z % LIGHT_LAYERS) + LIGHT_LAYERS) % LIGHT_LAYERS;
-  // A cell at a time: a box may lie across the map's edge, where it goes on at the other side.
+  cx0 = ((x0 % LIGHT_CELLS) + LIGHT_CELLS) % LIGHT_CELLS;
+  cy0 = ((y0 % LIGHT_CELLS) + LIGHT_CELLS) % LIGHT_CELLS;
+  // The whole box in one write where it lies inside the map; where it crosses the map's edge
+  // it goes on at the other side, so it is written a run of cells at a time.
+  if cx0 + w <= LIGHT_CELLS && cy0 + h <= LIGHT_CELLS {
+    self.lights.put(cx0, cy0 + LIGHT_CELLS * layer, light_texels(d, 5, w * h), w, h);
+    return;
+  }
   for j in 0..h {
-    for i in 0..w {
-      l = (d[5 + j * w + i] ?? 0.0f) as float;
-      v = (if l < 0.0 { 0.0 } else if l > 1.0 { 1.0 } else { l } * 65535.0 + 0.5) as integer;
-      cx = (((x0 + i) % LIGHT_CELLS) + LIGHT_CELLS) % LIGHT_CELLS;
-      cy = (((y0 + j) % LIGHT_CELLS) + LIGHT_CELLS) % LIGHT_CELLS;
-      // the light's high byte in red, its low byte in green; alpha says a light was given
-      self.lights.put(cx, cy + LIGHT_CELLS * layer, [((0xFF000000 | ((v >> 8) << 16) | ((v & 255) << 8)) & 4294967295) as u32], 1, 1);
+    cy = (cy0 + j) % LIGHT_CELLS;
+    i = 0;
+    while i < w {
+      cx = (cx0 + i) % LIGHT_CELLS;
+      run = least(w - i, LIGHT_CELLS - cx);
+      self.lights.put(cx, cy + LIGHT_CELLS * layer, light_texels(d, 5 + j * w + i, run), run, 1);
+      i += run;
     }
   }
+}
+
+// `count` lights of `d` from `first` as texels: the light's high byte in red, its low byte in
+// green; alpha says a light was given.
+fn light_texels(d: const vector<single>, first: integer, count: integer) -> vector<u32> {
+  out: vector<u32> = [];
+  for k in 0..count {
+    l = (d[first + k] ?? 0.0f) as float;
+    v = (if l < 0.0 { 0.0 } else if l > 1.0 { 1.0 } else { l } * 65535.0 + 0.5) as integer;
+    out += [((0xFF000000 | ((v >> 8) << 16) | ((v & 255) << 8)) & 4294967295) as u32];
+  }
+  out
 }
 
 /// This frame's actors, eleven numbers each in `d`: an id, the picture, the bottom middle

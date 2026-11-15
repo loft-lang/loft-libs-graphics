@@ -129,3 +129,27 @@ fn test_the_walls_in_front_of_the_hero_are_cut_away_and_shown_again() {
   scene.set_actors(s(hero), 1);
   assert("{scene.hidden_groups()}" == "[]", "the free camera cuts no wall: {scene.hidden_groups()}");
 }
+
+fn test_a_box_of_light_is_one_write_and_a_few_where_it_crosses_the_maps_edge() {
+  dev = open();
+  scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, 0xFF94BFE6)!;
+  before = gpu_record::log();
+  // Three cells by two on layer 1, from cell (10, 20): one write of 3 x 2 at (10, 20 + 256).
+  // Its first light is 1: 65535, red ff and green ff under a full alpha.
+  scene.set_light(s([1.0, 10.0, 20.0, 3.0, 2.0, 1.0, 0.5, 0.0, 0.25, 0.75, 1.0]));
+  // Four cells in a row from cell (254, 0) on layer 0: the map is 256 cells wide, so two go at
+  // x 254 and two at x 0.  The first light is 0.5: 32768, red 80 and green 00.
+  scene.set_light(s([0.0, 254.0, 0.0, 4.0, 1.0, 0.5, 0.5, 1.0, 1.0]));
+  // A cell west of the origin is the map's last column.
+  scene.set_light(s([0.0, -1.0, 0.0, 1.0, 1.0, 0.0]));
+  // Too few lights for the box: nothing is written.
+  scene.set_light(s([0.0, 0.0, 0.0, 2.0, 2.0, 1.0]));
+  got = gpu_record::log()[len(before)..];
+  want = lines([
+    "texture_put 5 at 10,276 3x2 first ffffff00",
+    "texture_put 5 at 254,0 2x1 first ff800000",
+    "texture_put 5 at 0,0 2x1 first ffffff00",
+    "texture_put 5 at 255,0 1x1 first ff000000",
+  ]);
+  assert(got == want, "the light's writes:\n{got}");
+}
