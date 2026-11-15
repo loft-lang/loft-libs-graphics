@@ -1,0 +1,22 @@
+[package]
+name = "gpu_record"
+version = "0.1.0"
+loft = ">=2026.10.0"
+repository = "loft-libs-graphics"
+description = "A GPU backend that draws nothing and writes down every call it receives: for testing a program's drawing on a machine with no display"
+categories  = ["graphics", "development-tools"]
+
+# ⚠ FIRST release, so both floors are this release itself.
+api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
+data_compatible_with = "0.1.0"   # oldest own release whose stored data this reads
+
+[dependencies]
+gpu = ">=0.1.0"
+
+[library]
+entry = "src/gpu_record.loft"
+
+# The backend's table and its log, in C99 (c/gpu_record.c); it includes gpu's header by a path
+# relative to this package.  Pure computation: it opens nothing.
+[c]
+shim = "c/gpu_record.c"

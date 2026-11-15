@@ -1,0 +1,767 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Drawing on a GPU with no graphics stack named.
+//
+//   dev  = gpu::open(table, 960, 720, "view") ?? return;   // `table` is a backend's
+//   pipe = dev.pipeline(PROGRAM, gpu::State { depth: gpu::DEPTH_TEST_WRITE }) ?? return;
+//   mesh = dev.buffer(vertices);
+//   u    = pipe.block();
+//   u.mat4(0, mvp);
+//   dev.begin_window(gpu::CLEAR, sky);
+//   dev.bind(pipe);  dev.uniforms(u);  dev.vertices(mesh);  dev.draw(0, 36);
+//   dev.end();
+//   dev.present();
+//
+// The one rule: everything a draw depends on is named in the draw's own pass — a pipeline, its
+// block of uniforms, its textures by slot, its buffers.  Nothing stays set from an earlier pass,
+// and `bind` clears what the pipeline before it was given.  A call that breaks the rule is
+// refused here, before the backend sees it, and `dev.refusals()` says which.
+//
+// A backend is a library of its own that depends on this one and answers a table (its
+// `table()`); this library depends on none.
+
+// --- The backend ---
+
+fn gp_use(table: integer) -> integer;
+#c "gp_use" "int64_t(int64_t)"
+fn gp_name() -> text;
+#c "gp_name" "const char*()"
+fn gp_shading() -> text;
+#c "gp_shading" "const char*()"
+fn gp_open(width: integer, height: integer, title: text, fullscreen: integer) -> integer;
+#c "gp_open" "int64_t(int64_t, int64_t, const char*, int64_t)"
+fn gp_poll(dev: integer) -> integer;
+#c "gp_poll" "int64_t(int64_t)"
+fn gp_size(dev: integer, which: integer) -> integer;
+#c "gp_size" "int64_t(int64_t, int64_t)"
+fn gp_close(dev: integer);
+#c "gp_close" "void(int64_t)"
+fn gp_buffer(dev: integer, data: const vector<single>) -> integer;
+#c "gp_buffer" "int64_t(int64_t, const float*, int64_t)"
+fn gp_index_buffer(dev: integer, list: const vector<integer>) -> integer;
+#c "gp_index_buffer" "int64_t(int64_t, const int64_t*, int64_t)"
+fn gp_buffer_update(buf: integer, data: const vector<single>);
+#c "gp_buffer_update" "void(int64_t, const float*, int64_t)"
+fn gp_texture(dev: integer, width: integer, height: integer, depth: integer) -> integer;
+#c "gp_texture" "int64_t(int64_t, int64_t, int64_t, int64_t)"
+fn gp_texture_put(
+  tex: integer,
+  x: integer,
+  y: integer,
+  width: integer,
+  height: integer,
+  px: const vector<u32>
+);
+#c "gp_texture_put" "void(int64_t, int64_t, int64_t, int64_t, int64_t, const uint32_t*, int64_t)"
+fn gp_texture_nearest(tex: integer, on: integer);
+#c "gp_texture_nearest" "void(int64_t, int64_t)"
+fn gp_texture_mipmaps(tex: integer);
+#c "gp_texture_mipmaps" "void(int64_t)"
+fn gp_target(dev: integer, colour: integer, depth: integer) -> integer;
+#c "gp_target" "int64_t(int64_t, int64_t, int64_t)"
+fn gp_pipeline(dev: integer, desc: const vector<integer>, vertex: text, fragment: text) -> integer;
+#c "gp_pipeline" "int64_t(int64_t, const int64_t*, int64_t, const char*, const char*)"
+fn gp_release(handle: integer);
+#c "gp_release" "void(int64_t)"
+fn gp_begin(dev: integer, target: integer, load: integer, colour: integer);
+#c "gp_begin" "void(int64_t, int64_t, int64_t, int64_t)"
+fn gp_bind(dev: integer, pipeline: integer);
+#c "gp_bind" "void(int64_t, int64_t)"
+fn gp_uniforms(dev: integer, block: const vector<single>);
+#c "gp_uniforms" "void(int64_t, const float*, int64_t)"
+fn gp_sample(dev: integer, slot: integer, tex: integer);
+#c "gp_sample" "void(int64_t, int64_t, int64_t)"
+fn gp_vertices(dev: integer, buf: integer);
+#c "gp_vertices" "void(int64_t, int64_t)"
+fn gp_instances(dev: integer, buf: integer, first: integer);
+#c "gp_instances" "void(int64_t, int64_t, int64_t)"
+fn gp_indices(dev: integer, buf: integer);
+#c "gp_indices" "void(int64_t, int64_t)"
+fn gp_viewport(dev: integer, x: integer, y: integer, width: integer, height: integer);
+#c "gp_viewport" "void(int64_t, int64_t, int64_t, int64_t, int64_t)"
+fn gp_scissor(dev: integer, x: integer, y: integer, width: integer, height: integer, on: integer);
+#c "gp_scissor" "void(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)"
+fn gp_draw(dev: integer, first: integer, count: integer, indexed: integer, copies: integer);
+#c "gp_draw" "void(int64_t, int64_t, int64_t, int64_t, int64_t)"
+fn gp_end(dev: integer);
+#c "gp_end" "void(int64_t)"
+fn gp_present(dev: integer);
+#c "gp_present" "void(int64_t)"
+fn gp_capture(dev: integer, out: vector<u32>);
+#c "gp_capture" "void(int64_t, uint32_t*, int64_t)"
+
+// --- What a program and a pipeline are made of ---
+
+// An input or a block field of 1, 2, 3 or 4 floats.  A block takes no `F3`: the stacks disagree
+// on where the field after one starts, so declare `F4` and read three.
+pub const F1 = 1;
+pub const F2 = 2;
+pub const F3 = 3;
+pub const F4 = 4;
+// A block field of 16 floats: a matrix, column-major.
+pub const MAT4 = 16;
+
+// A block field that is an array of `count` `F4`s.
+pub fn f4s(count: integer) -> integer {
+  1000 + count
+}
+
+// What a pipeline draws.
+pub const TRIANGLES = 0;
+pub const LINES = 1;
+pub const POINTS = 2;
+
+// Whether a draw is tested against the depth already drawn, and whether it writes its own.
+pub const DEPTH_OFF = 0;
+pub const DEPTH_TEST = 1;
+pub const DEPTH_TEST_WRITE = 2;
+
+// A draw replaces what the target holds.
+pub const BLEND_OFF = 0;
+// The factors `blend` takes.
+pub const ZERO = 0;
+pub const ONE = 1;
+pub const SRC_ALPHA = 2;
+pub const ONE_MINUS_SRC_ALPHA = 3;
+pub const DST_ALPHA = 4;
+pub const ONE_MINUS_DST_ALPHA = 5;
+
+// A draw is combined with what the target holds: its colour times `source`, plus the target's
+// times `destination`.  `blend(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` is plain transparency.
+pub fn blend(source: integer, destination: integer) -> integer {
+  1 + 8 * source + destination
+}
+
+// Which faces are dropped; counter-clockwise is the front.
+pub const CULL_NONE = 0;
+pub const CULL_BACK = 1;
+pub const CULL_FRONT = 2;
+
+// What a pipeline is built to draw into: the window (colour and depth), or a target of a colour
+// texture, of a colour and a depth texture, or of a depth texture alone.
+pub const INTO_WINDOW = 0;
+pub const INTO_COLOUR = 1;
+pub const INTO_COLOUR_DEPTH = 2;
+pub const INTO_DEPTH = 3;
+
+// How a pass starts: the target cleared to a colour (and its depth to the far end), or kept.
+pub const CLEAR = 0;
+pub const KEEP = 1;
+
+// A shader's text in one shading language.  `tag` names the language as a backend spells it
+// (its README says which it takes); this library compares the tag and never reads it.
+pub struct Source {
+  pub tag: text,
+  pub vertex: text,
+  pub fragment: text,
+}
+
+// A source for the backend whose shading language is `tag`.
+pub fn source(tag: text, vertex: text, fragment: text) -> Source {
+  Source { tag: tag, vertex: vertex, fragment: fragment }
+}
+
+// A shader set: what the shader reads, and its text for each backend it may meet.
+pub struct Program {
+  // The inputs read once per vertex, in order: `F1` to `F4` each.
+  pub vertex: vector<integer>,
+  // The inputs read once per drawn copy (`draw_copies`), numbered after the vertex's.
+  pub instance: vector<integer>,
+  // The uniform block's fields, in order: `F1`, `F2`, `F4`, `MAT4` or `f4s(n)` each.
+  pub block: vector<integer>,
+  // How many textures it samples: slots 0 up to this.
+  pub textures: integer,
+  pub sources: vector<Source>,
+}
+
+// Render state: fixed for a pipeline's life, so two states are two pipelines.
+pub struct State {
+  pub shape: integer = 0,
+  pub depth: integer = 0,
+  pub blend: integer = 0,
+  pub cull: integer = 0,
+  pub into: integer = 0,
+}
+
+// How many floats a block field holds.
+fn field_floats(kind: integer) -> integer {
+  if kind > 1000 { 4 * (kind - 1000) } else { kind }
+}
+
+// What a block field starts on a multiple of: its own size up to 4 floats.
+fn field_align(kind: integer) -> integer {
+  if kind == F1 { 1 } else if kind == F2 { 2 } else { 4 }
+}
+
+// Whether `kind` may be a block field.
+fn field_ok(kind: integer) -> boolean {
+  kind == F1 || kind == F2 || kind == F4 || kind == MAT4 || kind > 1000
+}
+
+// Where each field of a block starts, in floats, with the block's whole size as the last
+// entry.  Each field starts on the next multiple of its own size (a matrix and an array on 4
+// floats) and the size is rounded up to 4 — the layout every backend's shading language gives
+// these field kinds, so a program reads the same bytes on each.
+pub fn layout(block: const vector<integer>) -> vector<integer> {
+  out: vector<integer> = [];
+  at = 0;
+  for kind in block {
+    align = field_align(kind);
+    at = ((at + align - 1) / align)? * align;
+    out += [at];
+    at += field_floats(kind);
+  }
+  out += [((at + 3) / 4)? * 4];
+  out
+}
+
+// --- The device ---
+
+// One window (a page's canvas) and its GPU.  Everything made from it is freed when it closes.
+pub struct Device {
+  handle: integer,
+  // What the pass in progress draws into (`INTO_*`), -1 between passes.
+  pass: integer,
+  // The pipeline bound in this pass, and what it still needs before a draw.
+  pipe: integer,
+  need_block: integer,
+  need_textures: integer,
+  sampled: integer,
+  has_block: boolean,
+  has_vertices: boolean,
+  has_indices: boolean,
+  has_instances: boolean,
+  pipe_instances: boolean,
+  refused: vector<text>,
+}
+
+fn OpDrop(self: Device) {
+  if self.handle != 0 { gp_close(self.handle); }
+}
+
+// Open a window of `width` x `height` pixels through the backend whose table is `table` (a
+// backend library's `table()`).  Null when the table is none — its stack is absent on this
+// machine — or the window does not open.  A game does not call this: its host package asks each
+// backend in turn.
+pub fn open(table: integer, width: integer, height: integer, title: text) -> Device? {
+  if gp_use(table) == 0 { return null; }
+  h = gp_open(width, height, title, 0);
+  if h == 0 { return null; }
+  Device {
+    handle: h,
+    pass: -1,
+    pipe: 0,
+    need_block: 0,
+    need_textures: 0,
+    sampled: 0,
+    has_block: false,
+    has_vertices: false,
+    has_indices: false,
+    has_instances: false,
+    pipe_instances: false,
+    refused: [],
+  }
+}
+
+// The backend's own name, for a message.  Never branch on it: ask what the machine has.
+pub fn backend_name() -> text {
+  gp_name()
+}
+
+// Hand the machine's events to the window; false once it was closed.
+pub fn poll(self: const Device) -> boolean {
+  self.handle != 0 && gp_poll(self.handle) != 0
+}
+
+// The window's width in pixels, as it is now.
+pub fn width(self: const Device) -> integer {
+  gp_size(self.handle, 0)
+}
+
+// And its height.
+pub fn height(self: const Device) -> integer {
+  gp_size(self.handle, 1)
+}
+
+// Close the window and free everything made from it.
+pub fn close(self: Device) {
+  if self.handle != 0 { gp_close(self.handle); }
+  self.handle = 0;
+  self.pass = -1;
+}
+
+// What was refused so far, oldest first: one line a call, saying which call and why.  Empty for a
+// program that keeps the rule.
+pub fn refusals(self: const Device) -> vector<text> {
+  self.refused
+}
+
+fn refuse(self: Device, why: text) {
+  if len(self.refused) < 64 { self.refused += [why]; }
+}
+
+// --- Buffers ---
+
+// Floats on the GPU: vertices, or the values of drawn copies.
+pub struct Buffer {
+  handle: integer,
+  size: integer,
+}
+
+fn OpDrop(self: Buffer) {
+  if self.handle != 0 { gp_release(self.handle); }
+}
+
+// Upload `data` for a pipeline to read as vertices (`vertices`) or per copy (`instances`).
+pub fn buffer(self: const Device, data: const vector<single>) -> Buffer {
+  Buffer { handle: gp_buffer(self.handle, data), size: len(data) }
+}
+
+// Replace the floats; the length may change.  For data that changes every frame.
+pub fn update(self: Buffer, data: const vector<single>) {
+  gp_buffer_update(self.handle, data);
+  self.size = len(data);
+}
+
+// How many floats it holds.
+pub fn floats(self: const Buffer) -> integer {
+  self.size
+}
+
+// Vertex numbers on the GPU, for `draw_indexed`.
+pub struct IndexBuffer {
+  handle: integer,
+  size: integer,
+}
+
+fn OpDrop(self: IndexBuffer) {
+  if self.handle != 0 { gp_release(self.handle); }
+}
+
+// Upload a list of vertex numbers.
+pub fn index_buffer(self: const Device, list: const vector<integer>) -> IndexBuffer {
+  IndexBuffer { handle: gp_index_buffer(self.handle, list), size: len(list) }
+}
+
+// How many vertex numbers it holds.
+pub fn count(self: const IndexBuffer) -> integer {
+  self.size
+}
+
+// --- Textures and targets ---
+
+// An image on the GPU: colour (red, green, blue, alpha at 8 bits each) or depth.
+pub struct Texture {
+  handle: integer,
+  w: integer,
+  h: integer,
+  depth: boolean,
+}
+
+fn OpDrop(self: Texture) {
+  if self.handle != 0 { gp_release(self.handle); }
+}
+
+// An empty colour texture, sampled between its pixels and clamped at its edges.
+pub fn texture(self: const Device, width: integer, height: integer) -> Texture {
+  Texture { handle: gp_texture(self.handle, width, height, 0), w: width, h: height, depth: false }
+}
+
+// An empty depth texture: the depth of a target, or a shadow map.
+pub fn depth_texture(self: const Device, width: integer, height: integer) -> Texture {
+  Texture { handle: gp_texture(self.handle, width, height, 1), w: width, h: height, depth: true }
+}
+
+// A colour texture holding `pixels` (0xAARRGGBB each, `width` to a row).  Its first pixel is
+// texture coordinate (0, 0).
+pub fn texture_from(self: const Device, pixels: const vector<u32>, width: integer, height: integer) -> Texture {
+  t = self.texture(width, height);
+  gp_texture_put(t.handle, 0, 0, width, height, pixels);
+  t
+}
+
+// Replace the `width` x `height` pixels at (`x`, `y`), counted from the texture's first pixel.
+pub fn put(self: const Texture, x: integer, y: integer, pixels: const vector<u32>, width: integer, height: integer) {
+  if len(pixels) >= width * height { gp_texture_put(self.handle, x, y, width, height, pixels); }
+}
+
+// Sample the nearest pixel (pixel art), or between pixels (how a texture starts).
+pub fn nearest(self: const Texture, on: boolean) {
+  gp_texture_nearest(self.handle, if on { 1 } else { 0 });
+}
+
+// Build smaller copies from the pixels it holds now and sample through them when it is drawn
+// small; call again after `put`.
+pub fn mipmaps(self: const Texture) {
+  gp_texture_mipmaps(self.handle);
+}
+
+// Its width in pixels.
+pub fn width(self: const Texture) -> integer {
+  self.w
+}
+
+// And its height.
+pub fn height(self: const Texture) -> integer {
+  self.h
+}
+
+// What a pass draws into other than the window.  Its textures stay usable after it is gone.
+pub struct Target {
+  handle: integer,
+  into: integer,
+}
+
+fn OpDrop(self: Target) {
+  if self.handle != 0 { gp_release(self.handle); }
+}
+
+// A target of one colour texture.
+pub fn colour_target(self: const Device, colour: const Texture) -> Target {
+  Target { handle: gp_target(self.handle, colour.handle, 0), into: INTO_COLOUR }
+}
+
+// A target of a colour and a depth texture of one size.
+pub fn target(self: const Device, colour: const Texture, depth: const Texture) -> Target {
+  Target { handle: gp_target(self.handle, colour.handle, depth.handle), into: INTO_COLOUR_DEPTH }
+}
+
+// A target of a depth texture alone: no colour is drawn.
+pub fn depth_target(self: const Device, depth: const Texture) -> Target {
+  Target { handle: gp_target(self.handle, 0, depth.handle), into: INTO_DEPTH }
+}
+
+// --- Pipelines and blocks ---
+
+// A program, its inputs and its render state, built for one kind of target.
+pub struct Pipeline {
+  handle: integer,
+  into: integer,
+  textures: integer,
+  instances: boolean,
+  fields: vector<integer>,
+  starts: vector<integer>,
+}
+
+fn OpDrop(self: Pipeline) {
+  if self.handle != 0 { gp_release(self.handle); }
+}
+
+// Build a pipeline: `program` drawn with `state`.  Null when the program has no source for this
+// backend, declares what a block cannot hold, or does not compile — the backend says why on
+// stderr.
+pub fn pipeline(self: const Device, program: const Program, state: const State) -> Pipeline? {
+  tag = gp_shading();
+  vertex = "";
+  fragment = "";
+  found = false;
+  for s in program.sources {
+    if !found && s.tag == tag {
+      vertex = s.vertex;
+      fragment = s.fragment;
+      found = true;
+    }
+  }
+  if !found { return null; }
+  for kind in program.block { if !field_ok(kind) { return null; } }
+  starts = layout(program.block);
+  desc: vector<integer> = [len(program.vertex)];
+  desc += program.vertex;
+  desc += [len(program.instance)];
+  desc += program.instance;
+  desc += [len(program.block)];
+  for kind in program.block {
+    one = if kind > 1000 { 4 } else { kind };
+    many = if kind > 1000 { kind - 1000 } else { 1 };
+    desc += [one, many, starts[kind#index] ?? 0];
+  }
+  desc += [starts[-1], program.textures, state.shape, state.depth, state.blend, state.cull, state.into];
+  h = gp_pipeline(self.handle, desc, vertex, fragment);
+  if h == 0 { return null; }
+  Pipeline {
+    handle: h,
+    into: state.into,
+    textures: program.textures,
+    instances: len(program.instance) > 0,
+    fields: program.block,
+    starts: starts,
+  }
+}
+
+// The values of a pipeline's uniform block.  A field is named by its position in the program's
+// `block` list.  Setting a field as another kind than it was declared, or one that is not
+// there, marks the block, and `uniforms` then refuses it.
+pub struct Block {
+  data: vector<single>,
+  fields: vector<integer>,
+  starts: vector<integer>,
+  wrong: integer,
+}
+
+// A block for this pipeline, every field zero.
+pub fn block(self: const Pipeline) -> Block {
+  Block { data: [for _ in 0..self.starts[-1] { 0.0f }], fields: self.fields, starts: self.starts, wrong: 0 }
+}
+
+// Where field `field` starts when it was declared as `kind`; -1, and the block marked, when not.
+fn start_of(self: Block, field: integer, kind: integer) -> integer {
+  if field < 0 || field >= len(self.fields) || self.fields[field] != kind {
+    self.wrong += 1;
+    return -1;
+  }
+  self.starts[field] ?? -1
+}
+
+// Set an `F1` field.
+pub fn f1(self: Block, field: integer, x: float) {
+  at = self.start_of(field, F1);
+  if at < 0 { return; }
+  self.data[at] = x as single;
+}
+
+// Set an `F2` field.
+pub fn f2(self: Block, field: integer, x: float, y: float) {
+  at = self.start_of(field, F2);
+  if at < 0 { return; }
+  self.data[at] = x as single;
+  self.data[at + 1] = y as single;
+}
+
+// Set an `F4` field.
+pub fn f4(self: Block, field: integer, x: float, y: float, z: float, w: float) {
+  at = self.start_of(field, F4);
+  if at < 0 { return; }
+  self.put4(at, x, y, z, w);
+}
+
+// Set element `index` of an `f4s` field; an index past its length marks the block.
+pub fn f4_at(self: Block, field: integer, index: integer, x: float, y: float, z: float, w: float) {
+  if field < 0 || field >= len(self.fields) || self.fields[field] <= 1000 || index < 0
+      || index >= self.fields[field] - 1000 {
+    self.wrong += 1;
+    return;
+  }
+  self.put4((self.starts[field] ?? 0) + 4 * index, x, y, z, w);
+}
+
+// Set a `MAT4` field from 16 floats, column-major; fewer marks the block.
+pub fn mat4(self: Block, field: integer, m: const vector<float>) {
+  at = self.start_of(field, MAT4);
+  if at < 0 { return; }
+  if len(m) < 16 {
+    self.wrong += 1;
+    return;
+  }
+  for i in 0..16 { self.data[at + i] = m[i] as single; }
+}
+
+fn put4(self: Block, at: integer, x: float, y: float, z: float, w: float) {
+  self.data[at] = x as single;
+  self.data[at + 1] = y as single;
+  self.data[at + 2] = z as single;
+  self.data[at + 3] = w as single;
+}
+
+// The block's floats as the backend receives them, for a test of a layout.
+pub fn floats(self: const Block) -> vector<single> {
+  self.data
+}
+
+// --- A pass ---
+
+// Start a pass that draws into the window, cleared to `colour` (0xAARRGGBB) or kept.
+pub fn begin_window(self: Device, load: integer, colour: integer) {
+  self.start(0, INTO_WINDOW, load, colour);
+}
+
+// Start a pass that draws into `target`.
+pub fn begin(self: Device, target: const Target, load: integer, colour: integer) {
+  self.start(target.handle, target.into, load, colour);
+}
+
+fn start(self: Device, target: integer, into: integer, load: integer, colour: integer) {
+  if self.pass >= 0 {
+    self.refuse("begin: the pass before it has not ended");
+    return;
+  }
+  self.pass = into;
+  self.pipe = 0;
+  gp_begin(self.handle, target, load, colour);
+}
+
+// Whether a call that belongs in a pass is in one; refused with `call` named when not.
+fn in_pass(self: Device, call: text) -> boolean {
+  if self.pass < 0 {
+    self.refuse("{call}: outside a pass");
+    return false;
+  }
+  true
+}
+
+// And whether a pipeline is bound in it.
+fn bound(self: Device, call: text) -> boolean {
+  if !self.in_pass(call) { return false; }
+  if self.pipe == 0 {
+    self.refuse("{call}: no pipeline is bound in this pass");
+    return false;
+  }
+  true
+}
+
+// Draw with `pipeline` from here on.  It forgets the block, textures and buffers the pipeline
+// before it was given: name them again.
+pub fn bind(self: Device, pipeline: const Pipeline) {
+  if !self.in_pass("bind") { return; }
+  if pipeline.into != self.pass {
+    self.refuse("bind: the pipeline was built for another kind of target than this pass draws into");
+    return;
+  }
+  self.pipe = pipeline.handle;
+  self.need_block = pipeline.starts[-1];
+  self.need_textures = pipeline.textures;
+  self.pipe_instances = pipeline.instances;
+  self.sampled = 0;
+  self.has_block = false;
+  self.has_vertices = false;
+  self.has_indices = false;
+  self.has_instances = false;
+  gp_bind(self.handle, pipeline.handle);
+}
+
+// Give the bound pipeline its uniform block.
+pub fn uniforms(self: Device, block: const Block) {
+  if !self.bound("uniforms") { return; }
+  if block.wrong != 0 {
+    self.refuse("uniforms: a field of the block was set as another kind than it was declared");
+    return;
+  }
+  if len(block.data) != self.need_block {
+    self.refuse("uniforms: the block is another pipeline's");
+    return;
+  }
+  self.has_block = true;
+  gp_uniforms(self.handle, block.data);
+}
+
+// Give the bound pipeline the texture its slot `slot` samples.
+pub fn sample(self: Device, slot: integer, texture: const Texture) {
+  if !self.bound("sample") { return; }
+  if slot < 0 || slot >= self.need_textures {
+    self.refuse("sample: the pipeline has no texture slot {slot}");
+    return;
+  }
+  self.sampled = self.sampled | (1 << slot);
+  gp_sample(self.handle, slot, texture.handle);
+}
+
+// The vertices the next draws read.
+pub fn vertices(self: Device, buffer: const Buffer) {
+  if !self.bound("vertices") { return; }
+  self.has_vertices = true;
+  gp_vertices(self.handle, buffer.handle);
+}
+
+// The values the next `draw_copies` reads once per copy, starting at float `first` of `buffer`.
+pub fn instances(self: Device, buffer: const Buffer, first: integer) {
+  if !self.bound("instances") { return; }
+  if !self.pipe_instances {
+    self.refuse("instances: the pipeline declares no input per copy");
+    return;
+  }
+  self.has_instances = true;
+  gp_instances(self.handle, buffer.handle, first);
+}
+
+// The vertex numbers the next `draw_indexed` reads.
+pub fn indices(self: Device, buffer: const IndexBuffer) {
+  if !self.bound("indices") { return; }
+  self.has_indices = true;
+  gp_indices(self.handle, buffer.handle);
+}
+
+// The rectangle draws map onto, origin bottom-left; a pass starts with the whole target.
+pub fn viewport(self: Device, x: integer, y: integer, width: integer, height: integer) {
+  if !self.in_pass("viewport") { return; }
+  gp_viewport(self.handle, x, y, width, height);
+}
+
+// Draw only inside this rectangle, origin bottom-left, until `no_scissor` or the pass ends.
+pub fn scissor(self: Device, x: integer, y: integer, width: integer, height: integer) {
+  if !self.in_pass("scissor") { return; }
+  gp_scissor(self.handle, x, y, width, height, 1);
+}
+
+// Draw on the whole target again.
+pub fn no_scissor(self: Device) {
+  if !self.in_pass("no_scissor") { return; }
+  gp_scissor(self.handle, 0, 0, 0, 0, 0);
+}
+
+// Whether the bound pipeline has all a draw reads; refused with `call` named when not.
+fn ready(self: Device, call: text) -> boolean {
+  if !self.bound(call) { return false; }
+  if !self.has_vertices {
+    self.refuse("{call}: no vertices were given since the pipeline was bound");
+    return false;
+  }
+  if self.need_block > 0 && !self.has_block {
+    self.refuse("{call}: the pipeline's block was not given since it was bound");
+    return false;
+  }
+  if self.sampled != (1 << self.need_textures) - 1 {
+    self.refuse("{call}: a texture slot of the pipeline was not given since it was bound");
+    return false;
+  }
+  true
+}
+
+// Draw `count` vertices from vertex `first`.
+pub fn draw(self: Device, first: integer, count: integer) {
+  if !self.ready("draw") { return; }
+  gp_draw(self.handle, first, count, 0, 0);
+}
+
+// Draw the first `count` vertices the index buffer names, in its order.
+pub fn draw_indexed(self: Device, count: integer) {
+  if !self.ready("draw_indexed") { return; }
+  if !self.has_indices {
+    self.refuse("draw_indexed: no indices were given since the pipeline was bound");
+    return;
+  }
+  gp_draw(self.handle, 0, count, 1, 0);
+}
+
+// Draw the first `count` vertices `copies` times; the inputs per copy advance once a copy.
+pub fn draw_copies(self: Device, count: integer, copies: integer) {
+  if !self.ready("draw_copies") { return; }
+  if self.pipe_instances && !self.has_instances {
+    self.refuse("draw_copies: no values per copy were given since the pipeline was bound");
+    return;
+  }
+  gp_draw(self.handle, 0, count, 0, copies);
+}
+
+// End the pass.
+pub fn end(self: Device) {
+  if !self.in_pass("end") { return; }
+  self.pass = -1;
+  self.pipe = 0;
+  gp_end(self.handle);
+}
+
+// Show the frame, waiting for the display's next one where the machine has a frame clock.
+pub fn present(self: Device) {
+  if self.pass >= 0 {
+    self.refuse("present: a pass has not ended");
+    return;
+  }
+  gp_present(self.handle);
+}
+
+// The window's pixels as they are now, 0xAARRGGBB, top row first, `width()` to a row.
+pub fn capture(self: const Device) -> vector<u32> {
+  out: vector<u32> = [for _ in 0..self.width() * self.height() { 0 as u32 }];
+  gp_capture(self.handle, out);
+  out
+}
