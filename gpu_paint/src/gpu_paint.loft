@@ -1,0 +1,306 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// 2D drawing through `gpu`: rectangles, images and sprites at pixel positions.
+//
+//   p = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return;   // origin top-left, y down
+//   dev.begin_window(gpu::CLEAR, 0xFF202020);
+//   p.rect(dev, 10.0, 10.0, 100.0, 20.0, 1.0, 0.5, 0.0, 1.0);
+//   p.image(dev, icon, 120.0, 10.0, 32.0, 32.0);
+//   p.sprite(dev, sheet, 160.0, 10.0, 32.0, 32.0, 3);
+//   dev.end();
+//
+// A painter draws inside the pass the caller began, in call order, over whatever the pass
+// holds: nothing it draws is tested against depth, so a later rectangle covers an earlier one
+// and a HUD is never hidden behind a 3D scene.  It blends by a colour's alpha unless `blend`
+// is switched off.  It names no backend: its shaders carry a source for each backend that
+// exists, and a device of a backend it has no source for gives no painter.
+use gpu;
+
+// ── the shaders ──
+//
+// Each maps the unit quad (0, 0)-(1, 1) by the block's matrix onto pixel positions.
+
+const FLAT_VERTEX_GLSL: text = `
+#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (std140) uniform Block {{ mat4 uMVP; vec4 uColor; }};
+void main() {{ gl_Position = uMVP * vec4(aPos, 1.0); }}
+`;
+
+const FLAT_FRAGMENT_GLSL: text = `
+#version 330 core
+layout (std140) uniform Block {{ mat4 uMVP; vec4 uColor; }};
+out vec4 FragColor;
+void main() {{ FragColor = uColor; }}
+`;
+
+// The whole texture over the quad; a fully transparent texel is not drawn.
+const IMAGE_VERTEX_GLSL: text = `
+#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (std140) uniform Block {{ mat4 uMVP; }};
+out vec2 vUV;
+void main() {{
+    gl_Position = uMVP * vec4(aPos, 1.0);
+    vUV = vec2(aPos.x, aPos.y);
+}}
+`;
+
+const TEXTURE_FRAGMENT_GLSL: text = `
+#version 330 core
+in vec2 vUV;
+uniform sampler2D tex0;
+out vec4 FragColor;
+void main() {{
+    vec4 c = texture(tex0, vUV);
+    if (c.a < 0.01) discard;
+    FragColor = c;
+}}
+`;
+
+// One cell of a sheet over the quad: the block's second field holds the cell's corners
+// (u0, v0, u1, v1).
+const CELL_VERTEX_GLSL: text = `
+#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (std140) uniform Block {{ mat4 uMVP; vec4 uCell; }};
+out vec2 vUV;
+void main() {{
+    gl_Position = uMVP * vec4(aPos, 1.0);
+    vUV = vec2(mix(uCell.x, uCell.z, aPos.x), mix(uCell.y, uCell.w, aPos.y));
+}}
+`;
+
+// The recording backend reads no shader: an empty source lets a program's drawing be tested
+// with no display.
+fn recorded() -> gpu::Source {
+  gpu::source("record", "", "")
+}
+
+fn flat_program() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3],
+    instance: [],
+    block: [gpu::MAT4, gpu::F4],
+    textures: 0,
+    sources: [gpu::source("glsl-330", FLAT_VERTEX_GLSL, FLAT_FRAGMENT_GLSL), recorded()],
+  }
+}
+
+fn image_program() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3],
+    instance: [],
+    block: [gpu::MAT4],
+    textures: 1,
+    sources: [gpu::source("glsl-330", IMAGE_VERTEX_GLSL, TEXTURE_FRAGMENT_GLSL), recorded()],
+  }
+}
+
+fn cell_program() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3],
+    instance: [],
+    block: [gpu::MAT4, gpu::F4],
+    textures: 1,
+    sources: [gpu::source("glsl-330", CELL_VERTEX_GLSL, TEXTURE_FRAGMENT_GLSL), recorded()],
+  }
+}
+
+// The orthographic projection of a `width` x `height` target, origin top-left.
+fn pixel_projection(width: integer, height: integer) -> vector<float> {
+  [
+    2.0 / width as float ?? 0.0, 0.0, 0.0, 0.0, 0.0, -2.0 / height as float ?? 0.0, 0.0, 0.0, 0.0,
+    0.0, -1.0, 0.0, -1.0, 1.0, 0.0, 1.0,
+  ]
+}
+
+// The unit quad (0, 0)-(1, 1) as two triangles.
+fn unit_quad() -> vector<single> {
+  [
+    0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f,
+    1.0f, 0.0f,
+  ]
+}
+
+// `proj` times a move to (x, y) and a stretch to `w` x `h`: the model is sparse, so it is four
+// column updates of the projection.
+fn placed(proj: const vector<float>, x: float, y: float, w: float, h: float) -> vector<float> {
+  [
+    proj[0] * w, proj[1] * w, proj[2] * w, proj[3] * w, proj[4] * h, proj[5] * h, proj[6] * h,
+    proj[7] * h, proj[8], proj[9], proj[10], proj[11], proj[0] * x + proj[4] * y + proj[12],
+    proj[1] * x + proj[5] * y + proj[13], proj[2] * x + proj[6] * y + proj[14],
+    proj[3] * x + proj[7] * y + proj[15],
+  ]
+}
+
+// How a painter's draws combine with what the pass holds when it blends: by the colour's alpha.
+fn by_alpha() -> integer {
+  gpu::blend(gpu::SRC_ALPHA, gpu::ONE_MINUS_SRC_ALPHA)
+}
+
+// ── sprite sheets ──
+
+// A picture on the GPU cut into a grid of `cols` x `rows` sprites; sprite 0 is the top left,
+// counting along the rows.
+pub struct Sprites {
+  pub texture: gpu::Texture,
+  pub const cols: integer,
+  pub const rows: integer,
+  // For `draw`: a sprite placed in a 3D scene, tested against depth and written to it.
+  scene: gpu::Pipeline,
+  values: gpu::Block,
+  quad: gpu::Buffer,
+}
+
+// Upload `pixels` (0xAARRGGBB, `width` to a row, the top row first) as a sheet of `cols` x
+// `rows` cells, sampled between its pixels (`sheet.texture.nearest(true)` for pixel art).
+// `into` is what `draw` will draw into (`gpu::INTO_WINDOW`, …).  Null on a device whose backend
+// this library has no shader source for.
+pub fn sprites(
+  dev: const gpu::Device,
+  pixels: const vector<u32>,
+  width: integer,
+  height: integer,
+  cols: integer,
+  rows: integer,
+  into: integer
+) -> Sprites? {
+  scene = dev.pipeline(cell_program(), gpu::State { depth: gpu::DEPTH_TEST_WRITE, into: into }) ?? return null;
+  Sprites {
+    texture: dev.texture_from(pixels, width, height),
+    cols: cols,
+    rows: rows,
+    values: scene.block(),
+    scene: scene,
+    quad: dev.buffer(unit_quad()),
+  }
+}
+
+// The corners (u0, v0, u1, v1) of sprite `index` into `values`' second field.
+fn cell_into(self: const Sprites, values: gpu::Block, index: integer) {
+  // the divisors are positive (the callers check), so no default is ever taken
+  col = (index % self.cols) ?? 0;
+  row = (index / self.cols) ?? 0;
+  cols = self.cols as float;
+  rows = self.rows as float;
+  values.f4(1, (col as float / cols) ?? 0.0, (row as float / rows) ?? 0.0, ((col + 1) as float / cols) ?? 0.0, ((row + 1) as float / rows) ?? 0.0);
+}
+
+// Draw sprite `index` through `mvp`, which maps the unit quad onto the target (16 floats,
+// column-major), in the pass in progress: tested against the depth drawn so far.
+pub fn draw(self: Sprites, dev: gpu::Device, mvp: const vector<float>, index: integer) {
+  if self.cols <= 0 || self.rows <= 0 { return; }
+  self.values.mat4(0, mvp);
+  self.cell_into(self.values, index);
+  dev.bind(self.scene);
+  dev.uniforms(self.values);
+  dev.sample(0, self.texture);
+  dev.vertices(self.quad);
+  dev.draw(0, 6);
+}
+
+// ── the painter ──
+
+// Pipelines and a unit quad for drawing at pixel positions.
+pub struct Painter {
+  // Whether a draw is combined with what the pass holds by its alpha (how a painter starts),
+  // or replaces it.
+  pub blend: boolean,
+  flat: gpu::Pipeline,
+  flat_over: gpu::Pipeline,
+  whole: gpu::Pipeline,
+  whole_over: gpu::Pipeline,
+  cell: gpu::Pipeline,
+  cell_over: gpu::Pipeline,
+  flat_values: gpu::Block,
+  image_values: gpu::Block,
+  cell_values: gpu::Block,
+  quad: gpu::Buffer,
+  proj: vector<float>,
+}
+
+// A painter for passes that draw into `into` (`gpu::INTO_WINDOW`, `gpu::INTO_COLOUR`, …),
+// sized to the device's window.  Null on a device whose backend this library has no shader
+// source for.
+pub fn painter(dev: const gpu::Device, into: integer) -> Painter? {
+  flat = dev.pipeline(flat_program(), gpu::State { into: into }) ?? return null;
+  flat_over = dev.pipeline(flat_program(), gpu::State { blend: by_alpha(), into: into }) ?? return null;
+  whole = dev.pipeline(image_program(), gpu::State { into: into }) ?? return null;
+  whole_over = dev.pipeline(image_program(), gpu::State { blend: by_alpha(), into: into }) ?? return null;
+  cell = dev.pipeline(cell_program(), gpu::State { into: into }) ?? return null;
+  cell_over = dev.pipeline(cell_program(), gpu::State { blend: by_alpha(), into: into }) ?? return null;
+  Painter {
+    blend: true,
+    flat_values: flat.block(),
+    image_values: whole.block(),
+    cell_values: cell.block(),
+    flat: flat,
+    flat_over: flat_over,
+    whole: whole,
+    whole_over: whole_over,
+    cell: cell,
+    cell_over: cell_over,
+    quad: dev.buffer(unit_quad()),
+    proj: pixel_projection(dev.width(), dev.height()),
+  }
+}
+
+// Draw for a target of `width` x `height` pixels from now on: after the window was resized, or
+// for a pass into a texture of another size.
+pub fn resize(self: Painter, width: integer, height: integer) {
+  self.proj = pixel_projection(width, height);
+}
+
+// A filled rectangle at (x, y) of `w` x `h` pixels, channels 0.0-1.0.
+pub fn rect(
+  self: Painter,
+  dev: gpu::Device,
+  x: float,
+  y: float,
+  w: float,
+  h: float,
+  r: float,
+  g: float,
+  b: float,
+  a: float
+) {
+  self.flat_values.mat4(0, placed(self.proj, x, y, w, h));
+  self.flat_values.f4(1, r, g, b, a);
+  dev.bind(if self.blend { self.flat_over } else { self.flat });
+  dev.uniforms(self.flat_values);
+  dev.vertices(self.quad);
+  dev.draw(0, 6);
+}
+
+// A texture stretched over (x, y) of `w` x `h` pixels; fully transparent pixels are not drawn.
+pub fn image(self: Painter, dev: gpu::Device, t: const gpu::Texture, x: float, y: float, w: float, h: float) {
+  self.image_values.mat4(0, placed(self.proj, x, y, w, h));
+  dev.bind(if self.blend { self.whole_over } else { self.whole });
+  dev.uniforms(self.image_values);
+  dev.sample(0, t);
+  dev.vertices(self.quad);
+  dev.draw(0, 6);
+}
+
+// Sprite `index` of `sheet` over (x, y) of `w` x `h` pixels.
+pub fn sprite(
+  self: Painter,
+  dev: gpu::Device,
+  sheet: const Sprites,
+  x: float,
+  y: float,
+  w: float,
+  h: float,
+  index: integer
+) {
+  if sheet.cols <= 0 || sheet.rows <= 0 { return; }
+  self.cell_values.mat4(0, placed(self.proj, x, y, w, h));
+  sheet.cell_into(self.cell_values, index);
+  dev.bind(if self.blend { self.cell_over } else { self.cell });
+  dev.uniforms(self.cell_values);
+  dev.sample(0, sheet.texture);
+  dev.vertices(self.quad);
+  dev.draw(0, 6);
+}

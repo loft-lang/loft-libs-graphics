@@ -1,0 +1,17 @@
+[package]
+name = "gpu_paint"
+version = "0.1.0"
+loft = ">=2026.10.0"
+repository = "loft-libs-graphics"
+description = "Rectangles, images and sprites at pixel positions, drawn through gpu: a painter and sprite sheets for any backend"
+categories  = ["graphics", "game"]
+
+# ⚠ FIRST release, so both floors are this release itself.
+api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
+data_compatible_with = "0.1.0"   # oldest own release whose stored data this reads
+
+[dependencies]
+gpu = ">=0.1.0"
+
+[library]
+entry = "src/gpu_paint.loft"
