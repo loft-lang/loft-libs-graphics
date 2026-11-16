@@ -116,12 +116,15 @@ given last.
   ground, blocks whose faces are groups, a slanted triangle, three actors (the hero behind a
   block, one turned and mirrored, one turned about its middle), an overlay — through
   `raster3d` and through this library at 800 x 480, and compares the pictures.  Measured on a
-  Mac (OpenGL 4.1), against `raster3d` at tile-world-game `dd62c5e`: of 384,000 pixels, 23
+  Mac (OpenGL 4.1), against `raster3d` at tile-world-game `dd62c5e`: of 384,000 pixels, 38
   differ by more than two steps of the CPU's five bits a channel (16 of 255); the rest are equal or within that, which is the CPU reducing a
   colour to RGB565 after it is lit.  The same block is cut away by both.  Four planted
   breaks (no cut-away, no cell light, the camera a pixel off, the overlay at half its scale)
   each put thousands of pixels out.  It is not under `tests/`: `raster3d` is in
   tile-world-game's `local/` and not yet a library this package can depend on.
+- **In the game.**  tile-world-game's `tools/fixedshot.loft` (Orbury at night, the hero's torch,
+  the fixed camera) against its CPU picture, on a Mac: 24 of 384,000 pixels differ by more than
+  one step of RGB565.  It was 7,209 while a pixel on a texel's edge was left to the GPU.
 - **By hand.**  `tests/pixels.loft`: a face takes its cell's light once it is given, and only
   its own cell's and layer's; an actor stands over the land, mirrored and turned; the overlay
   over both; the free camera puts a cell's four corners where a projection worked out by hand

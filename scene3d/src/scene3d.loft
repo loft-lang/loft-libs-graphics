@@ -106,7 +106,9 @@ vec3 torch(float id) {{
     return (c.r * 255.0 * 256.0 + c.g * 255.0) / 65535.0 * p.z * uColour[s].rgb;
 }}
 void main() {{
-    vec2 t = clamp(floor(vUV * 16.0), 0.0, 15.0);
+    // a pixel whose middle lies on a texel's edge takes the texel before it, as the CPU does:
+    // left to the GPU it is the one after it on some (a Mac's), a pixel off every second row
+    vec2 t = clamp(floor(vUV * 16.0 - 0.002), 0.0, 15.0);
     vec4 c = texture(tex0, (vSlot * 16.0 + t + 0.5) / 1024.0);
     if (c.a < 0.5) discard;
     vec3 light = max(max(vec3(vLight), max(torch(vTorch.x), torch(vTorch.y))), max(torch(vTorch.z), torch(vTorch.w)));

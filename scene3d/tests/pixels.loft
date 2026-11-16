@@ -235,3 +235,25 @@ fn test_the_hero_is_seen_through_a_wall_the_free_camera_looks_at() {
   c = dev.capture();
   assert(at(c, 32, 24) == GREEN && at(c, 27, 24) == GREEN && at(c, 25, 24) == SKY, "the wall, shown: {at(c, 32, 24):x} {at(c, 27, 24):x} {at(c, 25, 24):x}");
 }
+
+fn test_a_pixel_on_a_texels_edge_takes_the_texel_before_it() {
+  if !display() { return; }
+  dev = gpu::open(gpu_gl::table(), 64, 48, "scene-ties") ?? return assert(false, "no device");
+  scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, SKY) ?? return assert(false, "no scene");
+  // The picture's first row red, the rest green.  On the ground of cell (0, 0) a texel is 40 / 16
+  // = 2.5 pixels deep, so the middle of pixel row 2 (y = 2.5) lies exactly on the edge between
+  // the first texel row and the second.  The CPU implementation takes the texel before the edge;
+  // so must this one, or every second texel row is a pixel off against it.
+  rows: vector<i32> = [];
+  for y in 0..16 { for _ in 0..16 { rows += [(if y == 0 { 63488 } else { 2016 }) as i32]; } }
+  _ = scene.add_picture(rows);
+  scene.set_tile(dev, 1, s(ground()));
+  scene.fixed_camera(0, 0);
+  scene.draw(dev);
+  c = dev.capture();
+  assert(at(c, 10, 1) == RED && at(c, 10, 3) == GREEN, "the rows beside the edge: {at(c, 10, 1):x} {at(c, 10, 3):x}");
+  assert(at(c, 10, 2) == RED && at(c, 40, 2) == RED, "on the edge, the texel before it: {at(c, 10, 2):x} {at(c, 40, 2):x}");
+  // the same at the next edge that falls on a pixel's middle: y = 7.5, between texel rows 2 and 3;
+  // and across, where a texel is 3 pixels wide and no edge falls on a middle
+  assert(at(c, 10, 7) == GREEN && at(c, 2, 1) == RED && at(c, 3, 1) == RED, "elsewhere: {at(c, 10, 7):x} {at(c, 2, 1):x}");
+}

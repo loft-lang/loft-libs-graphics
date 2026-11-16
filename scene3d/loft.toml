@@ -1,6 +1,6 @@
 [package]
 name = "scene3d"
-version = "0.4.0"
+version = "0.4.1"
 loft = ">=2026.10.0"
 repository = "loft-libs-graphics"
 description = "A 3D scene a game's view gives once — tiles of faces, the cells' light, actors — drawn through gpu"
