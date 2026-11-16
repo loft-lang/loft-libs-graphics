@@ -270,7 +270,19 @@ fn OpDrop(self: Device) {
 // backend in turn.
 pub fn open(table: i64, width: integer, height: integer, title: text) -> Device? {
   if gp_use(table) == 0 { return null; }
-  h = gp_open(width, height, title, 0);
+  device_of(gp_open(width, height, title, 0))
+}
+
+// Open a window over the whole screen through the backend whose table is `table`: no border,
+// the machine's own bars hidden where it has them.  Its size is the screen's (`width`,
+// `height`).  Null as `open`, and where the backend has no whole-screen window.
+pub fn open_fullscreen(table: i64, title: text) -> Device? {
+  if gp_use(table) == 0 { return null; }
+  device_of(gp_open(0, 0, title, 1))
+}
+
+// The device of a window the backend opened; none when it did not.
+fn device_of(h: integer) -> Device? {
   if h == 0 { return null; }
   Device {
     handle: h,

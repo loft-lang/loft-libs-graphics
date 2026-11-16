@@ -257,3 +257,30 @@ fn test_a_pixel_on_a_texels_edge_takes_the_texel_before_it() {
   // and across, where a texel is 3 pixels wide and no edge falls on a middle
   assert(at(c, 10, 7) == GREEN && at(c, 2, 1) == RED && at(c, 3, 1) == RED, "elsewhere: {at(c, 10, 7):x} {at(c, 2, 1):x}");
 }
+
+fn test_a_screen_is_drawn_as_large_as_fits_in_the_window() {
+  if !display() { return; }
+  dev = gpu::open(gpu_gl::table(), 64, 48, "scene-fit") ?? return assert(false, "no device");
+  scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, SKY) ?? return assert(false, "no scene");
+  // the picture's first row red, the rest green, on the ground of cell (0, 0)
+  rows: vector<i32> = [];
+  for y in 0..16 { for _ in 0..16 { rows += [(if y == 0 { 63488 } else { 2016 }) as i32]; } }
+  _ = scene.add_picture(rows);
+  scene.set_tile(dev, 1, s(ground()));
+  scene.fixed_camera(0, 0);
+  // A screen 32 x 48 in the 64 x 48 window: as it is, x 16 .. 47, black beside it.  The cell is
+  // 48 across, so it fills the screen's width; its ground ends at y 40, the sky under it.
+  scene.resize(32, 48);
+  scene.draw(dev);
+  c = dev.capture();
+  assert(at(c, 15, 10) == BLACK && at(c, 48, 10) == BLACK && at(c, 2, 44) == BLACK, "black beside the screen: {at(c, 15, 10):x} {at(c, 48, 10):x}");
+  assert(at(c, 16, 10) == GREEN && at(c, 47, 10) == GREEN && at(c, 20, 1) == RED, "the cell across the screen: {at(c, 16, 10):x} {at(c, 47, 10):x} {at(c, 20, 1):x}");
+  assert(at(c, 20, 44) == SKY && at(c, 46, 41) == SKY, "the sky inside it: {at(c, 20, 44):x}");
+  // A screen 32 x 24: twice as large, the whole window.  A texel row is 2.5 screen pixels
+  // deep, 5 of the window's: the red row is y 0 .. 4.
+  scene.resize(32, 24);
+  scene.draw(dev);
+  c = dev.capture();
+  assert(at(c, 0, 0) == RED && at(c, 63, 4) == RED && at(c, 10, 5) == GREEN, "twice as large: {at(c, 0, 0):x} {at(c, 63, 4):x} {at(c, 10, 5):x}");
+  assert(at(c, 0, 47) == GREEN && at(c, 63, 47) == GREEN, "no bars: {at(c, 0, 47):x}");
+}

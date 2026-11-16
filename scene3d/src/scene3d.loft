@@ -211,6 +211,10 @@ pub struct Scene {
   over_quad: gpu::Buffer,
   over_picture: gpu::Texture,
   over_on: boolean,
+  // What fills the screen's own rectangle with the sky where the window is another shape: made
+  // the first time it is needed.
+  backdrop: gpu::Texture?,
+  back_quad: gpu::Buffer?,
   // The camera: free (a matrix the view gave), or fixed with the screen's top-left in world
   // pixels; and the screen's size.
   free: boolean,
@@ -274,6 +278,8 @@ pub fn new_scene(dev: const gpu::Device, into: integer, sky: i64) -> Scene? {
     over_quad: dev.buffer([0.0f]),
     over_picture: dev.texture(1, 1),
     over_on: false,
+    backdrop: null,
+    back_quad: null,
     free: false,
     view: [],
     eye: [0.0, 0.0, 0.0],
@@ -286,10 +292,38 @@ pub fn new_scene(dev: const gpu::Device, into: integer, sky: i64) -> Scene? {
   }
 }
 
-/// The screen's size, for a pass into a target of another size than the window.
+/// The screen's size: what the fixed camera shows (a cell `WIDE` of these across) and the
+/// overlay is laid out on.  In a window of another size the screen is drawn as large as fits,
+/// in its own shape, in the middle, with black beside it: a view made for 800 x 480 fills a
+/// whole-screen window so, showing what it showed.  A pass into a target (`draw_into`) covers
+/// the whole target.
 pub fn resize(self: Scene, width: integer, height: integer) {
   self.width = width;
   self.height = height;
+}
+
+/// Where the screen lies in a window `wide` x `high`: its left, its bottom, its width and its
+/// height in the window's pixels.
+pub fn placed(self: const Scene, wide: integer, high: integer) -> (integer, integer, integer, integer) {
+  if self.width <= 0 || self.height <= 0 || (self.width == wide && self.height == high) { return (0, 0, wide, high); }
+  scale = (wide as float / self.width as float) ?? 1.0;
+  other = (high as float / self.height as float) ?? 1.0;
+  if other < scale { scale = other; }
+  w = (self.width as float * scale + 0.5) as integer;
+  h = (self.height as float * scale + 0.5) as integer;
+  if w > wide { w = wide; }
+  if h > high { h = high; }
+  ((wide - w) / 2, (high - h) / 2, w, h)
+}
+
+/// The screen's pixel under the window's pixel (x, y), both from the top-left: where a pointer
+/// is on the screen.  It lies outside 0 .. width, 0 .. height when the pointer is beside it.
+pub fn screen_point(self: const Scene, wide: integer, high: integer, x: integer, y: integer) -> (integer, integer) {
+  at = self.placed(wide, high);
+  if at.2 <= 0 || at.3 <= 0 { return (x, y); }
+  top = high - at.1 - at.3;
+  (floor_of(((x - at.0) as float * self.width as float / at.2 as float) ?? 0.0),
+   floor_of(((y - top) as float * self.height as float / at.3 as float) ?? 0.0))
 }
 
 // An RGB565 value as 0xAARRGGBB: each channel's high bits repeated in its low ones; NONE clear.
@@ -1086,9 +1120,35 @@ fn draw_in(self: Scene, dev: gpu::Device) {
   }
 }
 
-/// Draw the scene into the window: a pass of its own, cleared to the sky.
+/// Draw the scene into the window: a pass of its own, cleared to the sky.  Where the window
+/// is not the screen's size (`resize`), the screen is drawn as large as fits in the middle of
+/// it and the rest is black.
 pub fn draw(self: Scene, dev: gpu::Device) {
-  dev.begin_window(gpu::CLEAR, self.sky);
+  wide = dev.width();
+  high = dev.height();
+  at = self.placed(wide, high);
+  if at.0 == 0 && at.1 == 0 && at.2 == wide && at.3 == high {
+    dev.begin_window(gpu::CLEAR, self.sky);
+    self.draw_in(dev);
+    dev.end();
+    return;
+  }
+  if !self.backdrop {
+    one = dev.texture(1, 1);
+    one.put(0, 0, [(self.sky & 4294967295) as u32], 1, 1);
+    self.backdrop = one;
+    self.back_quad = dev.buffer([
+      -1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 0.0f, 1.0f, -1.0f, 1.0f, 1.0f,
+      -1.0f, 1.0f, 0.0f, 0.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 0.0f, 1.0f,
+    ]);
+  }
+  dev.begin_window(gpu::CLEAR, 0xFF000000);
+  dev.viewport(at.0, at.1, at.2, at.3);
+  // the sky, over the screen's own rectangle
+  dev.bind(self.over);
+  dev.sample(0, self.backdrop!);
+  dev.vertices(self.back_quad!);
+  dev.draw(0, 6);
   self.draw_in(dev);
   dev.end();
 }

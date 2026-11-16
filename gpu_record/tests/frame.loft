@@ -308,3 +308,11 @@ fn test_input_a_small_machines_pixels_and_a_targets_pixels_reach_the_backend() {
   ]);
   assert(after_open().starts_with(want), "what arrived:\n{after_open()}");
 }
+
+fn test_a_window_over_the_whole_screen_is_asked_for_as_one() {
+  gpu_record::reset();
+  dev = gpu::open_fullscreen(gpu_record::table(), "whole") ?? return assert(false, "no device");
+  // no size is asked: the backend gives the screen's
+  assert(gpu_record::log() == "open 1 0x0 \"whole\" fullscreen\n", "what the backend was asked:\n{gpu_record::log()}");
+  assert(dev.poll(), "it is open");
+}
