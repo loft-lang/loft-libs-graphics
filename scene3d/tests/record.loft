@@ -128,10 +128,61 @@ fn test_the_walls_in_front_of_the_hero_are_cut_away_and_shown_again() {
   // No actor is the one never hidden: nothing is cut for it.
   scene.set_actors(s(hero), -1);
   assert("{scene.hidden_groups()}" == "[]", "nobody to keep in view: {scene.hidden_groups()}");
-  // The free camera cuts nothing away.
-  scene.free_camera((4.5, 3.0, 9.0), (4.5, 0.5, 2.6), 60.0);
+}
+
+// The west side of a block a layer high on cell (x, z), in group `group`.
+fn west(x: float, z: float, group: integer) -> vector<float> {
+  quad(0, group, (0, 0, scene3d::NO_LIGHT), [x, 1.0, z, 0.0, 0.0, 1.0, x, 1.0, z + 1.0, 1.0, 0.0, 1.0, x, 0.0, z + 1.0, 1.0, 1.0, 1.0, x, 0.0, z, 0.0, 1.0, 1.0])
+}
+
+fn test_the_free_camera_cuts_away_the_walls_between_its_eye_and_the_hero() {
+  dev = open();
+  scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, 0xFF94BFE6)!;
+  _ = scene.add_picture([for _ in 0..256 { 2016 as i32 }]);
+  // Three walls round a hero whose foot is at (4.5, 0, 2.5), its card a cell wide and tall:
+  // group 21, a block on cell (4, 3), south of it; group 22, the west side of cell (2, 2), at
+  // x = 2 from z 2 to 3; group 23, a side at x = 4.9 from z 2 to 4, which passes through the
+  // card's east edge when it faces south: the lines end a quarter of the card inside its edges,
+  // so a wall at its edge is not between.  Each in a tile of its own.
+  scene.set_tile(dev, 1, s(top(4.0, 3.0, 21) + south(4.0, 3.0, 21)));
+  scene.set_tile(dev, 2, s(west(2.0, 2.0, 22)));
+  scene.set_tile(dev, 3, s(west(4.9, 2.0, 23) + west(4.9, 3.0, 23)));
+  hero = [1.0, 0.0, 4.5, 0.0, 2.5, 1.0, 1.0, 0.0, 0.5, 1.0, 0.0];
+  // From the south and above: the line to the card's middle (4.5, 0.5, 2.5) is at y = 1 after
+  // 0.8 of its way, where z = 9 - 0.8 * 6.5 = 3.8: through the block's top.
+  scene.free_camera((4.5, 3.0, 9.0), (4.5, 0.5, 2.5), 60.0);
   scene.set_actors(s(hero), 1);
-  assert("{scene.hidden_groups()}" == "[]", "the free camera cuts no wall: {scene.hidden_groups()}");
+  assert("{scene.hidden_groups()}" == "[21]", "the block between the eye and the hero: {scene.hidden_groups()}");
+  // Level with the hero: the line is at z = 4 at y = 0.5, through the block's south side.
+  scene.free_camera((4.5, 0.5, 9.0), (4.5, 0.5, 2.5), 60.0);
+  assert("{scene.hidden_groups()}" == "[21]", "through its side: {scene.hidden_groups()}");
+  // From the north the block is behind the hero.  The camera alone is given: the actors stay.
+  scene.free_camera((4.5, 3.0, -4.0), (4.5, 0.5, 2.5), 60.0);
+  assert("{scene.hidden_groups()}" == "[]", "behind the hero it is shown again: {scene.hidden_groups()}");
+  // From high over the block: the line to the middle is at y = 1 where z = 4.5 - 2 * 8 / 8.5 =
+  // 2.62, north of the block's top.
+  scene.free_camera((4.5, 9.0, 4.5), (4.5, 0.5, 2.5), 60.0);
+  assert("{scene.hidden_groups()}" == "[]", "over the block, the hero is seen: {scene.hidden_groups()}");
+  // From the west, level: the line crosses x = 2 at z = 2.5, y = 0.5.
+  scene.free_camera((0.5, 0.5, 2.5), (4.5, 0.5, 2.5), 60.0);
+  assert("{scene.hidden_groups()}" == "[22]", "the side west of the hero: {scene.hidden_groups()}");
+  // The actors first, then the camera: the same walls.
+  scene.set_actors(s([1.0, 0.0, 4.5, 0.0, 6.5, 1.0, 1.0, 0.0, 0.5, 1.0, 0.0]), 1);
+  assert("{scene.hidden_groups()}" == "[]", "the hero south of every wall, seen from the west: {scene.hidden_groups()}");
+  scene.set_actors(s(hero), 1);
+  scene.free_camera((4.5, 3.0, 9.0), (4.5, 0.5, 2.5), 60.0);
+  assert("{scene.hidden_groups()}" == "[21]", "whichever is given last: {scene.hidden_groups()}");
+  // Nobody to keep in view: nothing is cut, whatever was.
+  scene.set_actors(s(hero), -1);
+  assert("{scene.hidden_groups()}" == "[]", "nobody to keep in view: {scene.hidden_groups()}");
+  // The fixed camera after the free one cuts as the fixed camera does: seen from the west only
+  // the side at x = 2 is between; on the fixed camera's screen the card lies from y = 2.5 * 40
+  // - 48 = 52 to 100 at x 192 to 240, the block's top over it from y = 72, and nearer.
+  scene.free_camera((0.5, 0.5, 2.5), (4.5, 0.5, 2.5), 60.0);
+  scene.set_actors(s(hero), 1);
+  assert("{scene.hidden_groups()}" == "[22]", "the free camera's: {scene.hidden_groups()}");
+  scene.fixed_camera(0, 0);
+  assert("{scene.hidden_groups()}" == "[21]", "the fixed camera's: {scene.hidden_groups()}");
 }
 
 fn test_a_box_of_light_is_one_write_and_a_few_where_it_crosses_the_maps_edge() {
