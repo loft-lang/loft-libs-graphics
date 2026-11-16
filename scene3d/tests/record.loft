@@ -181,8 +181,10 @@ fn test_the_free_camera_cuts_away_the_walls_between_its_eye_and_the_hero() {
   scene.free_camera((0.5, 0.5, 2.5), (4.5, 0.5, 2.5), 60.0);
   scene.set_actors(s(hero), 1);
   assert("{scene.hidden_groups()}" == "[22]", "the free camera's: {scene.hidden_groups()}");
+  // The side at x = 4.9 is cut too: seen from the south it is a strip one pixel wide (x 235) from
+  // y = 32 to 160, over the card, and its south end (z = 4) is nearer than the card.
   scene.fixed_camera(0, 0);
-  assert("{scene.hidden_groups()}" == "[21]", "the fixed camera's: {scene.hidden_groups()}");
+  assert("{scene.hidden_groups()}" == "[21,23]", "the fixed camera's: {scene.hidden_groups()}");
 }
 
 fn test_a_box_of_light_is_one_write_and_a_few_where_it_crosses_the_maps_edge() {
