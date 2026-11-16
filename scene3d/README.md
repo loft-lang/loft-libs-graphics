@@ -79,6 +79,16 @@ What is drawn:
 A scene holds 64 torches; a 65th reach is refused.  A torch's id is given as a single, which
 holds a whole number exactly up to 16,777,216: two ids that round to one number are one torch.
 
+## The screen and the window
+
+`resize(width, height)` says how large the screen is: what the fixed camera shows, a cell 48
+of its pixels across, and what the overlay is laid out on.  A scene starts with the window's
+size.  In a window of another size `draw` shows the screen as large as fits, in its own
+shape, in the middle, and black beside it.  So a view made for 800 x 480 plays in a
+whole-screen window (`gpu::open_fullscreen`) showing what it showed: keep `resize(800, 480)`.
+`placed(wide, high)` says where the screen lies in such a window and `screen_point` which
+screen pixel is under a window's, for a pointer.  `draw_into` a target covers the whole target.
+
 ## The cameras
 
 - **Fixed**: a parallel projection from the south, a cell 48 pixels across, its ground 40
@@ -130,6 +140,9 @@ given last.
   over both; the free camera puts a cell's four corners where a projection worked out by hand
   puts them.  `tests/record.loft` (no display): what a scene asks of a backend, and which
   walls are cut away and shown again.
+- **A fitted screen**: by hand in `tests/record.loft` (where it lies, the pointer's pixel, the
+  calls of a fitted frame) and `tests/pixels.loft` (bars black, the sky inside, twice as
+  large); and once on a Mac's whole screen, 3440 x 1440: the view 2400 x 1440 in the middle.
 - **The free camera** (`tests/pixels.loft`, `tests/record.loft`): a card seen from the east
   and from the north stands across the view at the size worked out by hand, its left on the
   left; a wall between the eye and the hero is cut away from above and level, one behind the

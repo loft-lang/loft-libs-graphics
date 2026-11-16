@@ -262,3 +262,61 @@ fn test_a_torch_is_its_reach_once_and_nine_numbers_a_frame() {
   assert(got == lines(["texture_put 6 at 5,9 3x2 first 00000000"]), "torch 7 dropped:\n{got}");
   assert(scene.torches() == 1, "one torch left");
 }
+
+// A tuple as text: a tuple is not formatted as it is.
+fn four(t: (integer, integer, integer, integer)) -> text {
+  "({t.0},{t.1},{t.2},{t.3})"
+}
+
+fn two(t: (integer, integer)) -> text {
+  "({t.0},{t.1})"
+}
+
+fn test_a_screen_of_another_shape_than_the_window_is_fitted_in_its_middle() {
+  dev = open();
+  scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, 0xFF94BFE6)!;
+  // The window is 800 x 480.  A screen of 400 x 300 fits 1.6 times (480 / 300; across it would
+  // be 2): 640 x 480, 80 from the left.
+  scene.resize(400, 300);
+  assert("{four(scene.placed(800, 480))}" == "(80,0,640,480)", "where the screen lies: {four(scene.placed(800, 480))}");
+  // The window's pixel (80, 0) is the screen's first; (719, 479) its last, 399.4 and 299.4 in;
+  // 40 left of it is 25 screen pixels out.
+  assert("{two(scene.screen_point(800, 480, 80, 0))}" == "(0,0)", "its first pixel: {two(scene.screen_point(800, 480, 80, 0))}");
+  assert("{two(scene.screen_point(800, 480, 719, 479))}" == "(399,299)", "its last: {two(scene.screen_point(800, 480, 719, 479))}");
+  assert("{two(scene.screen_point(800, 480, 40, 10))}" == "(-25,6)", "beside it: {two(scene.screen_point(800, 480, 40, 10))}");
+  before = gpu_record::log();
+  scene.draw(dev);
+  // A texture of the sky and a quad for it (11, 12, after the overlay's picture), made once;
+  // the pass cleared black, drawn inside the screen's rectangle: the sky over it by the
+  // overlay's pipeline (3), then the land, its matrix for 400 across (2 * 48 / 400 = 0.24).
+  fitted = lines([
+    "texture 11 1x1 colour",
+    "texture_put 11 at 0,0 1x1 first ff94bfe6",
+    "buffer 12 floats 24",
+    "begin 0 clear ff000000",
+    "  viewport 80,0 640x480",
+    "  bind 3",
+    "  sample 0 texture 11",
+    "  vertices 12",
+    "  draw from 0 count 6 copies 0",
+    "  bind 2",
+    "  uniforms floats 528 first 0.240 last 0.000",
+    "  sample 0 texture 4",
+    "  sample 1 texture 5",
+    "  sample 2 texture 6",
+    "  sample 3 texture 7",
+    "end",
+  ]);
+  got = gpu_record::log()[len(before)..];
+  assert(got == fitted, "a fitted frame:\n{got}");
+  // The screen the window's size again: the whole window, cleared to the sky, nothing made.
+  scene.resize(800, 480);
+  before = gpu_record::log();
+  scene.draw(dev);
+  got = gpu_record::log()[len(before)..];
+  assert(got.starts_with("begin 0 clear ff94bfe6\n  bind 2\n"), "the whole window:\n{got}");
+  // A screen of the window's shape at half its size fills it: no bars.
+  scene.resize(400, 240);
+  assert("{four(scene.placed(800, 480))}" == "(0,0,800,480)", "twice as large: {four(scene.placed(800, 480))}");
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+}

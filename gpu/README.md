@@ -26,6 +26,7 @@ VIEW = gpu::Program {
 };
 
 dev   = gpu::open(table, 960, 720, "view") ?? return;   // `table` is a backend's `table()`
+// or over the whole screen, its size the screen's: gpu::open_fullscreen(table, "view")
 pipe  = dev.pipeline(VIEW, gpu::State { depth: gpu::DEPTH_TEST_WRITE }) ?? return;
 atlas = dev.texture_from(pixels, 64, 64);
 mesh  = dev.buffer(vertices);
