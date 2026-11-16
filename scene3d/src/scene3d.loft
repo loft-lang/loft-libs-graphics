@@ -192,8 +192,17 @@ pub struct Scene {
   // A tile's triangles that belong to a group, six numbers each: the group, the triangle's
   // rectangle in world pixels (x0, y0, x1, y1) and how near it reaches — what the cut-away asks.
   walls: vector<vector<integer>>,
+  // The same triangles in the world, ten numbers each — the group, then three corners (x, y, z) —
+  // and the box round a tile's (x, y, z least, then most; none for a tile without): what the free
+  // camera's cut-away asks.
+  solids: vector<vector<float>>,
+  bounds: vector<vector<float>>,
   // The groups hidden now (the walls cut away).
   hidden: vector<integer>,
+  // This frame's actors as they were given, and the one never hidden: the cards are made from
+  // them for the camera there is.
+  actors: vector<single>,
+  keep: integer,
   cards: gpu::Buffer,
   card_count: integer,
   over: gpu::Pipeline,
@@ -204,6 +213,11 @@ pub struct Scene {
   // pixels; and the screen's size.
   free: boolean,
   view: vector<float>,
+  // The free camera's eye, and the level direction to its right (x, z): the way a card's width
+  // lies.
+  eye: vector<float>,
+  right_x: float,
+  right_z: float,
   cam_x: integer,
   cam_y: integer,
   width: integer,
@@ -247,7 +261,11 @@ pub fn new_scene(dev: const gpu::Device, into: integer, sky: i64) -> Scene? {
     buffers: [],
     counts: [],
     walls: [],
+    solids: [],
+    bounds: [],
     hidden: [],
+    actors: [],
+    keep: -1,
     cards: dev.buffer([0.0f]),
     card_count: 0,
     over: over,
@@ -256,6 +274,9 @@ pub fn new_scene(dev: const gpu::Device, into: integer, sky: i64) -> Scene? {
     over_on: false,
     free: false,
     view: [],
+    eye: [0.0, 0.0, 0.0],
+    right_x: 1.0,
+    right_z: 0.0,
     cam_x: 0,
     cam_y: 0,
     width: dev.width(),
@@ -332,6 +353,9 @@ pub fn set_tile(self: Scene, dev: const gpu::Device, key: integer, d: const vect
   if old != null {
     self.faces[old.at] = d;
     self.walls[old.at] = walls_of(d);
+    solid = solids_of(d);
+    self.bounds[old.at] = bounds_of(solid);
+    self.solids[old.at] = solid;
     self.counts[old.at] = len(verts) / VERTEX;
     b = self.buffers[old.at] ?? return; // `at` names a buffer: slots and buffers grow together
     b.update(verts);
@@ -340,6 +364,9 @@ pub fn set_tile(self: Scene, dev: const gpu::Device, key: integer, d: const vect
   self.slots += [Slot { key: key, at: len(self.buffers) }];
   self.faces += [d];
   self.walls += [walls_of(d)];
+  solid = solids_of(d);
+  self.bounds += [bounds_of(solid)];
+  self.solids += [solid];
   self.counts += [len(verts) / VERTEX];
   self.buffers += [dev.buffer(verts)];
 }
@@ -421,11 +448,52 @@ fn walls_of(d: const vector<single>) -> vector<integer> {
   out
 }
 
+// Every triangle in `d` that belongs to a group, in the world: the group, then its three
+// corners (x, y, z).
+fn solids_of(d: const vector<single>) -> vector<float> {
+  out: vector<float> = [];
+  i = 0;
+  while i + 7 <= len(d) {
+    group = ((d[i + 1] ?? 0.0f) as float) as integer;
+    n = ((d[i + 2] ?? 0.0f) as float) as integer;
+    at = i + 7;
+    if n < 3 || at + 6 * n > len(d) { break; }
+    if group >= 0 {
+      for t in 1..n - 1 {
+        out += [group as float];
+        for k in [0, t, t + 1] { out += [(d[at + 6 * k] ?? 0.0f) as float, (d[at + 6 * k + 1] ?? 0.0f) as float, (d[at + 6 * k + 2] ?? 0.0f) as float]; }
+      }
+    }
+    i = at + 6 * n;
+  }
+  out
+}
+
+// The box round the triangles of `solid`: x, y, z least, then most; none when there are none.
+fn bounds_of(solid: const vector<float>) -> vector<float> {
+  if len(solid) < 10 { return []; }
+  lo = [solid[1] ?? 0.0, solid[2] ?? 0.0, solid[3] ?? 0.0];
+  hi = [solid[1] ?? 0.0, solid[2] ?? 0.0, solid[3] ?? 0.0];
+  j = 0;
+  while j + 10 <= len(solid) {
+    for k in 0..9 {
+      v = solid[j + 1 + k] ?? 0.0;
+      if v < lo[k % 3] { lo[k % 3] = v; }
+      if v > hi[k % 3] { hi[k % 3] = v; }
+    }
+    j += 10;
+  }
+  both = lo + hi;
+  both
+}
+
 /// Tile `key` gone.
 pub fn drop_tile(self: Scene, key: integer) {
   old = self.slots[key] ?? return;
   self.faces[old.at] = [];
   self.walls[old.at] = [];
+  self.solids[old.at] = [];
+  self.bounds[old.at] = [];
   self.counts[old.at] = 0;
 }
 
@@ -634,12 +702,22 @@ pub fn torches(self: const Scene) -> integer {
 
 /// This frame's actors, eleven numbers each in `d`: an id, the picture, the bottom middle
 /// (x, y, z) of the picture as it stands unturned, its size in cells, its light, how far it is
-/// turned (degrees clockwise as the fixed camera sees it), the point of the picture it turns
-/// about (u, v: 0 .. 1 across and down) and whether it is mirrored (1) or not (0).  A card
-/// stands in the plane the fixed camera looks at.  The actor `keep_seen` is never hidden from
-/// the fixed camera: the wall groups in front of it are cut away, and shown again when they no
-/// longer are (-1: none).
+/// turned (degrees clockwise as the camera sees it), the point of the picture it turns about
+/// (u, v: 0 .. 1 across and down) and whether it is mirrored (1) or not (0).  A card stands
+/// upright and faces the camera: for the fixed camera in the plane it looks at, for the free
+/// one turned about its foot so its width lies across the view.  The actor `keep_seen` is never
+/// hidden: the wall groups between the camera and its card are cut away, and shown again when
+/// they no longer are (-1: none).
 pub fn set_actors(self: Scene, d: const vector<single>, keep_seen: integer) {
+  self.actors = d;
+  self.keep = keep_seen;
+  self.place_actors();
+}
+
+// Make the cards of the actors as they were given, for the camera there is, and cut away the
+// walls in front of the one never hidden.
+fn place_actors(self: Scene) {
+  d = self.actors;
   verts: vector<single> = [];
   hero: vector<float> = [];
   i = 0;
@@ -659,60 +737,156 @@ pub fn set_actors(self: Scene, d: const vector<single>, keep_seen: integer) {
       cs = cos(deg * PI / 180.0);
       bx = x - size / 2.0 + pu * size;
       by = y + (1.0 - pv) * size;
-      // the picture's corners about its pivot, turned: top-left, top-right, bottom-right, bottom-left
+      // the picture's corners about its pivot, turned: top-left, top-right, bottom-right,
+      // bottom-left; each its place (x, y, z) and its point of the picture (u, v)
       c: vector<float> = [];
       for uv in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
         px = (uv.0 - pu) * size;
         py = (pv - uv.1) * size;
-        c += [bx + px * cs + py * sn, by - px * sn + py * cs, if mirror { 1.0 - uv.0 } else { uv.0 }, uv.1];
+        across = px * cs + py * sn;
+        if self.free {
+          // its width lies along the camera's right, from the foot
+          along = (pu - 0.5) * size + across;
+          c += [x + along * self.right_x, by - px * sn + py * cs, z + along * self.right_z];
+        } else {
+          c += [bx + across, by - px * sn + py * cs, z];
+        }
+        c += [if mirror { 1.0 - uv.0 } else { uv.0 }, uv.1];
       }
       sx = (pic % SLOTS) as single;
       sy = (pic / SLOTS) as single;
       for k in [0, 1, 2, 0, 2, 3] {
         verts += [
-          (c[4 * k] ?? 0.0) as single, (c[4 * k + 1] ?? 0.0) as single, z as single, (c[4 * k + 2] ?? 0.0) as single,
-          (c[4 * k + 3] ?? 0.0) as single, sx, sy, floor_of(x) as single, floor_of(z) as single, floor_of(y) as single, -1.0f, light as single,
+          (c[5 * k] ?? 0.0) as single, (c[5 * k + 1] ?? 0.0) as single, (c[5 * k + 2] ?? 0.0) as single, (c[5 * k + 3] ?? 0.0) as single,
+          (c[5 * k + 4] ?? 0.0) as single, sx, sy, floor_of(x) as single, floor_of(z) as single, floor_of(y) as single, -1.0f, light as single,
         ];
       }
-      if ((d[i] ?? 0.0f) as float) as integer == keep_seen {
-        for k in 0..4 { hero += [c[4 * k] ?? 0.0, c[4 * k + 1] ?? 0.0, z]; }
+      if ((d[i] ?? 0.0f) as float) as integer == self.keep {
+        for k in 0..4 { hero += [c[5 * k] ?? 0.0, c[5 * k + 1] ?? 0.0, c[5 * k + 2] ?? 0.0]; }
       }
     }
     i += 11;
   }
   self.card_count = len(verts) / VERTEX;
   if len(verts) > 0 { self.cards.update(verts); }
-  if keep_seen >= 0 && !self.free { self.uncover(hero); }
+  want: vector<integer> = [];
+  if self.keep >= 0 && len(hero) >= 12 { want = if self.free { self.crossed(hero) } else { self.covering(hero) }; }
+  self.hide(want);
 }
 
-// Hide every wall group that covers the card with corners `c` (four of x, y, z) and reaches
-// nearer than it, and show those hidden before that no longer do.  The tiles holding a group
-// that changed are given to the GPU again.
-fn uncover(self: Scene, c: const vector<float>) {
+// The wall groups that cover the card with corners `c` (four of x, y, z) on the fixed camera's
+// screen and reach nearer than it.
+fn covering(self: const Scene, c: const vector<float>) -> vector<integer> {
   want: vector<integer> = [];
-  if len(c) >= 12 {
-    a = wall_of(0, c[0..9]);
-    b = wall_of(0, c[0..3] + c[6..12]);
-    x0 = least(a[1] ?? 0, b[1] ?? 0);
-    y0 = least(a[2] ?? 0, b[2] ?? 0);
-    x1 = -least(-(a[3] ?? 0), -(b[3] ?? 0));
-    y1 = -least(-(a[4] ?? 0), -(b[4] ?? 0));
-    near = least(a[5] ?? 0, b[5] ?? 0);
-    for ws in self.walls {
-      j = 0;
-      while j + 6 <= len(ws) {
-        g = ws[j] ?? 0;
-        covers = (ws[j + 1] ?? 0) < x1 && x0 < (ws[j + 3] ?? 0) && (ws[j + 2] ?? 0) < y1 && y0 < (ws[j + 4] ?? 0)
-          && (ws[j + 1] ?? 0) < (ws[j + 3] ?? 0) && (ws[j + 2] ?? 0) < (ws[j + 4] ?? 0) && x0 < x1 && y0 < y1;
-        if covers && (ws[j + 5] ?? 0) < near {
-          known = false;
-          for w in want { if w == g { known = true; } }
-          if !known { want += [g]; }
-        }
-        j += 6;
+  a = wall_of(0, c[0..9]);
+  b = wall_of(0, c[0..3] + c[6..12]);
+  x0 = least(a[1] ?? 0, b[1] ?? 0);
+  y0 = least(a[2] ?? 0, b[2] ?? 0);
+  x1 = -least(-(a[3] ?? 0), -(b[3] ?? 0));
+  y1 = -least(-(a[4] ?? 0), -(b[4] ?? 0));
+  near = least(a[5] ?? 0, b[5] ?? 0);
+  for ws in self.walls {
+    j = 0;
+    while j + 6 <= len(ws) {
+      g = ws[j] ?? 0;
+      covers = (ws[j + 1] ?? 0) < x1 && x0 < (ws[j + 3] ?? 0) && (ws[j + 2] ?? 0) < y1 && y0 < (ws[j + 4] ?? 0)
+        && (ws[j + 1] ?? 0) < (ws[j + 3] ?? 0) && (ws[j + 2] ?? 0) < (ws[j + 4] ?? 0) && x0 < x1 && y0 < y1;
+      if covers && (ws[j + 5] ?? 0) < near {
+        known = false;
+        for w in want { if w == g { known = true; } }
+        if !known { want += [g]; }
       }
+      j += 6;
     }
   }
+  want
+}
+
+// The wall groups a line from the free camera's eye to the card with corners `c` (four of
+// x, y, z) crosses.  Five lines: to the card's middle and to the point halfway from the middle
+// to each corner, so a wall the card only touches at its edge is not one of them.
+fn crossed(self: const Scene, c: const vector<float>) -> vector<integer> {
+  want: vector<integer> = [];
+  ex = self.eye[0] ?? 0.0;
+  ey = self.eye[1] ?? 0.0;
+  ez = self.eye[2] ?? 0.0;
+  mid = [0.0, 0.0, 0.0];
+  // the box round the eye and the card: a tile whose walls lie outside it is not looked at
+  lo = [ex, ey, ez];
+  hi = [ex, ey, ez];
+  for k in 0..12 {
+    v = c[k] ?? 0.0;
+    mid[k % 3] += v / 4.0;
+    if v < lo[k % 3] { lo[k % 3] = v; }
+    if v > hi[k % 3] { hi[k % 3] = v; }
+  }
+  ends: vector<float> = mid;
+  for k in 0..12 { ends += [((mid[k % 3] ?? 0.0) + (c[k] ?? 0.0)) / 2.0]; }
+  for solid in self.solids {
+    bd = self.bounds[solid#index] ?? [];
+    if len(bd) < 6 { continue; }
+    apart = false;
+    for k in 0..3 { if (bd[k] ?? 0.0) > (hi[k] ?? 0.0) || (bd[k + 3] ?? 0.0) < (lo[k] ?? 0.0) { apart = true; } }
+    if apart { continue; }
+    j = 0;
+    while j + 10 <= len(solid) {
+      g = (solid[j] ?? 0.0) as integer;
+      known = false;
+      for w in want { if w == g { known = true; } }
+      if !known {
+        hit = false;
+        for e in 0..5 {
+          if !hit && between(solid, j + 1, (ex, ey, ez), (ends[3 * e] ?? 0.0, ends[3 * e + 1] ?? 0.0, ends[3 * e + 2] ?? 0.0)) { hit = true; }
+        }
+        if hit { want += [g]; }
+      }
+      j += 10;
+    }
+  }
+  want
+}
+
+// Whether the triangle whose corners are the nine numbers of `t` from `at` lies between the
+// points a and b: the line from a to b goes through it, past a and before b.
+fn between(t: const vector<float>, at: integer, a: (float, float, float), b: (float, float, float)) -> boolean {
+  px = t[at] ?? 0.0;
+  py = t[at + 1] ?? 0.0;
+  pz = t[at + 2] ?? 0.0;
+  // the triangle's two edges from its first corner, and the line's way
+  ux = (t[at + 3] ?? 0.0) - px;
+  uy = (t[at + 4] ?? 0.0) - py;
+  uz = (t[at + 5] ?? 0.0) - pz;
+  vx = (t[at + 6] ?? 0.0) - px;
+  vy = (t[at + 7] ?? 0.0) - py;
+  vz = (t[at + 8] ?? 0.0) - pz;
+  dx = b.0 - a.0;
+  dy = b.1 - a.1;
+  dz = b.2 - a.2;
+  // h = d x v
+  hx = dy * vz - dz * vy;
+  hy = dz * vx - dx * vz;
+  hz = dx * vy - dy * vx;
+  det = ux * hx + uy * hy + uz * hz;
+  // the line runs along the triangle's plane: it does not go through it
+  if det > -0.000000001 && det < 0.000000001 { return false; }
+  sx = a.0 - px;
+  sy = a.1 - py;
+  sz = a.2 - pz;
+  u = ((sx * hx + sy * hy + sz * hz) / det) ?? -1.0;
+  if u < 0.0 || u > 1.0 { return false; }
+  // q = s x u
+  qx = sy * uz - sz * uy;
+  qy = sz * ux - sx * uz;
+  qz = sx * uy - sy * ux;
+  v = ((dx * qx + dy * qy + dz * qz) / det) ?? -1.0;
+  if v < 0.0 || u + v > 1.0 { return false; }
+  along = ((vx * qx + vy * qy + vz * qz) / det) ?? -1.0;
+  along > 0.000001 && along < 0.999999
+}
+
+// Hide the groups `want` and show those hidden before that are not among them.  The tiles
+// holding a group that changed are given to the GPU again.
+fn hide(self: Scene, want: const vector<integer>) {
   changed: vector<integer> = [];
   for h in self.hidden {
     still = false;
@@ -742,7 +916,7 @@ fn uncover(self: Scene, c: const vector<float>) {
   }
 }
 
-/// The groups hidden now: the walls cut away in front of the actor that is never hidden.
+/// The groups hidden now: the walls cut away between the camera and the actor never hidden.
 pub fn hidden_groups(self: const Scene) -> vector<integer> {
   self.hidden
 }
@@ -779,11 +953,26 @@ pub fn offers_free_camera(self: const Scene) -> boolean {
 }
 
 /// The free camera: an eye, a point looked at, and a field of view in degrees, in perspective.
-/// Cards stand as for the fixed camera, facing south, and no wall is cut away.
+/// The cards turn to face it, and the walls between the eye and the actor never hidden are cut
+/// away, whichever of the camera and the actors is given first.
 pub fn free_camera(self: Scene, eye: (float, float, float), at: (float, float, float), field: float) {
-  self.free = true;
   aspect = (self.width as float / self.height as float) ?? 1.0;
   self.view = times(perspective(field, aspect, 0.05, 200.0), look(eye, at));
+  // the level direction to the camera's right, as `look` takes it; east when it looks straight
+  // up or down
+  rx = eye.2 - at.2;
+  rz = at.0 - eye.0;
+  rl = sqrt(rx * rx + rz * rz);
+  if rl == 0.0 { rx = 1.0; rz = 0.0; rl = 1.0; }
+  rx = (rx / rl) ?? 1.0;
+  rz = (rz / rl) ?? 0.0;
+  same = self.free && rx == self.right_x && rz == self.right_z && eye.0 == (self.eye[0] ?? 0.0) && eye.1 == (self.eye[1] ?? 0.0)
+    && eye.2 == (self.eye[2] ?? 0.0);
+  self.free = true;
+  self.eye = [eye.0, eye.1, eye.2];
+  self.right_x = rx;
+  self.right_z = rz;
+  if !same { self.place_actors(); }
 }
 
 // A perspective projection, column-major: `field` degrees high, depth -1 at `near` to 1 at `far`.
@@ -838,9 +1027,12 @@ fn times(a: const vector<float>, b: const vector<float>) -> vector<float> {
 /// The fixed camera, from the south: the screen's top-left at world pixel (px, py), where cell
 /// (x, z) on layer y lies at (x * WIDE, z * DEEP - y * TALL).
 pub fn fixed_camera(self: Scene, px: integer, py: integer) {
+  was = self.free;
   self.free = false;
   self.cam_x = px;
   self.cam_y = py;
+  // the cards and the cut-away were the free camera's
+  if was { self.place_actors(); }
 }
 
 // The fixed camera as a matrix, column-major: a parallel projection onto the screen's pixels,

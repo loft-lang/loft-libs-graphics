@@ -158,3 +158,80 @@ fn test_a_scene_far_from_the_origin_is_drawn_as_one_near_it() {
   c = dev.capture();
   assert(at(c, 10, 10) == GREEN && at(c, 10, 40) == SKY, "the cell 60 rows south: {at(c, 10, 10):x} {at(c, 10, 40):x}");
 }
+
+// A picture red on its left half and blue on its right.
+fn halves() -> vector<i32> {
+  out: vector<i32> = [];
+  for _ in 0..16 { for x in 0..16 { out += [(if x < 8 { 63488 } else { 31 }) as i32]; } }
+  out
+}
+
+fn test_a_card_turns_to_face_the_free_camera() {
+  if !display() { return; }
+  dev = gpu::open(gpu_gl::table(), 64, 48, "scene-facing") ?? return assert(false, "no device");
+  scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, SKY) ?? return assert(false, "no scene");
+  both = scene.add_picture(halves());
+  // A card a cell wide and tall, its foot at (0.5, 0, 0.5), seen level from three cells east.
+  // It stands across the view: 50 degrees high on 64 x 48, half a cell at three cells is
+  // 0.5 / 3 / tan 25 * 24 = 8.58 pixels each way from the middle, x 23.4 .. 40.6, y 15.4 .. 32.6.
+  // The picture's left is on the left.  Unturned it would stand edge-on and show nothing.
+  scene.set_actors(s([1.0, both as float, 0.5, 0.0, 0.5, 1.0, 1.0, 0.0, 0.5, 1.0, 0.0]), -1);
+  scene.free_camera((3.5, 0.5, 0.5), (0.5, 0.5, 0.5), 50.0);
+  scene.draw(dev);
+  c = dev.capture();
+  assert(at(c, 26, 24) == RED && at(c, 38, 24) == BLUE, "facing east, its left on the left: {at(c, 26, 24):x} {at(c, 38, 24):x}");
+  assert(at(c, 30, 17) == RED && at(c, 30, 31) == RED, "a cell tall: {at(c, 30, 17):x} {at(c, 30, 31):x}");
+  assert(at(c, 22, 24) == SKY && at(c, 42, 24) == SKY && at(c, 32, 14) == SKY && at(c, 32, 34) == SKY,
+         "and no larger: {at(c, 22, 24):x} {at(c, 42, 24):x} {at(c, 32, 14):x} {at(c, 32, 34):x}");
+  // From three cells north it has turned round: the same picture, its left still on the left.
+  scene.free_camera((0.5, 0.5, -2.5), (0.5, 0.5, 0.5), 50.0);
+  scene.draw(dev);
+  c = dev.capture();
+  assert(at(c, 26, 24) == RED && at(c, 38, 24) == BLUE, "facing north: {at(c, 26, 24):x} {at(c, 38, 24):x}");
+  assert(at(c, 22, 24) == SKY && at(c, 42, 24) == SKY, "the same size: {at(c, 22, 24):x} {at(c, 42, 24):x}");
+  // The fixed camera again: it stands as it stood, x 0 .. 47, from y = 20 up.
+  scene.fixed_camera(0, 0);
+  scene.draw(dev);
+  c = dev.capture();
+  assert(at(c, 10, 10) == RED && at(c, 40, 10) == BLUE && at(c, 50, 10) == SKY, "for the fixed camera, in its plane: {at(c, 10, 10):x} {at(c, 40, 10):x} {at(c, 50, 10):x}");
+}
+
+fn test_the_hero_is_seen_through_a_wall_the_free_camera_looks_at() {
+  if !display() { return; }
+  dev = gpu::open(gpu_gl::table(), 64, 48, "scene-through") ?? return assert(false, "no device");
+  scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, SKY) ?? return assert(false, "no scene");
+  _ = scene.add_picture([for _ in 0..256 { 2016 as i32 }]);
+  _ = scene.add_picture([for _ in 0..256 { 63488 as i32 }]);
+  // A green wall a cell wide and tall at z = 1.5, in group 5, and a red card behind it, its
+  // foot at (0.5, 0, 0.5); the eye level with both at z = 4.5.  The wall is three cells off:
+  // 8.58 pixels each way from the middle (x 23.4 .. 40.6).  The card is four: 6.43 (x 25.6 .. 38.4).
+  wall = [0.0, 5.0, 4.0, 0.0, 0.0, scene3d::NO_LIGHT as float, 1.0,
+          0.0, 1.0, 1.5, 0.0, 0.0, 1.0, 1.0, 1.0, 1.5, 1.0, 0.0, 1.0, 1.0, 0.0, 1.5, 1.0, 1.0, 1.0, 0.0, 0.0, 1.5, 0.0, 1.0, 1.0];
+  scene.set_tile(dev, 1, s(wall));
+  card = [7.0, 1.0, 0.5, 0.0, 0.5, 1.0, 1.0, 0.0, 0.5, 1.0, 0.0];
+  scene.free_camera((0.5, 0.5, 4.5), (0.5, 0.5, 0.5), 50.0);
+  // nobody is kept in view: the wall hides the card
+  scene.set_actors(s(card), -1);
+  scene.draw(dev);
+  c = dev.capture();
+  assert(at(c, 32, 24) == GREEN && at(c, 24, 24) == GREEN, "the wall in front: {at(c, 32, 24):x} {at(c, 24, 24):x}");
+  // the card is the hero's: the wall is gone, and where only the wall was is sky
+  scene.set_actors(s(card), 7);
+  scene.draw(dev);
+  c = dev.capture();
+  assert("{scene.hidden_groups()}" == "[5]", "the wall is cut away: {scene.hidden_groups()}");
+  assert(at(c, 32, 24) == RED && at(c, 27, 24) == RED && at(c, 37, 24) == RED, "the hero is seen: {at(c, 32, 24):x}");
+  assert(at(c, 24, 24) == SKY && at(c, 40, 24) == SKY, "and the wall is not: {at(c, 24, 24):x} {at(c, 40, 24):x}");
+  // from behind the hero the wall is no longer between them
+  scene.free_camera((0.5, 0.5, -3.5), (0.5, 0.5, 0.5), 50.0);
+  scene.draw(dev);
+  c = dev.capture();
+  assert("{scene.hidden_groups()}" == "[]", "shown again: {scene.hidden_groups()}");
+  // the wall is five cells off now, 5.15 pixels each way (x 26.9 .. 37.1): all of it behind the card
+  assert(at(c, 32, 24) == RED && at(c, 24, 24) == SKY, "the hero in front of the wall: {at(c, 32, 24):x} {at(c, 24, 24):x}");
+  // without the card the wall is there
+  scene.set_actors(s([]), -1);
+  scene.draw(dev);
+  c = dev.capture();
+  assert(at(c, 32, 24) == GREEN && at(c, 27, 24) == GREEN && at(c, 25, 24) == SKY, "the wall, shown: {at(c, 32, 24):x} {at(c, 27, 24):x} {at(c, 25, 24):x}");
+}

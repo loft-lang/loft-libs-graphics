@@ -38,7 +38,7 @@ Units: x east, y up in layers, z south; a cell is 1 across, a layer 1 high.
 | Pictures | `add_picture(texels)` | 16 x 16 RGB565 texels; its number, for a face or an actor |
 | Tiles | `set_tile(dev, key, faces)`, `drop_tile(key)` | Faces under a key, given again whole when anything in them changes |
 | The cells' light | `set_light(box)` | A light for each cell of a box on a layer; faces lit from those cells follow it, no face is given again |
-| Actors | `set_actors(actors, keep_seen)` | This frame's cards, each placed, sized, lit, turned and mirrored |
+| Actors | `set_actors(actors, keep_seen)` | This frame's cards, each placed, sized, lit, turned and mirrored, facing the camera |
 | The overlay | `set_overlay(dev, pixels, w, h, scale)` | A picture over everything, its clear pixels not drawn |
 | The camera | `fixed_camera(px, py)`, `free_camera(eye, at, field)` | Parallel from the south, or in perspective from anywhere |
 
@@ -87,10 +87,20 @@ holds a whole number exactly up to 16,777,216: two ids that round to one number 
 - **Free**: an eye, a point looked at and a field of view, in perspective.  A view asks
   `offers_free_camera()` first: this implementation does, one on a CPU does not.
 
-**The hero is never hidden** from the fixed camera: every wall group whose triangles cover the
-hero's card on the screen and reach nearer than it is cut away, and shown again when it no
-longer does (`hidden_groups()` says which).  The free camera cuts no wall yet, and cards stand
-facing south for both.
+**A card faces the camera**, upright.  For the fixed camera it stands in the plane the camera
+looks at.  For the free one it is turned about its foot so that its width lies across the
+view: every card the same way, the picture's left on the left.
+
+**The hero is never hidden**: the wall groups between the camera and the hero's card are cut
+away, and shown again when they no longer are (`hidden_groups()` says which).
+- For the fixed camera: a group whose triangles cover the card on the screen and reach nearer
+  than it.
+- For the free camera: a group that a line from the eye to the card goes through.  Five lines
+  are tried: to the card's middle, and to the point halfway from the middle to each corner.
+  So a wall that only meets the card's outer quarter is not cut away.
+
+The cards and the cut-away follow the camera and the actors as they are now, whichever was
+given last.
 
 ## What it does not do yet
 
@@ -98,7 +108,6 @@ facing south for both.
 - Models (a mesh for an actor) are not drawn.
 - The light map holds 256 x 256 cells on 8 layers and wraps: a scene wider than that reads a
   far cell's light for a near one.
-- The cut-away for the free camera, and cards turned to face it.
 - More than four torches a cell, and a torch's reach wider than 15 cells.
 
 ## Verified
@@ -118,6 +127,11 @@ facing south for both.
   over both; the free camera puts a cell's four corners where a projection worked out by hand
   puts them.  `tests/record.loft` (no display): what a scene asks of a backend, and which
   walls are cut away and shown again.
+- **The free camera** (`tests/pixels.loft`, `tests/record.loft`): a card seen from the east
+  and from the north stands across the view at the size worked out by hand, its left on the
+  left; a wall between the eye and the hero is cut away from above and level, one behind the
+  hero, beside the line or at the card's edge is not; the hero is seen through a wall, and the
+  wall again from behind.  Nine planted breaks each turn a test red.
 - **Torches** (`tests/torches.loft`): the light at a pixel against the reach weighed by
   hand between its four cells — by the torch, at its cell's edge and just past it, past a wall,
   under the cell's own light, at half its glow, with five torches at a cell, on a card.
