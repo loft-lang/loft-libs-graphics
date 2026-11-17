@@ -22,9 +22,9 @@ All four are published to the registry and installable today.
 |---|---|---|
 | [`graphics/`](graphics/) | `graphics` — drawing primitives, 2D canvas + 3D scene rendering, OpenGL/WebGL bindings | v0.5.5 |
 | [`imaging/`](imaging/) | `imaging` — PNG load/save, image manipulation | v0.2.2 |
-| [`gpu/`](gpu/) | `gpu` — drawing on a GPU through pipelines, passes and uniform blocks, with no graphics stack named | v0.1.0 |
-| [`gpu_gl/`](gpu_gl/) | `gpu_gl` — the OpenGL backend of `gpu`: OpenGL 3.3, OpenGL ES 3 and WebGL2 | v0.1.0 |
-| [`gpu_metal/`](gpu_metal/) | `gpu_metal` — the Metal backend of `gpu`: a Mac's GPU, in a window of its own | v0.1.0 |
+| [`gpu/`](gpu/) | `gpu` — drawing on a GPU through pipelines, passes and uniform blocks, with no graphics stack named | v0.3.1 |
+| [`gpu_gl/`](gpu_gl/) | `gpu_gl` — the OpenGL backend of `gpu`: OpenGL 3.3, OpenGL ES 3 and WebGL2 | v0.2.1 |
+| [`gpu_metal/`](gpu_metal/) | `gpu_metal` — the Metal backend of `gpu`: a Mac's GPU, in a window of its own | v0.1.1 |
 | [`gpu_host/`](gpu_host/) | `gpu_host` — opens a `gpu` device on the backend this machine has: the one library a game names | v0.1.0 |
 | [`gpu_paint/`](gpu_paint/) | `gpu_paint` — rectangles, images and sprites at pixel positions, drawn through `gpu` | v0.1.0 |
 | [`scene3d/`](scene3d/) | `scene3d` — a 3D scene a game's view gives once (tiles of faces, the cells' light, actors), drawn through `gpu` | v0.1.0 |

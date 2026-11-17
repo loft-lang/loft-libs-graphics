@@ -167,13 +167,15 @@ fn picture() -> vector<u32> {
 
 // ── the comparison ──
 
+// A window of `gpu` has no alpha and reads back opaque; one of graphics reads back the alpha
+// that was drawn where the machine's window has one, so its alpha is not compared.
 fn same(old: const vector<u32>, new: const vector<u32>, what: text) {
   assert(len(old) == len(new) && len(old) > 0, "{what}: {len(old)} pixels through graphics, {len(new)} through gpu");
   differ = 0;
   first = -1;
   colours = 0;
   for p in old {
-    if p != (new[p#index] ?? 0) {
+    if (p as integer) | 0xFF000000 != ((new[p#index] ?? 0) as integer) {
       differ += 1;
       if first < 0 { first = p#index; }
     }

@@ -101,6 +101,14 @@ The same on every backend: clip space has y up and depth from -1 to 1; a viewpor
 scissor's origin is the bottom left; texture coordinate (0, 0) is the first pixel handed to
 `texture_from` or `put`; a matrix is 16 floats, column-major; a colour is `0xAARRGGBB`.
 
+A call takes effect where it is made.  A texture's `put`, `put_rgb565`, `nearest` or `mipmaps`
+between two draws of a pass changes the second draw and leaves the first as it was drawn, also
+when the texture is the one the pass draws into; new floats in a buffer do the same.
+
+A window has no alpha.  It is cleared opaque whatever the colour says, no draw writes its alpha,
+a blend by what the window holds (`DST_ALPHA`) finds 1, and `capture` reads every pixel opaque.
+A target's texture has the alpha that was drawn.
+
 ## Writing a backend
 
 Declare `gpu` as a dependency and write `#include "gpu/gpu_backend.h"`: loft puts a declared

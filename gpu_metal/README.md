@@ -73,6 +73,9 @@ vertex Out vertex_main(In in [[stage_in]], constant Block &u [[buffer(0)]]) {
 | A texture gets its smaller copies whenever `mipmaps` is called | A texture has its levels from the start | The first `mipmaps` moves the pixels into a texture that has them |
 | New floats in a buffer leave what was drawn alone | A buffer is the program's own memory | While a frame still reads a buffer, new floats go into a second one; the two then alternate |
 | `put` between two passes shows in the second only | A write is immediate | A `put` waits for the passes that read the texture |
+| `put`, `nearest` and `mipmaps` between two draws of a pass change the second only | A pass's draws run when the pass ends | The pass is handed to the GPU as far as it came and goes on behind the call, with what it was told |
+| A window has no alpha | A layer's frame has one | A window pipeline writes no alpha, and the window is cleared opaque |
+| A window's pixels are there to read whenever no pass is open | A frame is the layer's again once it is shown | The window draws into a picture of its own; `present` shows a copy |
 
 A colour texture is BGRA at 8 bits a channel, so a `0xAARRGGBB` word is its four bytes as they
 are; a depth is a 32-bit float.  The window's size is in points, as `gpu_gl`'s is.
@@ -95,7 +98,10 @@ timed scene also as a shipped program (one executable that links the system libr
   (also one that leaves the window) and a viewport; a texture put between two passes, RGB565,
   sampled nearest and between its pixels, and drawn small through its smaller copies; copies
   read from an offset, an index list, floats replaced inside and between passes; lines and
-  points; a colour and depth target shown and read back; a depth alone and a colour alone.
+  points; a colour and depth target shown and read back; a depth alone and a colour alone; a
+  texture put, re-filtered and given its smaller copies between two draws of a pass, also the
+  pass's own colour; a window drawn with alpha and blended by what it holds; a frame read
+  before and after it was presented; viewports that reach outside the window and a target.
   Every scene is the same byte for byte.
 - **`tests/host.loft`** checks against values worked out by hand: an RGB565 frame's colours, a
   target read back, a block larger than a frame copies, each source this backend refuses, a
@@ -110,8 +116,11 @@ timed scene also as a shipped program (one executable that links the system libr
   kept pass cleared, new floats written where a frame still reads, …), each turn a test red;
   two of them (a scissor not cut to the target, a large block copied into the frame) only under
   Metal's own validation (`MTL_DEBUG_LAYER=1`), under which the whole suite passes.
+- **`tests/host_checks.c`**, built by hand as its first lines say, includes this backend's C:
+  two devices drawn on two threads under the thread sanitizer report no race, and a window
+  whose application is hidden stays open and is shown again.
 - **Timed** by `gpu_host/bench/backends.loft`, a town of 48 x 32 cells with 64 moving actors in
-  a 960 x 720 window, as a shipped program: a frame costs 190 µs here and 188 to 194 µs on
+  a 960 x 720 window, as a shipped program: a frame costs 181 to 184 µs here and 185 to 206 µs on
   `gpu_gl`.  A frame shown waits for the display it is on.
 
 | Host | State |

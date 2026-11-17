@@ -23,7 +23,16 @@
  * The window and its events are AppKit as the graphics library's C drives it (its
  * `graphics_gl.c`, the GG_COCOA parts), with a Metal layer where that has an OpenGL context:
  * the same key codes, the same events, a size in points.  A window lives on the main thread;
- * Metal itself is called on the thread that draws. */
+ * Metal itself is called on the thread that draws.  Two windows may be drawn on two threads:
+ * what they share is locked (`gm_shared`, `gm_made`).
+ *
+ * A window draws into a picture of its own, which a frame shows a copy of: it has no alpha, and
+ * it is there to read before and after the frame was shown.
+ *
+ * Metal runs a pass's draws when the pass is handed over, and a texture write at once.  So that
+ * every call takes effect where it is made, a texture written or given its smaller copies while
+ * a pass reads it or draws into it has that pass handed over as far as it came (`gm_hand_over`);
+ * the pass then goes on in a new encoder with all it was told (`gm_resume`). */
 #include "gpu/gpu_backend.h"
 #include <stddef.h>
 
@@ -117,6 +126,7 @@ typedef struct {
 #define GM_COUNTER 1ul
 #define GM_UINT32 1ul        /* MTLIndexTypeUInt32 */
 #define GM_BUFFER_INFO 3ul   /* MTLPipelineOptionBindingInfo | BufferTypeInfo */
+#define GM_WRITE_RGB 14ul    /* MTLColorWriteMaskRed | Green | Blue */
 #define GM_ARG_BUFFER 0ul    /* MTLBindingTypeBuffer, MTLArgumentTypeBuffer */
 
 /* The buffer slots of the vertex function: the block, the vertices, the values per copy. */
@@ -177,16 +187,26 @@ typedef struct gm_window {
     int64_t text_len, text_cap;
     unsigned char keys[256];
     int mouse_x, mouse_y, buttons;
-    /* the frame: the drawable drawn into until it is presented, and the window's depth */
-    gm_id drawable, depth;
+    /* the window's picture, which its passes draw into and a frame shows a copy of, and its
+     * depth: both `depth_w` x `depth_h` */
+    gm_id image, depth;
     int depth_w, depth_h;
+    int hidden; /* nothing of the window is on a screen: no frame is asked for */
     gm_id last; /* the last command buffer committed: a capture waits for it */
     /* the pass in progress */
     gm_id cb, enc;
     int pass_w, pass_h, pass_window;
+    gm_res *pass_colour, *pass_zbuf; /* a target's textures, held while the pass lasts */
     gm_res *pipe, *index;
     gm_res *vertex, *copy; /* the buffers the next draw reads, and where the copies' floats start */
     int64_t copy_first;
+    gm_res *slot[GM_MAX_TEXTURES]; /* the texture named for each slot, held while it is */
+    unsigned char *block;          /* the uniform block's bytes as last given */
+    unsigned long block_bytes, block_room;
+    int64_t port[4], cut[4]; /* the viewport and the scissor as last given */
+    int cut_on;
+    int recorded; /* a clear or a draw is recorded that the GPU was not handed yet */
+    int paused;   /* its work was handed over and the pass goes on once `gm_resume` is called */
     int clipped_out;
 } gm_window;
 
@@ -215,10 +235,26 @@ static struct {
     gm_window *open;
 } gm;
 
-/* A selector by its name: registered once, then found by the name's own address (every name
- * here is a string in this file), so a message costs no lookup by text. */
+/* What windows on two threads share is read and changed under a lock: the list of open windows
+ * and what the main thread's event queue writes into each (`gm_shared`); the runtime's binding
+ * and the samplers (`gm_made`). */
+static pthread_mutex_t gm_shared = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t gm_made = PTHREAD_MUTEX_INITIALIZER;
+
+/* The next window after `w` (none: the first) that this thread opened.  What a thread makes is
+ * named by that thread's passes only, and only that thread closes its windows. */
+static gm_window *gm_own(gm_window *w) {
+    pthread_mutex_lock(&gm_shared);
+    for (w = w ? w->next_open : gm.open; w; w = w->next_open)
+        if (pthread_equal(w->thread, pthread_self())) break;
+    pthread_mutex_unlock(&gm_shared);
+    return w;
+}
+
+/* A selector by its name: registered once a thread, then found by the name's own address (every
+ * name here is a string in this file), so a message costs no lookup by text and no lock. */
 static gm_sel gm_s(const char *name) {
-    static struct {
+    static __thread struct {
         const char *name;
         gm_sel sel;
     } known[512];
@@ -317,7 +353,7 @@ static void gm_say_why(void) {
 }
 
 /* Bind the runtime and find the GPU; 0 quietly on a Mac with no Metal device. */
-static int gm_load(void) {
+static int gm_load_once(void) {
     void **mode;
     gm_id (*create)(void);
     if (gm.loaded) return gm.loaded > 0;
@@ -359,14 +395,26 @@ static int gm_load(void) {
     return 1;
 }
 
+static int gm_load(void) {
+    int ok;
+    pthread_mutex_lock(&gm_made);
+    ok = gm_load_once();
+    pthread_mutex_unlock(&gm_made);
+    return ok;
+}
+
 /* Whether the main thread runs its run loop, which drains the main queue there. */
 static int gm_main_served(void) {
-    int i;
-    for (i = 0; !gm.main_served && i < 200; i++) {
-        if (gm.run_loop_waiting(gm.run_loop_main())) gm.main_served = 1;
-        else usleep(10000);
+    int i, served = __atomic_load_n(&gm.main_served, __ATOMIC_RELAXED);
+    for (i = 0; !served && i < 200; i++) {
+        if (gm.run_loop_waiting(gm.run_loop_main())) {
+            served = 1;
+            __atomic_store_n(&gm.main_served, 1, __ATOMIC_RELAXED);
+        } else {
+            usleep(10000);
+        }
     }
-    return gm.main_served;
+    return served;
 }
 
 /* Run `job` on the main thread, where AppKit makes and drives windows, and wait for it: here
@@ -625,12 +673,14 @@ static void gm_pump(void) {
         target = gm_o(ev, "window");
         if (!target && (type == GM_KEY_DOWN || type == GM_KEY_UP || type == GM_FLAGS_CHANGED))
             target = gm_o(gm.app, "keyWindow");
+        pthread_mutex_lock(&gm_shared);
         for (w = gm.open; w; w = w->next_open)
             if (w->window == target) {
                 gm_event(w, ev, type);
                 ours = 1;
                 break;
             }
+        pthread_mutex_unlock(&gm_shared);
         if (ours && (type == GM_KEY_DOWN || type == GM_KEY_UP)) continue;
         gm_v_o(gm.app, "sendEvent:", ev);
     }
@@ -701,7 +751,7 @@ static void gm_open_main(void *arg) {
     gm_v(w->layer, "retain");
     gm_v_o(w->layer, "setDevice:", gm.device);
     gm_v_l(w->layer, "setPixelFormat:", GM_BGRA8);
-    gm_v_l(w->layer, "setFramebufferOnly:", 0); /* a capture reads the frame back */
+    gm_v_l(w->layer, "setFramebufferOnly:", 0); /* a frame is copied into, not drawn */
     gm_v_l(w->layer, "setOpaque:", 1);
     size.width = (double) w->width;
     size.height = (double) w->height;
@@ -710,23 +760,33 @@ static void gm_open_main(void *arg) {
     gm_v_l(w->view, "setWantsLayer:", 1);
     gm_v_o(w->window, "makeKeyAndOrderFront:", NULL);
     gm_v_l(gm.app, "activateIgnoringOtherApps:", 1);
+    pthread_mutex_lock(&gm_shared);
     w->next_open = gm.open;
     gm.open = w;
+    pthread_mutex_unlock(&gm_shared);
     gm_pump();
     job->ok = 1;
 done:
     gm.pool_pop(pool);
 }
 
-/* The main thread's half of closing: out of the routing list, the NSWindow. */
-static void gm_close_main(void *arg) {
-    gm_window *w = (gm_window *) arg, **link;
-    void *pool = gm.pool_push();
+/* Out of the list of open windows: no event is routed to it any more. */
+static void gm_unlist(gm_window *w) {
+    gm_window **link;
+    pthread_mutex_lock(&gm_shared);
     for (link = &gm.open; *link; link = &(*link)->next_open)
         if (*link == w) {
             *link = w->next_open;
             break;
         }
+    pthread_mutex_unlock(&gm_shared);
+}
+
+/* The main thread's half of closing: out of the routing list, the NSWindow. */
+static void gm_close_main(void *arg) {
+    gm_window *w = (gm_window *) arg;
+    void *pool = gm.pool_push();
+    gm_unlist(w);
     if (w->window) {
         gm_v(w->window, "close");
         gm_v(w->window, "release");
@@ -743,18 +803,12 @@ static void gm_free(gm_window *w) {
     w->closed = 1;
     gm_end_pass(w);
     gm_drop(&w->last);
-    gm_drop(&w->drawable);
+    gm_drop(&w->image);
     gm_drop(&w->depth);
-    if (!gm_on_main(gm_close_main, w)) { /* no thread closes it: at least nothing routes to it */
-        gm_window **link;
-        for (link = &gm.open; *link; link = &(*link)->next_open)
-            if (*link == w) {
-                *link = w->next_open;
-                break;
-            }
-    }
+    if (!gm_on_main(gm_close_main, w)) gm_unlist(w); /* no thread closes it: nothing routes to it */
     gm_drop(&w->layer);
     gm.pool_pop(pool);
+    free(w->block);
     free(w->events);
     free(w->text);
     free(w);
@@ -794,21 +848,28 @@ static void gm_close(int64_t dev) {
 }
 
 /* The main thread's half of a poll: every queued event taken, whether the close button was
- * pressed (a minimised window is still open), and the view's size. */
+ * pressed (a minimised window and one of a hidden application are still open), and the view's
+ * size. */
 static void gm_poll_main(void *arg) {
     gm_window *w = (gm_window *) arg;
     void *pool = gm.pool_push();
     gm_rect bounds;
     int width, height;
+    int visible, small;
     gm_pump();
-    if (!gm_b(w->window, "isVisible") && !gm_b(w->window, "isMiniaturized")) w->should_close = 1;
+    visible = gm_b(w->window, "isVisible");
+    small = gm_b(w->window, "isMiniaturized");
+    if (!visible && !small && !gm_b(gm.app, "isHidden")) w->should_close = 1;
+    w->hidden = !visible || small;
     bounds = gm_rc(w->view, "bounds");
     width = (int) bounds.width;
     height = (int) bounds.height;
     if (width > 0 && height > 0 && (width != w->width || height != w->height)) {
         w->width = width;
         w->height = height;
+        pthread_mutex_lock(&gm_shared);
         gm_push(w, GM_EV_RESIZE, width, height, 0, 0);
+        pthread_mutex_unlock(&gm_shared);
     }
     gm.pool_pop(pool);
 }
@@ -827,7 +888,6 @@ static int64_t gm_poll(int64_t dev) {
         size.width = (double) w->width;
         size.height = (double) w->height;
         ((void (*)(gm_id, gm_sel, gm_size)) gm.msg)(w->layer, gm_s("setDrawableSize:"), size);
-        if (!w->enc) gm_drop(&w->drawable); /* a frame of the old size is not shown */
         gm.pool_pop(pool);
     }
     return !w->should_close;
@@ -839,9 +899,16 @@ static int64_t gm_size_of(int64_t dev, int64_t which) {
     return which ? w->height : w->width;
 }
 
+/* What the main thread's event queue writes into a window is read under the lock it is written
+ * under: another window's poll may be taking this window's events. */
 static int64_t gm_event_count(int64_t dev) {
     gm_window *w = gm_of(dev);
-    return w && !w->closed ? w->event_count : 0;
+    int64_t n;
+    if (!w || w->closed) return 0;
+    pthread_mutex_lock(&gm_shared);
+    n = w->event_count;
+    pthread_mutex_unlock(&gm_shared);
+    return n;
 }
 
 /* Copy the queued events out and empty the queue, with the text they point into. */
@@ -849,33 +916,51 @@ static void gm_events(int64_t dev, int64_t *out, int64_t n) {
     gm_window *w = gm_of(dev);
     int64_t words;
     if (!w || w->closed) return;
+    pthread_mutex_lock(&gm_shared);
     words = w->event_count * GM_EVENT_WORDS;
     if (n < words) words = n / GM_EVENT_WORDS * GM_EVENT_WORDS;
     if (words > 0) memcpy(out, w->events, (size_t) words * 8u);
     w->event_count = 0;
     w->text_len = 0;
+    pthread_mutex_unlock(&gm_shared);
 }
 
 static int64_t gm_key_down(int64_t dev, int64_t key) {
     gm_window *w = gm_of(dev);
-    return w && !w->closed && key >= 0 && key < 256 ? w->keys[key] : 0;
+    int64_t down;
+    if (!w || w->closed || key < 0 || key >= 256) return 0;
+    pthread_mutex_lock(&gm_shared);
+    down = w->keys[key];
+    pthread_mutex_unlock(&gm_shared);
+    return down;
 }
 
 static int64_t gm_pointer(int64_t dev, int64_t which) {
     gm_window *w = gm_of(dev);
+    int64_t at;
     if (!w || w->closed) return 0;
-    return which == 0 ? w->mouse_x : which == 1 ? w->mouse_y : w->buttons;
+    pthread_mutex_lock(&gm_shared);
+    at = which == 0 ? w->mouse_x : which == 1 ? w->mouse_y : w->buttons;
+    pthread_mutex_unlock(&gm_shared);
+    return at;
 }
 
 static int64_t gm_text_size(int64_t dev) {
     gm_window *w = gm_of(dev);
-    return w && !w->closed ? w->text_len : 0;
+    int64_t n;
+    if (!w || w->closed) return 0;
+    pthread_mutex_lock(&gm_shared);
+    n = w->text_len;
+    pthread_mutex_unlock(&gm_shared);
+    return n;
 }
 
 static void gm_text_copy(int64_t dev, uint8_t *out, int64_t n) {
     gm_window *w = gm_of(dev);
     if (!w || w->closed || n <= 0) return;
-    memcpy(out, w->text, (size_t) (n < w->text_len ? n : w->text_len));
+    pthread_mutex_lock(&gm_shared);
+    if (w->text_len > 0) memcpy(out, w->text, (size_t) (n < w->text_len ? n : w->text_len));
+    pthread_mutex_unlock(&gm_shared);
 }
 
 /* ── buffers, textures, targets ────────────────────────────────────────────────────────────── */
@@ -982,7 +1067,7 @@ static void gm_buffer_update(int64_t buf, const float *data, int64_t n) {
     gm_drop(&r->used);
     if (r->obj && bytes > 0) memcpy(gm_o(r->obj, "contents"), data, bytes);
     /* a pass that named this buffer reads the new floats from its next draw on */
-    for (w = gm.open; r->obj && w; w = w->next_open)
+    for (w = gm_own(NULL); r->obj && w; w = gm_own(w))
         if (w->enc && (w->vertex == r || w->copy == r)) gm_feed(w, r);
     gm.pool_pop(pool);
 }
@@ -1024,9 +1109,37 @@ static int64_t gm_texture(int64_t dev, int64_t width, int64_t height, int64_t de
     return (int64_t) (intptr_t) r;
 }
 
-/* Wait for the GPU work that still reads or draws into `t`, so its pixels can be touched. */
+static void gm_hand_over(gm_window *w);
+static void gm_resume(gm_window *w);
+static void gm_set_slot(gm_window *w, int slot);
+
+/* The next window after `w` (none: the first) with a pass in progress that reads `t` or draws
+ * into it. */
+static gm_window *gm_touching(const gm_res *t, gm_window *w) {
+    int i;
+    while ((w = gm_own(w)) != NULL) {
+        if (!w->enc) continue;
+        if (t->used == w->cb || w->pass_colour == t || w->pass_zbuf == t) return w;
+        for (i = 0; i < GM_MAX_TEXTURES; i++)
+            if (w->slot[i] == t) return w;
+    }
+    return NULL;
+}
+
+/* Wait for the GPU work that still reads or draws into `t`, so its pixels can be touched.  What
+ * a pass in progress recorded is handed over first and the pass goes on behind it: a draw made
+ * before this call shows the old pixels, a draw made after it the new ones.  The queue runs
+ * its work in the order it was handed over, so the last of it is the one to wait for. */
 static void gm_settle(gm_res *t) {
-    if (!t->used) return;
+    gm_window *w;
+    for (w = gm_touching(t, NULL); w; w = gm_touching(t, w)) {
+        if (w->recorded) {
+            gm_hand_over(w);
+            gm_resume(w);
+        }
+        if (w->last) gm_v(w->last, "waitUntilCompleted");
+    }
+    if (!t->used || gm_l(t->used, "status") < 2ul) return; /* none, or a pass that goes on */
     gm_v(t->used, "waitUntilCompleted");
     gm_drop(&t->used);
 }
@@ -1072,32 +1185,50 @@ static void gm_texture_put565(int64_t tex, int64_t x, int64_t y, int64_t w, int6
     free(wide);
 }
 
+/* A pass in progress that named `t` for a slot reads it from its next draw on as it is now: its
+ * pixels' own texture, sampled the way last asked. */
+static void gm_renamed(gm_res *t) {
+    gm_window *w;
+    void *pool = gm.pool_push();
+    int i;
+    for (w = gm_own(NULL); w; w = gm_own(w))
+        for (i = 0; w->enc && i < GM_MAX_TEXTURES; i++)
+            if (w->slot[i] == t) gm_set_slot(w, i);
+    gm.pool_pop(pool);
+}
+
 /* Nearest or between pixels, both when drawn larger and smaller: no smaller copies are read. */
 static void gm_texture_nearest(int64_t tex, int64_t on) {
     gm_res *r = gm_res_of(tex, GM_TEXTURE);
     if (!r) return;
     r->min_nearest = r->mag_nearest = on != 0;
     r->mipped = 0;
+    gm_renamed(r);
 }
 
 /* Smaller copies from the pixels it holds now, read between when it is drawn small.  A Metal
- * texture has its levels from the start, so the first call moves the pixels to one that has. */
+ * texture has its levels from the start, so the first call moves the pixels to one that has.
+ * A pass in progress that reads the texture or draws into it is handed over first and goes on
+ * behind the copies: they hold what was drawn before this call. */
 static void gm_texture_mipmaps(int64_t tex) {
     gm_res *r = gm_res_of(tex, GM_TEXTURE);
-    gm_id cb, blit;
+    gm_id cb, blit, whole = NULL;
+    gm_window *w;
     void *pool;
     if (!r || r->depth || gm.loaded <= 0) return;
     pool = gm.pool_push();
-    cb = gm_o(gm.queue, "commandBuffer");
-    blit = gm_o(cb, "blitCommandEncoder");
     if (r->levels == 1 && (r->width > 1 || r->height > 1)) {
-        gm_id whole = gm_new_texture(r->width, r->height, 0, 2);
-        gm_origin zero = {0, 0, 0}, size;
+        whole = gm_new_texture(r->width, r->height, 0, 2);
         if (!whole) {
-            gm_v(blit, "endEncoding");
             gm.pool_pop(pool);
             return;
         }
+    }
+    for (w = gm_touching(r, NULL); w; w = gm_touching(r, w)) gm_hand_over(w);
+    cb = gm_o(gm.queue, "commandBuffer");
+    blit = gm_o(cb, "blitCommandEncoder");
+    if (whole) {
+        gm_origin zero = {0, 0, 0}, size;
         size.x = (unsigned long) r->width;
         size.y = (unsigned long) r->height;
         size.z = 1;
@@ -1117,6 +1248,12 @@ static void gm_texture_mipmaps(int64_t tex) {
     gm_keep(&r->used, cb);
     r->min_nearest = 0;
     r->mipped = 1;
+    for (w = gm_own(NULL); w; w = gm_own(w))
+        if (w->paused) {
+            gm_keep(&w->last, cb);
+            gm_resume(w);
+        }
+    gm_renamed(r);
     gm.pool_pop(pool);
 }
 
@@ -1300,6 +1437,7 @@ static int64_t gm_pipeline(int64_t dev, const gpu_program *p, const gpu_state *s
     gm_v_o(desc, "setVertexDescriptor:", gm_inputs(p));
     colour = gm_o_l(gm_o(desc, "colorAttachments"), "objectAtIndexedSubscript:", 0);
     gm_v_l(colour, "setPixelFormat:", has_colour ? GM_BGRA8 : 0);
+    if (window) gm_v_l(colour, "setWriteMask:", GM_WRITE_RGB); /* a window has no alpha: it stays 1 */
     if (has_colour && s->blend) {
         unsigned long from = gm_blend_factor((s->blend - 1) / 8), to = gm_blend_factor((s->blend - 1) % 8);
         gm_v_l(colour, "setBlendingEnabled:", 1);
@@ -1352,7 +1490,7 @@ static void gm_release(int64_t h) {
     void *pool;
     if (!r || r->magic != GM_MAGIC || gm.loaded <= 0) return;
     pool = gm.pool_push();
-    for (w = gm.open; w; w = w->next_open) {
+    for (w = gm_own(NULL); w; w = gm_own(w)) {
         if (w->pipe == r) w->pipe = NULL;
         if (w->index == r) w->index = NULL;
         if (w->vertex == r) w->vertex = NULL;
@@ -1378,25 +1516,38 @@ static void gm_release(int64_t h) {
 
 /* ── a frame ───────────────────────────────────────────────────────────────────────────────── */
 
-/* The frame the window's passes draw into until it is presented, and a depth of its size. */
+/* The window's picture and a depth of its size, made when first drawn into and again when the
+ * window has another size: opaque black, as a window nothing was drawn in. */
 static int gm_frame(gm_window *w) {
-    gm_id texture;
-    int width, height;
-    if (!w->drawable) {
-        gm_id next = gm_o(w->layer, "nextDrawable");
-        if (!next) return 0;
-        gm_keep(&w->drawable, next);
-    }
-    texture = gm_o(w->drawable, "texture");
-    width = (int) gm_l(texture, "width");
-    height = (int) gm_l(texture, "height");
-    if (!w->depth || w->depth_w != width || w->depth_h != height) {
-        gm_drop(&w->depth);
-        w->depth = gm_new_texture(width, height, 1, 1);
-        w->depth_w = width;
-        w->depth_h = height;
-    }
-    return w->depth != NULL;
+    int width = w->width, height = w->height;
+    uint32_t *black;
+    size_t i, n;
+    gm_region region;
+    if (w->image && w->depth && w->depth_w == width && w->depth_h == height) return 1;
+    gm_drop(&w->image);
+    gm_drop(&w->depth);
+    if (width <= 0 || height <= 0) return 0;
+    n = (size_t) width * (size_t) height;
+    black = (uint32_t *) malloc(n * sizeof(uint32_t));
+    if (!black) return 0;
+    for (i = 0; i < n; i++) black[i] = 0xFF000000u;
+    w->image = gm_new_texture(width, height, 0, 1);
+    w->depth = gm_new_texture(width, height, 1, 1);
+    w->depth_w = width;
+    w->depth_h = height;
+    region.x = region.y = region.z = 0;
+    region.width = (unsigned long) width;
+    region.height = (unsigned long) height;
+    region.depth = 1;
+    if (w->image)
+        ((void (*)(gm_id, gm_sel, gm_region, unsigned long, const void *, unsigned long)) gm.msg)(
+            w->image, gm_s("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"), region, 0ul, black,
+            (unsigned long) width * 4ul);
+    free(black);
+    if (w->image && w->depth) return 1;
+    gm_drop(&w->image);
+    gm_drop(&w->depth);
+    return 0;
 }
 
 /* One attachment of a pass: its texture, kept or cleared. */
@@ -1413,48 +1564,119 @@ static int64_t gm_row(gm_window *w, int64_t y, int64_t height) {
     return w->pass_window ? (int64_t) w->pass_h - y - height : y;
 }
 
-static void gm_set_viewport(gm_window *w, int64_t x, int64_t y, int64_t width, int64_t height) {
+/* What the pass was last told, said to its encoder: when it is told, and again when the pass
+ * goes on in a new encoder. */
+static void gm_set_viewport(gm_window *w) {
     gm_viewport v;
-    v.x = (double) x;
-    v.y = (double) gm_row(w, y, height);
-    v.width = (double) width;
-    v.height = (double) height;
+    v.x = (double) w->port[0];
+    v.y = (double) gm_row(w, w->port[1], w->port[3]);
+    v.width = (double) w->port[2];
+    v.height = (double) w->port[3];
     v.near = 0.0;
     v.far = 1.0;
     ((void (*)(gm_id, gm_sel, gm_viewport)) gm.msg)(w->enc, gm_s("setViewport:"), v);
 }
 
-static void gm_begin(int64_t dev, int64_t target, int64_t load, int64_t colour) {
-    gm_window *w = gm_of(dev);
-    gm_res *t = gm_res_of(target, GM_TARGET);
-    gm_id pass, attachment, cb, enc, colour_texture = NULL, depth_texture = NULL;
-    uint32_t c = (uint32_t) colour;
-    void *pool;
-    if (!gm_use(w, "begin") || w->enc || (target && !t)) return;
-    pool = gm.pool_push();
-    if (t) {
-        colour_texture = t->colour ? t->colour->obj : NULL;
-        depth_texture = t->zbuf ? t->zbuf->obj : NULL;
-        w->pass_w = t->width;
-        w->pass_h = t->height;
-    } else {
-        if (!gm_frame(w)) {
-            gm.pool_pop(pool);
-            return;
-        }
-        colour_texture = gm_o(w->drawable, "texture");
-        depth_texture = w->depth;
-        w->pass_w = w->depth_w;
-        w->pass_h = w->depth_h;
+/* Metal takes a scissor only inside the target and never an empty one: the rectangle is cut to
+ * the target, and one with nothing left draws nothing. */
+static void gm_set_scissor(gm_window *w) {
+    gm_scissor_rect r;
+    int64_t x = 0, y = 0, width = w->pass_w, height = w->pass_h, x1, y1;
+    if (w->cut_on) {
+        x = w->cut[0];
+        y = w->cut[1];
+        width = w->cut[2];
+        height = w->cut[3];
     }
-    w->pass_window = t == NULL;
+    y = gm_row(w, y, height);
+    x1 = x + width;
+    y1 = y + height;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x1 > w->pass_w) x1 = w->pass_w;
+    if (y1 > w->pass_h) y1 = w->pass_h;
+    w->clipped_out = x1 <= x || y1 <= y;
+    if (w->clipped_out) return;
+    r.x = (unsigned long) x;
+    r.y = (unsigned long) y;
+    r.width = (unsigned long) (x1 - x);
+    r.height = (unsigned long) (y1 - y);
+    ((void (*)(gm_id, gm_sel, gm_scissor_rect)) gm.msg)(w->enc, gm_s("setScissorRect:"), r);
+}
+
+static void gm_set_pipe(gm_window *w) {
+    const gm_res *p = w->pipe;
+    gm_v_o(w->enc, "setRenderPipelineState:", p->obj);
+    gm_v_o(w->enc, "setDepthStencilState:", p->depth_state);
+    /* a target is drawn upside down (gm_prelude_target), which turns every face over */
+    gm_v_l(w->enc, "setFrontFacingWinding:", w->pass_window ? GM_COUNTER : GM_CLOCKWISE);
+    gm_v_l(w->enc, "setCullMode:", p->state.cull == 1 ? GM_CULL_BACK : p->state.cull == 2 ? GM_CULL_FRONT : 0);
+}
+
+/* The block's bytes to both stages: copied into the frame, or a buffer of their own past the
+ * size Metal copies. */
+static void gm_set_block(gm_window *w) {
+    if (w->block_bytes <= 4096) {
+        ((void (*)(gm_id, gm_sel, const void *, unsigned long, unsigned long)) gm.msg)(
+            w->enc, gm_s("setVertexBytes:length:atIndex:"), w->block, w->block_bytes, GM_SLOT_BLOCK);
+        ((void (*)(gm_id, gm_sel, const void *, unsigned long, unsigned long)) gm.msg)(
+            w->enc, gm_s("setFragmentBytes:length:atIndex:"), w->block, w->block_bytes, GM_SLOT_BLOCK);
+    } else {
+        gm_id held = gm_bytes(w->block, (int64_t) w->block_bytes);
+        gm_v_oll(w->enc, "setVertexBuffer:offset:atIndex:", held, 0, GM_SLOT_BLOCK);
+        gm_v_oll(w->enc, "setFragmentBuffer:offset:atIndex:", held, 0, GM_SLOT_BLOCK);
+        gm_drop(&held); /* the frame keeps it */
+    }
+}
+
+/* How a texture is sampled is the texture's own: the sampler of its three settings. */
+static gm_id gm_sampler(const gm_res *t) {
+    gm_id *slot = &gm.samplers[t->min_nearest][t->mag_nearest][t->mipped && t->levels > 1], made;
+    pthread_mutex_lock(&gm_made);
+    if (!*slot) {
+        gm_id desc = gm_o(gm_o(gm_class("MTLSamplerDescriptor"), "alloc"), "init");
+        gm_v_l(desc, "setMinFilter:", t->min_nearest ? 0 : 1);
+        gm_v_l(desc, "setMagFilter:", t->mag_nearest ? 0 : 1);
+        gm_v_l(desc, "setMipFilter:", t->mipped && t->levels > 1 ? 2 : 0);
+        *slot = gm_o_p(gm.device, "newSamplerStateWithDescriptor:", desc); /* clamped: the default */
+        gm_v(desc, "release");
+    }
+    made = *slot;
+    pthread_mutex_unlock(&gm_made);
+    return made;
+}
+
+static void gm_set_slot(gm_window *w, int slot) {
+    gm_res *t = w->slot[slot];
+    gm_id sampler;
+    if (!t) return;
+    sampler = gm_sampler(t);
+    gm_v_ol(w->enc, "setVertexTexture:atIndex:", t->obj, (unsigned long) slot);
+    gm_v_ol(w->enc, "setFragmentTexture:atIndex:", t->obj, (unsigned long) slot);
+    gm_v_ol(w->enc, "setVertexSamplerState:atIndex:", sampler, (unsigned long) slot);
+    gm_v_ol(w->enc, "setFragmentSamplerState:atIndex:", sampler, (unsigned long) slot);
+    gm_reads(w, t);
+}
+
+/* Start recording into what the pass draws into — a target's textures or the window's picture —
+ * cleared to `colour` or kept.  A window is cleared opaque. */
+static int gm_record(gm_window *w, int64_t load, int64_t colour) {
+    gm_id pass, attachment, cb, enc, colour_texture, depth_texture;
+    uint32_t c = (uint32_t) colour;
+    if (w->pass_window) {
+        colour_texture = w->image;
+        depth_texture = w->depth;
+    } else {
+        colour_texture = w->pass_colour ? w->pass_colour->obj : NULL;
+        depth_texture = w->pass_zbuf ? w->pass_zbuf->obj : NULL;
+    }
     pass = gm_o(gm_class("MTLRenderPassDescriptor"), "renderPassDescriptor");
     if (colour_texture) {
         gm_clear to;
         to.r = (double) ((c >> 16) & 0xFF) / 255.0;
         to.g = (double) ((c >> 8) & 0xFF) / 255.0;
         to.b = (double) (c & 0xFF) / 255.0;
-        to.a = (double) ((c >> 24) & 0xFF) / 255.0;
+        to.a = w->pass_window ? 1.0 : (double) ((c >> 24) & 0xFF) / 255.0;
         attachment = gm_attach(gm_o_l(gm_o(pass, "colorAttachments"), "objectAtIndexedSubscript:", 0),
                                colour_texture, load);
         ((void (*)(gm_id, gm_sel, gm_clear)) gm.msg)(attachment, gm_s("setClearColor:"), to);
@@ -1465,16 +1687,94 @@ static void gm_begin(int64_t dev, int64_t target, int64_t load, int64_t colour) 
     }
     cb = gm_o(gm.queue, "commandBuffer");
     enc = cb ? gm_o_p(cb, "renderCommandEncoderWithDescriptor:", pass) : NULL;
-    if (enc) {
-        gm_keep(&w->cb, cb);
-        gm_keep(&w->enc, enc);
-        if (t && t->colour) gm_keep(&t->colour->used, cb);
-        if (t && t->zbuf) gm_keep(&t->zbuf->used, cb);
-        w->pipe = NULL;
-        w->index = NULL;
-        w->vertex = w->copy = NULL;
+    if (!enc) return 0;
+    gm_keep(&w->cb, cb);
+    gm_keep(&w->enc, enc);
+    if (w->pass_colour) gm_keep(&w->pass_colour->used, cb);
+    if (w->pass_zbuf) gm_keep(&w->pass_zbuf->used, cb);
+    w->recorded = load == 0;
+    w->paused = 0;
+    return 1;
+}
+
+/* The pass is over: nothing it named is held for it any more. */
+static void gm_pass_done(gm_window *w) {
+    int i;
+    gm_texture_unhold(w->pass_colour);
+    gm_texture_unhold(w->pass_zbuf);
+    w->pass_colour = w->pass_zbuf = NULL;
+    for (i = 0; i < GM_MAX_TEXTURES; i++) {
+        gm_texture_unhold(w->slot[i]);
+        w->slot[i] = NULL;
+    }
+    w->pipe = NULL;
+    w->index = NULL;
+    w->vertex = w->copy = NULL;
+    w->block_bytes = 0;
+    w->recorded = w->paused = 0;
+}
+
+/* Hand what the pass recorded to the GPU.  The pass itself goes on (`gm_resume`) or is over. */
+static void gm_hand_over(gm_window *w) {
+    if (!w->enc) return;
+    gm_v(w->enc, "endEncoding");
+    gm_v(w->cb, "commit");
+    gm_keep(&w->last, w->cb);
+    gm_drop(&w->enc);
+    gm_drop(&w->cb);
+    w->recorded = 0;
+    w->paused = 1;
+}
+
+/* Go on with a pass whose work was handed over: what it drew is kept, and what it was told —
+ * its pipeline, block, textures, buffers, viewport and scissor — holds for its next draw. */
+static void gm_resume(gm_window *w) {
+    int i;
+    if (!w->paused) return;
+    if (!gm_record(w, 1, 0)) {
+        gm_pass_done(w);
+        return;
+    }
+    if (w->pipe) gm_set_pipe(w);
+    if (w->pipe && w->block_bytes) gm_set_block(w);
+    for (i = 0; i < GM_MAX_TEXTURES; i++) gm_set_slot(w, i);
+    if (w->vertex) gm_feed(w, w->vertex);
+    if (w->copy && w->copy != w->vertex) gm_feed(w, w->copy);
+    gm_set_viewport(w);
+    gm_set_scissor(w);
+}
+
+static void gm_begin(int64_t dev, int64_t target, int64_t load, int64_t colour) {
+    gm_window *w = gm_of(dev);
+    gm_res *t = gm_res_of(target, GM_TARGET);
+    void *pool;
+    if (!gm_use(w, "begin") || w->enc || (target && !t)) return;
+    pool = gm.pool_push();
+    if (t) {
+        w->pass_w = t->width;
+        w->pass_h = t->height;
+    } else {
+        if (!gm_frame(w)) {
+            gm.pool_pop(pool);
+            return;
+        }
+        w->pass_w = w->depth_w;
+        w->pass_h = w->depth_h;
+    }
+    w->pass_window = t == NULL;
+    w->pass_colour = t ? t->colour : NULL;
+    w->pass_zbuf = t ? t->zbuf : NULL;
+    if (w->pass_colour) w->pass_colour->held++;
+    if (w->pass_zbuf) w->pass_zbuf->held++;
+    if (gm_record(w, load, colour)) {
+        w->port[0] = w->port[1] = 0;
+        w->port[2] = w->pass_w;
+        w->port[3] = w->pass_h;
+        w->cut_on = 0;
         w->clipped_out = 0;
-        gm_set_viewport(w, 0, 0, w->pass_w, w->pass_h);
+        gm_set_viewport(w);
+    } else {
+        gm_pass_done(w);
     }
     gm.pool_pop(pool);
 }
@@ -1485,66 +1785,41 @@ static void gm_bind(int64_t dev, int64_t pipeline) {
     void *pool;
     if (!gm_use(w, "bind") || !w->enc || !p) return;
     pool = gm.pool_push();
-    gm_v_o(w->enc, "setRenderPipelineState:", p->obj);
-    gm_v_o(w->enc, "setDepthStencilState:", p->depth_state);
-    /* a target is drawn upside down (gm_prelude_target), which turns every face over */
-    gm_v_l(w->enc, "setFrontFacingWinding:", w->pass_window ? GM_COUNTER : GM_CLOCKWISE);
-    gm_v_l(w->enc, "setCullMode:", p->state.cull == 1 ? GM_CULL_BACK : p->state.cull == 2 ? GM_CULL_FRONT : 0);
     w->pipe = p;
     w->index = NULL;
     w->vertex = w->copy = NULL;
+    gm_set_pipe(w);
     gm.pool_pop(pool);
 }
 
-/* The block's bytes to both stages: copied into the frame, or a buffer of their own past the
- * size Metal copies. */
 static void gm_uniforms(int64_t dev, const float *block, int64_t n) {
     gm_window *w = gm_of(dev);
     unsigned long bytes = (unsigned long) n * 4;
     void *pool;
     if (!gm_use(w, "uniforms") || !w->enc || !w->pipe || n <= 0) return;
+    if (w->block_room < bytes) {
+        unsigned char *grown = (unsigned char *) realloc(w->block, bytes);
+        if (!grown) return;
+        w->block = grown;
+        w->block_room = bytes;
+    }
+    memcpy(w->block, block, bytes);
+    w->block_bytes = bytes;
     pool = gm.pool_push();
-    if (bytes <= 4096) {
-        ((void (*)(gm_id, gm_sel, const void *, unsigned long, unsigned long)) gm.msg)(
-            w->enc, gm_s("setVertexBytes:length:atIndex:"), block, bytes, GM_SLOT_BLOCK);
-        ((void (*)(gm_id, gm_sel, const void *, unsigned long, unsigned long)) gm.msg)(
-            w->enc, gm_s("setFragmentBytes:length:atIndex:"), block, bytes, GM_SLOT_BLOCK);
-    } else {
-        gm_id held = gm_bytes(block, (int64_t) bytes);
-        gm_v_oll(w->enc, "setVertexBuffer:offset:atIndex:", held, 0, GM_SLOT_BLOCK);
-        gm_v_oll(w->enc, "setFragmentBuffer:offset:atIndex:", held, 0, GM_SLOT_BLOCK);
-        gm_drop(&held); /* the frame keeps it */
-    }
+    gm_set_block(w);
     gm.pool_pop(pool);
-}
-
-/* How a texture is sampled is the texture's own: the sampler of its three settings. */
-static gm_id gm_sampler(const gm_res *t) {
-    gm_id *slot = &gm.samplers[t->min_nearest][t->mag_nearest][t->mipped && t->levels > 1];
-    if (!*slot) {
-        gm_id desc = gm_o(gm_o(gm_class("MTLSamplerDescriptor"), "alloc"), "init");
-        gm_v_l(desc, "setMinFilter:", t->min_nearest ? 0 : 1);
-        gm_v_l(desc, "setMagFilter:", t->mag_nearest ? 0 : 1);
-        gm_v_l(desc, "setMipFilter:", t->mipped && t->levels > 1 ? 2 : 0);
-        *slot = gm_o_p(gm.device, "newSamplerStateWithDescriptor:", desc); /* clamped: the default */
-        gm_v(desc, "release");
-    }
-    return *slot;
 }
 
 static void gm_sample(int64_t dev, int64_t slot, int64_t tex) {
     gm_window *w = gm_of(dev);
     gm_res *t = gm_res_of(tex, GM_TEXTURE);
-    gm_id sampler;
     void *pool;
     if (!gm_use(w, "sample") || !w->enc || !t || slot < 0 || slot >= GM_MAX_TEXTURES) return;
     pool = gm.pool_push();
-    sampler = gm_sampler(t);
-    gm_v_ol(w->enc, "setVertexTexture:atIndex:", t->obj, (unsigned long) slot);
-    gm_v_ol(w->enc, "setFragmentTexture:atIndex:", t->obj, (unsigned long) slot);
-    gm_v_ol(w->enc, "setVertexSamplerState:atIndex:", sampler, (unsigned long) slot);
-    gm_v_ol(w->enc, "setFragmentSamplerState:atIndex:", sampler, (unsigned long) slot);
-    gm_reads(w, t);
+    t->held++;
+    gm_texture_unhold(w->slot[slot]);
+    w->slot[slot] = t;
+    gm_set_slot(w, (int) slot);
     gm.pool_pop(pool);
 }
 
@@ -1575,35 +1850,22 @@ static void gm_indices(int64_t dev, int64_t buf) {
 static void gm_viewport_call(int64_t dev, int64_t x, int64_t y, int64_t width, int64_t height) {
     gm_window *w = gm_of(dev);
     if (!gm_use(w, "viewport") || !w->enc || width < 0 || height < 0) return;
-    gm_set_viewport(w, x, y, width, height);
+    w->port[0] = x;
+    w->port[1] = y;
+    w->port[2] = width;
+    w->port[3] = height;
+    gm_set_viewport(w);
 }
 
-/* Metal takes a scissor only inside the target and never an empty one: the rectangle is cut to
- * the target, and one with nothing left draws nothing. */
 static void gm_scissor(int64_t dev, int64_t x, int64_t y, int64_t width, int64_t height, int64_t on) {
     gm_window *w = gm_of(dev);
-    gm_scissor_rect r;
-    int64_t x1, y1;
     if (!gm_use(w, "scissor") || !w->enc) return;
-    if (!on) {
-        x = y = 0;
-        width = w->pass_w;
-        height = w->pass_h;
-    }
-    y = gm_row(w, y, height);
-    x1 = x + width;
-    y1 = y + height;
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    if (x1 > w->pass_w) x1 = w->pass_w;
-    if (y1 > w->pass_h) y1 = w->pass_h;
-    w->clipped_out = x1 <= x || y1 <= y;
-    if (w->clipped_out) return;
-    r.x = (unsigned long) x;
-    r.y = (unsigned long) y;
-    r.width = (unsigned long) (x1 - x);
-    r.height = (unsigned long) (y1 - y);
-    ((void (*)(gm_id, gm_sel, gm_scissor_rect)) gm.msg)(w->enc, gm_s("setScissorRect:"), r);
+    w->cut[0] = x;
+    w->cut[1] = y;
+    w->cut[2] = width;
+    w->cut[3] = height;
+    w->cut_on = on != 0;
+    gm_set_scissor(w);
 }
 
 static void gm_draw(int64_t dev, int64_t first, int64_t count, int64_t indexed, int64_t copies) {
@@ -1625,19 +1887,14 @@ static void gm_draw(int64_t dev, int64_t first, int64_t count, int64_t indexed, 
             w->enc, gm_s("drawPrimitives:vertexStart:vertexCount:instanceCount:"), shape,
             (unsigned long) first, (unsigned long) count, times);
     }
+    w->recorded = 1;
 }
 
 /* End the pass in progress and hand its work to the GPU. */
 static void gm_end_pass(gm_window *w) {
-    if (!w->enc) return;
-    gm_v(w->enc, "endEncoding");
-    gm_v(w->cb, "commit");
-    gm_keep(&w->last, w->cb);
-    gm_drop(&w->enc);
-    gm_drop(&w->cb);
-    w->pipe = NULL;
-    w->index = NULL;
-    w->vertex = w->copy = NULL;
+    if (!w->enc && !w->paused) return;
+    gm_hand_over(w);
+    gm_pass_done(w);
 }
 
 static void gm_end(int64_t dev) {
@@ -1649,28 +1906,50 @@ static void gm_end(int64_t dev) {
     gm.pool_pop(pool);
 }
 
-/* Show the frame: the layer waits for the display's next one before it hands out another. */
+/* Show the frame: a copy of the window's picture, which the window keeps.  The layer waits for
+ * the display's next frame before it hands out another; a window that is on no screen is shown
+ * nothing and waits about a frame instead. */
 static void gm_present(int64_t dev) {
     gm_window *w = gm_of(dev);
-    gm_id cb;
+    gm_id cb, blit, drawable, texture;
     void *pool;
-    if (!gm_use(w, "present") || w->enc || !w->drawable) return;
+    if (!gm_use(w, "present") || w->enc || !w->image) return;
+    if (w->hidden) {
+        usleep(16000);
+        return;
+    }
     pool = gm.pool_push();
-    cb = gm_o(gm.queue, "commandBuffer");
-    gm_v_o(cb, "presentDrawable:", w->drawable);
-    gm_v(cb, "commit");
-    gm_keep(&w->last, cb);
-    gm_drop(&w->drawable);
+    drawable = gm_o(w->layer, "nextDrawable");
+    texture = drawable ? gm_o(drawable, "texture") : NULL;
+    /* a frame of another size than the picture's: the window was resized, the next one fits */
+    if (texture && (int) gm_l(texture, "width") == w->depth_w && (int) gm_l(texture, "height") == w->depth_h) {
+        gm_origin zero = {0, 0, 0}, size;
+        size.x = (unsigned long) w->depth_w;
+        size.y = (unsigned long) w->depth_h;
+        size.z = 1;
+        cb = gm_o(gm.queue, "commandBuffer");
+        blit = gm_o(cb, "blitCommandEncoder");
+        ((void (*)(gm_id, gm_sel, gm_id, unsigned long, unsigned long, gm_origin, gm_origin, gm_id,
+                   unsigned long, unsigned long, gm_origin)) gm.msg)(
+            blit,
+            gm_s("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toTexture:"
+                 "destinationSlice:destinationLevel:destinationOrigin:"),
+            w->image, 0ul, 0ul, zero, size, texture, 0ul, 0ul, zero);
+        gm_v(blit, "endEncoding");
+        gm_v_o(cb, "presentDrawable:", drawable);
+        gm_v(cb, "commit");
+        gm_keep(&w->last, cb);
+    }
     gm.pool_pop(pool);
 }
 
-/* The pixels of `target`'s colour, or the window's frame, 0xAARRGGBB, the top row first, with
- * the alpha that was drawn (the window shows it opaque).  A target's first row is the layer's
- * bottom one. */
+/* The pixels of `target`'s colour, or of the window's picture, 0xAARRGGBB, the top row first.  A
+ * window's are opaque, and the same before and after the frame was shown.  A target's first row
+ * is the layer's bottom one. */
 static void gm_capture(int64_t dev, int64_t target, uint32_t *out, int64_t n) {
     gm_window *w = gm_of(dev);
     gm_res *t = gm_res_of(target, GM_TARGET);
-    gm_id texture;
+    gm_id texture, pending;
     gm_region region;
     int64_t width, height;
     void *pool;
@@ -1679,7 +1958,7 @@ static void gm_capture(int64_t dev, int64_t target, uint32_t *out, int64_t n) {
     if (t) {
         texture = t->colour ? t->colour->obj : NULL;
     } else {
-        texture = gm_frame(w) ? gm_o(w->drawable, "texture") : NULL;
+        texture = gm_frame(w) ? w->image : NULL;
     }
     width = texture ? (int64_t) gm_l(texture, "width") : 0;
     height = texture ? (int64_t) gm_l(texture, "height") : 0;
@@ -1687,14 +1966,16 @@ static void gm_capture(int64_t dev, int64_t target, uint32_t *out, int64_t n) {
         gm.pool_pop(pool);
         return;
     }
+    pending = t ? t->colour->used : w->last;
     if (gm_l(texture, "storageMode") == GM_STORE_MANAGED) { /* the GPU's copy, brought back */
         gm_id cb = gm_o(gm.queue, "commandBuffer"), blit = gm_o(cb, "blitCommandEncoder");
         gm_v_o(blit, "synchronizeResource:", texture);
         gm_v(blit, "endEncoding");
         gm_v(cb, "commit");
-        gm_keep(&w->last, cb);
+        pending = cb;
     }
-    if (w->last) gm_v(w->last, "waitUntilCompleted");
+    /* the queue runs its work in the order it was handed over */
+    if (pending && gm_l(pending, "status") >= 2ul) gm_v(pending, "waitUntilCompleted");
     region.x = region.y = region.z = 0;
     region.width = (unsigned long) width;
     region.height = (unsigned long) height;
