@@ -189,6 +189,18 @@ vertex Out vertex_main(In in [[stage_in]], constant Block &u [[buffer(0)]]) {{
 }}
 `;
 
+// The right size, and a float in between that moves the one the program declares.
+const MOVED_V: text = `
+struct Block {{ float4 color; float pad; float z; }};
+struct In {{ float3 pos [[attribute(0)]]; }};
+struct Out {{ float4 position [[position]]; }};
+vertex Out vertex_main(In in [[stage_in]], constant Block &u [[buffer(0)]]) {{
+  Out o;
+  o.position = gpu_position(float4(in.pos.xy + u.color.xy, u.z + u.pad, 1.0));
+  return o;
+}}
+`;
+
 const RIGHT_V: text = `
 struct Block {{ float4 color; float z; }};
 struct In {{ float3 pos [[attribute(0)]]; }};
@@ -233,6 +245,7 @@ fn test_a_source_that_breaks_a_rule_builds_no_pipeline() {
   assert(dev.pipeline(blocked(WRONG_V), gpu::State {}) == null, "the float sits at byte 12 in the shader and 16 in the program");
   // every field of the shader's block is where the program has one: only the size differs
   assert(dev.pipeline(blocked(SHORT_V), gpu::State {}) == null, "the shader's block is 16 bytes and the program's 32");
+  assert(dev.pipeline(blocked(MOVED_V), gpu::State {}) == null, "both blocks are 32 bytes, and the shader has a field at byte 20 where the program has none");
   assert(dev.pipeline(blocked(UNTURNED_V), gpu::State {}) == null, "a position not handed to gpu_position is in another clip space");
   assert(dev.pipeline(blocked("gpu_position( is not a shader"), gpu::State {}) == null, "a source that does not compile");
   none = gpu::Program {
