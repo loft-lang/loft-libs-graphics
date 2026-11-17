@@ -185,7 +185,9 @@ typedef struct gm_window {
     gm_id cb, enc;
     int pass_w, pass_h, pass_window;
     gm_res *pipe, *index;
-    int has_copies, clipped_out;
+    gm_res *vertex, *copy; /* the buffers the next draw reads, and where the copies' floats start */
+    int64_t copy_first;
+    int clipped_out;
 } gm_window;
 
 /* The runtime, bound once for the process: system libraries are never unloaded. */
@@ -907,6 +909,17 @@ static void gm_reads(gm_window *w, gm_res *r) {
     if (r->used != w->cb) gm_keep(&r->used, w->cb);
 }
 
+/* Hand buffer `b` to the pass in progress in each place it was named for: as the vertices, as
+ * the values per copy, or both. */
+static void gm_feed(gm_window *w, gm_res *b) {
+    if (w->vertex == b)
+        gm_v_oll(w->enc, "setVertexBuffer:offset:atIndex:", b->obj, 0, GM_SLOT_VERTEX);
+    if (w->copy == b)
+        gm_v_oll(w->enc, "setVertexBuffer:offset:atIndex:", b->obj,
+                 (unsigned long) w->copy_first * 4, GM_SLOT_COPY);
+    gm_reads(w, b);
+}
+
 static int64_t gm_buffer(int64_t dev, const float *data, int64_t n) {
     gm_res *r;
     void *pool;
@@ -946,6 +959,7 @@ static int64_t gm_index_buffer(int64_t dev, const int64_t *idx, int64_t n) {
 static void gm_buffer_update(int64_t buf, const float *data, int64_t n) {
     gm_res *r = gm_res_of(buf, GM_BUFFER);
     unsigned long bytes = (unsigned long) (n > 0 ? n * 4 : 0);
+    gm_window *w;
     void *pool;
     if (!r || n < 0 || gm.loaded <= 0) return;
     pool = gm.pool_push();
@@ -967,6 +981,9 @@ static void gm_buffer_update(int64_t buf, const float *data, int64_t n) {
     }
     gm_drop(&r->used);
     if (r->obj && bytes > 0) memcpy(gm_o(r->obj, "contents"), data, bytes);
+    /* a pass that named this buffer reads the new floats from its next draw on */
+    for (w = gm.open; r->obj && w; w = w->next_open)
+        if (w->enc && (w->vertex == r || w->copy == r)) gm_feed(w, r);
     gm.pool_pop(pool);
 }
 
@@ -1338,6 +1355,8 @@ static void gm_release(int64_t h) {
     for (w = gm.open; w; w = w->next_open) {
         if (w->pipe == r) w->pipe = NULL;
         if (w->index == r) w->index = NULL;
+        if (w->vertex == r) w->vertex = NULL;
+        if (w->copy == r) w->copy = NULL;
     }
     if (r->kind == GM_TEXTURE) {
         gm_texture_unhold(r);
@@ -1453,7 +1472,7 @@ static void gm_begin(int64_t dev, int64_t target, int64_t load, int64_t colour) 
         if (t && t->zbuf) gm_keep(&t->zbuf->used, cb);
         w->pipe = NULL;
         w->index = NULL;
-        w->has_copies = 0;
+        w->vertex = w->copy = NULL;
         w->clipped_out = 0;
         gm_set_viewport(w, 0, 0, w->pass_w, w->pass_h);
     }
@@ -1473,7 +1492,7 @@ static void gm_bind(int64_t dev, int64_t pipeline) {
     gm_v_l(w->enc, "setCullMode:", p->state.cull == 1 ? GM_CULL_BACK : p->state.cull == 2 ? GM_CULL_FRONT : 0);
     w->pipe = p;
     w->index = NULL;
-    w->has_copies = 0;
+    w->vertex = w->copy = NULL;
     gm.pool_pop(pool);
 }
 
@@ -1533,18 +1552,17 @@ static void gm_vertices(int64_t dev, int64_t buf) {
     gm_window *w = gm_of(dev);
     gm_res *b = gm_res_of(buf, GM_BUFFER);
     if (!gm_use(w, "vertices") || !w->enc || !w->pipe || !b || !b->obj) return;
-    gm_v_oll(w->enc, "setVertexBuffer:offset:atIndex:", b->obj, 0, GM_SLOT_VERTEX);
-    gm_reads(w, b);
+    w->vertex = b;
+    gm_feed(w, b);
 }
 
 static void gm_instances(int64_t dev, int64_t buf, int64_t first_float) {
     gm_window *w = gm_of(dev);
     gm_res *b = gm_res_of(buf, GM_BUFFER);
     if (!gm_use(w, "instances") || !w->enc || !w->pipe || !b || !b->obj || first_float < 0) return;
-    gm_v_oll(w->enc, "setVertexBuffer:offset:atIndex:", b->obj, (unsigned long) first_float * 4,
-             GM_SLOT_COPY);
-    gm_reads(w, b);
-    w->has_copies = 1;
+    w->copy = b;
+    w->copy_first = first_float;
+    gm_feed(w, b);
 }
 
 static void gm_indices(int64_t dev, int64_t buf) {
@@ -1592,7 +1610,7 @@ static void gm_draw(int64_t dev, int64_t first, int64_t count, int64_t indexed, 
     gm_window *w = gm_of(dev);
     unsigned long shape, times = copies > 0 ? (unsigned long) copies : 1ul;
     if (!gm_use(w, "draw") || !w->enc || !w->pipe || count <= 0 || first < 0 || w->clipped_out) return;
-    if (w->pipe->instance_n > 0 && !w->has_copies) return; /* Metal reads the values per copy of every draw */
+    if (!w->vertex || (w->pipe->instance_n > 0 && !w->copy)) return; /* Metal reads every input of every draw */
     shape = w->pipe->state.shape == 1 ? 1ul : w->pipe->state.shape == 2 ? 0ul : 3ul;
     if (indexed) {
         if (!w->index) return;
@@ -1619,6 +1637,7 @@ static void gm_end_pass(gm_window *w) {
     gm_drop(&w->cb);
     w->pipe = NULL;
     w->index = NULL;
+    w->vertex = w->copy = NULL;
 }
 
 static void gm_end(int64_t dev) {

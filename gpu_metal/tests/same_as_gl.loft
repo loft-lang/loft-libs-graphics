@@ -555,6 +555,7 @@ fn copies_and_indices(table: i64) -> vector<u32> {
   corners = dev.buffer([-0.25f, -0.25f, 0.0f, 0.25f, -0.25f, 0.0f, 0.25f, 0.25f, 0.0f, -0.25f, 0.25f, 0.0f]);
   list = dev.index_buffer([0, 1, 2, 0, 2, 3]);
   moving = dev.buffer(rect(-1.0, -1.0, -0.5, -0.5, false));
+  late = dev.buffer([0.0f, 0.0f, 0.0f]);
   u = many.block();
   dev.begin_window(gpu::CLEAR, BLUE);
   dev.bind(many);
@@ -572,6 +573,13 @@ fn copies_and_indices(table: i64) -> vector<u32> {
   u.f4(0, 1.0, 1.0, 0.0, 1.0);
   dev.uniforms(u);
   dev.vertices(moving);
+  dev.draw(0, 6);
+  // new floats inside the pass: what was drawn stays, and the next draw reads the new ones
+  moving.update(rect(-1.0, 0.5, -0.5, 1.0, false));
+  dev.draw(0, 6);
+  // a buffer nothing has read yet, given more floats than it was made with
+  late.update(rect(-0.25, -1.0, 0.25, -0.75, false));
+  dev.vertices(late);
   dev.draw(0, 6);
   dev.end();
   // new floats, of another length: the pass before keeps what it drew
