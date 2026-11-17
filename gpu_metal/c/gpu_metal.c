@@ -1129,7 +1129,12 @@ static gm_window *gm_touching(const gm_res *t, gm_window *w) {
 /* Wait for the GPU work that still reads or draws into `t`, so its pixels can be touched.  What
  * a pass in progress recorded is handed over first and the pass goes on behind it: a draw made
  * before this call shows the old pixels, a draw made after it the new ones.  The queue runs
- * its work in the order it was handed over, so the last of it is the one to wait for. */
+ * its work in the order it was handed over, so the last of it is the one to wait for.
+ *
+ * A GPU without memory of its own to share keeps a texture twice (managed storage): the copy
+ * the CPU writes into is not the one the GPU drew into, and a region written into the first is
+ * handed to the GPU with the rest of that copy.  So what the GPU drew is brought back into the
+ * CPU's copy first, as `capture` brings it back to read it. */
 static void gm_settle(gm_res *t) {
     gm_window *w;
     for (w = gm_touching(t, NULL); w; w = gm_touching(t, w)) {
@@ -1139,9 +1144,17 @@ static void gm_settle(gm_res *t) {
         }
         if (w->last) gm_v(w->last, "waitUntilCompleted");
     }
-    if (!t->used || gm_l(t->used, "status") < 2ul) return; /* none, or a pass that goes on */
-    gm_v(t->used, "waitUntilCompleted");
-    gm_drop(&t->used);
+    if (t->used && gm_l(t->used, "status") >= 2ul) { /* not a pass that goes on */
+        gm_v(t->used, "waitUntilCompleted");
+        gm_drop(&t->used);
+    }
+    if (gm_l(t->obj, "storageMode") == GM_STORE_MANAGED) {
+        gm_id cb = gm_o(gm.queue, "commandBuffer"), blit = gm_o(cb, "blitCommandEncoder");
+        gm_v_o(blit, "synchronizeResource:", t->obj);
+        gm_v(blit, "endEncoding");
+        gm_v(cb, "commit");
+        gm_v(cb, "waitUntilCompleted");
+    }
 }
 
 /* Replace a `width` x `height` region at (x, y) of a colour texture: a 0xAARRGGBB word is the
