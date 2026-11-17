@@ -79,6 +79,6 @@ and on `gpu_vulkan` (RADV and lavapipe), on the interpreter, the C backend and t
 backend.  Through Vulkan two differences from graphics' OpenGL are measured and allowed, the
 rest held byte for byte: a channel off by 1 where a stack rounds a blend or a filter its own
 way (RADV), and the sprites' one top row (11 pixels), an edge a quarter of a pixel from pixels'
-middles that llvmpipe's OpenGL places a quarter of a pixel off.  `a painter into a texture that
-another shows` fails there on both backends: graphics' own painter, the reference, leaves the
-green rectangle it paints into a texture transparent on llvmpipe, where the Mac shows it.
+middles that llvmpipe's OpenGL places a quarter of a pixel off.  The reference needs graphics
+0.13.1 or later there: llvmpipe compiles the flat shader of an earlier `Painter` wrongly, so its
+rectangles come out in the wrong colour.
