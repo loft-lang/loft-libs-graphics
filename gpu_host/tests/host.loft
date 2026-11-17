@@ -14,8 +14,14 @@ fn display() -> boolean {
 
 fn test_the_backends_are_asked_in_one_order() {
   names = gpu_host::backends();
-  assert(len(names) <= 2, "two backends are known: {names}");
-  if len(names) == 2 { assert(names[0] == "gpu_metal" && names[1] == "gpu_gl", "Metal is asked before OpenGL: {names}"); }
+  assert(len(names) <= 3, "three backends are known: {names}");
+  // whichever this machine has, in the one order: Metal, OpenGL, Vulkan
+  order = ["gpu_metal", "gpu_gl", "gpu_vulkan"];
+  at = 0;
+  for n in names {
+    while at < len(order) && (order[at] ?? "") != n { at += 1; }
+    assert(at < len(order), "{n} is asked in the order Metal, OpenGL, Vulkan: {names}");
+  }
   assert(gpu_host::open_on("", 8, 8, "none") == null && gpu_host::open_on("gpu_none", 8, 8, "none") == null, "a backend nobody knows opens nothing");
 }
 
@@ -43,17 +49,35 @@ fn first() -> vector<u32> {
   painted(dev)
 }
 
+// The largest gap between two pixels in any one channel.
+fn gap(a: u32, b: u32) -> integer {
+  worst = 0;
+  for shift in [0, 8, 16, 24] {
+    x = ((a as integer) >> shift) & 255;
+    y = ((b as integer) >> shift) & 255;
+    d = if x > y { x - y } else { y - x };
+    if d > worst { worst = d; }
+  }
+  worst
+}
+
 fn test_a_program_that_names_no_backend_draws_one_picture_on_each() {
   if !display() { return; }
   shown = first();
   assert(len(shown) == 64 * 48, "the host opened a window: {len(shown)} pixels");
   // by hand: the red rectangle is opaque, the sky shows beside it
   assert((shown[6 * 64 + 10] ?? 0) == 0xFFFF0000 && (shown[0] ?? 0) == 0xFF102030, "the picture: {shown[6 * 64 + 10] ?? 0:x} {shown[0] ?? 0:x}");
+  first_name = gpu_host::backends()[0] ?? "";
   for name in gpu_host::backends() {
     one = on(name);
     assert(len(one) == len(shown), "{name} opened a window: {len(one)} pixels");
+    // Byte for byte, but that another stack may round the half-transparent blend the other
+    // way: a channel off by 1 (RADV against llvmpipe's OpenGL: 630 pixels).
     differ = 0;
-    for p in one { if p != (shown[p#index] ?? 0) { differ += 1; } }
+    for p in one {
+      q = shown[p#index] ?? 0;
+      if p != q && (name == first_name || gap(p, q) > 1) { differ += 1; }
+    }
     assert(differ == 0, "{differ} pixels on {name} differ from the first backend's");
   }
 }

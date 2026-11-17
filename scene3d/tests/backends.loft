@@ -17,7 +17,7 @@
 //   - not the cause: Metal's fast-math compilation (the count is the same with it off).
 // So the bound here is a count of pixels and no channel step — a pixel on the wrong side of an
 // edge shows another face's colour whole: at most 1 pixel in 5,000.  This test's four views at
-// 320 x 240 differ in 0, 0, 2 and 0 pixels.
+// 320 x 240 differ in 0, 0, 2 and 0 pixels.  On Linux, OpenGL against Vulkan: `edge_bound`.
 // Without a display, or on a machine with one backend, the test returns at once.
 use gpu;
 use gpu_gl;
@@ -87,15 +87,27 @@ fn views(table: i64) -> vector<vector<u32>> {
   out
 }
 
+// How many of a view's 76,800 pixels two backends may differ in: 1 in 5,000 (15), as Metal and
+// OpenGL on a Mac, and as two Vulkan drivers (lavapipe and RADV: 5 to 10 a view).  OpenGL against
+// Vulkan on Linux is measured where the OpenGL is llvmpipe (under Xvfb, the only OpenGL there):
+// llvmpipe draws every edge about 0.2 of a pixel lower and 0.07 to the left of where the spec's
+// arithmetic puts it, where both Vulkan drivers put it within 1/32 of a pixel, so the pixels an
+// edge passes near show the other side: 837 to 940 a view.  Bounded at 1 in 70 (1,100).
+fn edge_bound(a: text, b: text) -> integer {
+  if (a == "gpu_gl" && b == "gpu_vulkan") || (a == "gpu_vulkan" && b == "gpu_gl") { 1100 } else { 15 }
+}
+
 fn test_a_town_in_perspective_is_one_picture_but_for_pixels_on_an_edge() {
   if !display() { return; }
   tables = backends();
   if len(tables) < 2 { return; }
   // the first backend against each other one
   first = views(tables[0]);
+  first_name = gpu::backend_name();
   for t in tables {
     if t#index == 0 { continue; }
     second = views(t);
+    bound = edge_bound(first_name, gpu::backend_name());
     assert(len(first) == 4 && len(second) == 4, "both backends drew four views: {len(first)} and {len(second)}");
     for i in 0..4 {
       differ = 0;
@@ -105,8 +117,7 @@ fn test_a_town_in_perspective_is_one_picture_but_for_pixels_on_an_edge() {
         if p != first[i][0] { colours += 1; }
       }
       assert(colours > 10000, "view {i} shows the town: {colours} pixels are not the first one's colour");
-      // 1 in 5,000 of 76,800
-      assert(differ <= 15, "view {i}: {differ} of 76800 pixels differ between backend 0 and backend {t#index}, more than an edge's rounding gives");
+      assert(differ <= bound, "view {i}: {differ} of 76800 pixels differ between {first_name} and {gpu::backend_name()}, more than an edge's rounding gives ({bound})");
     }
   }
 }

@@ -8,8 +8,10 @@ SPDX-License-Identifier: LGPL-3.0-or-later
 The Vulkan backend of [`gpu`](../gpu/README.md): Vulkan 1.3 on Linux, in an X11 window
 (Xorg or XWayland).
 
-A game does not name this library: its host package asks each backend in turn.  A program
-that wants this one alone opens a device with its table:
+A game does not name this library: [`gpu_host`](../gpu_host/README.md) asks each backend in
+turn, Vulkan after OpenGL until the two are timed on a Linux machine's own display (its
+README), and `GPU_HOST=gpu_vulkan` asks this one alone.  A program that wants this one opens a
+device with its table:
 
 ```loft
 use gpu;

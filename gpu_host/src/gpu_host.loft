@@ -6,14 +6,18 @@
 //   dev = gpu_host::open(960, 720, "view") ?? return;
 //
 // A game depends on this library and on `gpu`, and names no backend: each one is asked in turn,
-// and a backend whose stack this machine lacks answers none.  The order is Metal, then OpenGL —
-// so a Mac draws through Metal, and Linux, Android and a browser page through OpenGL.
+// and a backend whose stack this machine lacks answers none.  The order is Metal, then OpenGL,
+// then Vulkan — so a Mac draws through Metal, and Linux, Android and a browser page through
+// OpenGL.  Vulkan answers on Linux after OpenGL until it is timed against OpenGL on a machine's
+// own display (bench/backends.loft); before that it is reached by name.
 //
-// The environment variable `GPU_HOST` names the one backend to ask (`gpu_metal`, `gpu_gl`): for
+// The environment variable `GPU_HOST` names the one backend to ask (`gpu_metal`, `gpu_gl`,
+// `gpu_vulkan`): for
 // a comparison of two backends on one machine, not for a game to set.
 use gpu;
 use gpu_gl;
 use gpu_metal;
+use gpu_vulkan;
 
 // The backends in the order they are asked, each with its table (0: not on this machine).
 struct Backend {
@@ -25,6 +29,7 @@ fn all() -> vector<Backend> {
   [
     Backend { name: "gpu_metal", table: gpu_metal::table() },
     Backend { name: "gpu_gl", table: gpu_gl::table() },
+    Backend { name: "gpu_vulkan", table: gpu_vulkan::table() },
   ]
 }
 

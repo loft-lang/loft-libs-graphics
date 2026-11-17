@@ -5,7 +5,7 @@
 //
 //   dev = gpu::open(gpu_vulkan::table(), 960, 720, "view") ?? return;
 //
-// A game does not name this library: its host package asks each backend in turn.  A program's
+// A game does not name this library: `gpu_host` asks each backend in turn.  A program's
 // source for it carries the tag "spirv": a SPIR-V 1.3 module as base64 text, which
 // gpu_vulkan/spirv.py writes from the program's "glsl-330" source, so a program is written once:
 //   - the inputs read per vertex are `location = 0` onwards, in the program's order, and the

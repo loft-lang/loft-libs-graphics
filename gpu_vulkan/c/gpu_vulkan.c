@@ -31,7 +31,7 @@
  *   - the uniform block is `set = 0, binding = 0`, std140;
  *   - texture slot n is a `sampler2D` at `set = 0, binding = 1 + n`;
  *   - a program drawing points writes `gl_PointSize`. */
-#include "../../gpu/c/gpu_backend.h"
+#include "gpu/gpu_backend.h"
 
 #if defined(__linux__) && !defined(__ANDROID__) && !defined(__wasm__)
 #include "vk_decl.h"
@@ -755,6 +755,15 @@ static int gv_back(gv_dev *d) {
 
 static void gv_free(gv_dev *d);
 
+/* Why a device did not open, on stderr, when that is not the stack being absent: a window that
+ * did not open on a display that is set, or a driver that suits the window failing to make what
+ * a device needs.  Absence (no loader, no X display, no driver that draws into the window) is
+ * how a backend says "not here", and says nothing. */
+static int gv_say(const char *what, VkResult r) {
+    fprintf(stderr, "gpu_vulkan: no device: %s (VkResult %d)\n", what, (int) r);
+    return 0;
+}
+
 static int64_t gv_t_open(int64_t width, int64_t height, const char *title, int64_t fullscreen) {
     static const char *iexts[] = {"VK_KHR_surface", "VK_KHR_xlib_surface"};
     gv_create_instance_fn create;
@@ -768,12 +777,16 @@ static int64_t gv_t_open(int64_t width, int64_t height, const char *title, int64
     uint32_t n = 16, i;
     int best = -1, best_line = 0, line;
     uint32_t best_family = 0, family;
+    VkResult r;
     gv_dev *d;
     if (!gv_load()) return 0;
     d = (gv_dev *) calloc(1, sizeof *d);
     if (!d) return 0;
     d->serial_next = 1;
-    if (!gv_x_open(&d->x, width, height, title, fullscreen)) goto fail;
+    if (!gv_x_open(&d->x, width, height, title, fullscreen)) {
+        if (d->x.display || getenv("DISPLAY")) gv_say("the X window did not open", 0);
+        goto fail;
+    }
     *(void **) (&create) = (void *) gv_gipa(NULL, "vkCreateInstance");
     if (!create) goto fail;
     memset(&app, 0, sizeof app);
@@ -809,7 +822,10 @@ static int64_t gv_t_open(int64_t width, int64_t height, const char *title, int64
     }
     if (best < 0) goto fail; /* no device here draws into this window */
     d->family = best_family;
-    if (!gv_make_device(d, best_line)) goto fail;
+    if (!gv_make_device(d, best_line)) {
+        gv_say("the driver made no device", 0);
+        goto fail;
+    }
 #define GV_DLOAD(ret, name, args)                                                                 \
     *(void **) (&d->f.name) = (void *) d->f.vkGetDeviceProcAddr(d->device, #name);
     GV_DEVICE_FUNCTIONS(GV_DLOAD)
@@ -823,7 +839,10 @@ static int64_t gv_t_open(int64_t width, int64_t height, const char *title, int64
     pi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     pi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     pi.queueFamilyIndex = d->family;
-    if (d->f.vkCreateCommandPool(d->device, &pi, NULL, &d->pool) != VK_SUCCESS) goto fail;
+    if ((r = d->f.vkCreateCommandPool(d->device, &pi, NULL, &d->pool)) != VK_SUCCESS) {
+        gv_say("no command pool", r);
+        goto fail;
+    }
     for (i = 0; i < GV_FRAMES; i++) {
         VkFenceCreateInfo fi;
         VkSemaphoreCreateInfo si;
@@ -838,14 +857,26 @@ static int64_t gv_t_open(int64_t width, int64_t height, const char *title, int64
         si.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
         if (d->f.vkAllocateCommandBuffers(d->device, &ai, &d->frames[i].cb) != VK_SUCCESS ||
             d->f.vkCreateFence(d->device, &fi, NULL, &d->frames[i].fence) != VK_SUCCESS ||
-            d->f.vkCreateSemaphore(d->device, &si, NULL, &d->frames[i].acquired) != VK_SUCCESS)
+            d->f.vkCreateSemaphore(d->device, &si, NULL, &d->frames[i].acquired) != VK_SUCCESS) {
+            gv_say("no command buffer, fence or semaphore", 0);
             goto fail;
+        }
     }
     d->samplers[0] = gv_sampler(d, VK_FILTER_NEAREST, 0);
     d->samplers[1] = gv_sampler(d, VK_FILTER_LINEAR, 0);
     d->samplers[2] = gv_sampler(d, VK_FILTER_LINEAR, 1);
-    if (!d->samplers[0] || !d->samplers[1] || !d->samplers[2]) goto fail;
-    if (!gv_swapchain(d) || !gv_back(d)) goto fail;
+    if (!d->samplers[0] || !d->samplers[1] || !d->samplers[2]) {
+        gv_say("no samplers", 0);
+        goto fail;
+    }
+    if (!gv_swapchain(d)) {
+        gv_say("no swapchain for the window", 0);
+        goto fail;
+    }
+    if (!gv_back(d)) {
+        gv_say("no image for the window", 0);
+        goto fail;
+    }
     return (int64_t) (intptr_t) d;
 fail:
     gv_free(d);
