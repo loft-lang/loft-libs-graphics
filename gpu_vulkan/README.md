@@ -28,7 +28,7 @@ are opened when a device opens.
 ## A program's source for it
 
 Vulkan takes a shader only as SPIR-V.  A program's source for this backend carries the tag
-`"spirv"` and is a SPIR-V module for Vulkan 1.3 as base64 text, and it is not written by hand:
+`"spirv"` and is a SPIR-V 1.3 module (Vulkan 1.1 and later) as base64 text, not written by hand:
 `spirv.py` writes it from the program's `"glsl-330"` source, so a program is written once.
 
 ```loft
@@ -100,6 +100,11 @@ the colours worked out by hand.  The same pixels on both stacks except:
 | Linux, X11 (Xvfb), RADV (AMD Radeon 890M) | The 18 tests pass on the interpreter, the Rust backend and the C backend, with the Khronos validation layer and its synchronisation checks reporting no error |
 | Linux, X11 (Xvfb), lavapipe | The same |
 | Linux, a desktop X server or XWayland | Not run |
+
+The libraries that draw through `gpu` carry this backend's SPIR-V, and run their pixel tests
+through it as well as through `gpu_gl`: `scene3d`'s against numbers worked out by hand, all
+the same on both; `gpu_paint`'s against graphics' painter, with what differs from llvmpipe's
+OpenGL measured in its README.
 
 Under Xvfb a GPU's driver presents only through Mesa's software path:
 `MESA_VK_WSI_DEBUG=sw`.  Without it RADV answers "not here" and lavapipe is taken.  To run the

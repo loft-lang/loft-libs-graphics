@@ -4,13 +4,23 @@
 // A painter and a sprite sheet through `gpu` draw the same pixels as the graphics library's
 // own `Painter` and `Sprites`, byte for byte.  Each test opens a window of each, draws one
 // scene both ways and compares the two captures whole; it also asks that the scene shows more
-// than one colour.  graphics and gpu_gl are not dependencies of this package: one is the path
-// it is measured against, the other the backend that draws here.  Without a display every
-// test returns at once (`DISPLAY`, or `GRAPHICS_TEST_WINDOW=1` on a Mac).
+// than one colour.  Each test runs on every backend here: `gpu_gl`, and `gpu_vulkan` on Linux.
+// graphics and the backends are not dependencies of this package: one is the path it is
+// measured against, the others draw here.  Without a display every test returns at once
+// (`DISPLAY`, or `GRAPHICS_TEST_WINDOW=1` on a Mac).
 use gpu;
 use gpu_gl;
+use gpu_vulkan;
 use gpu_paint;
 use graphics;
+
+// The backends each test draws through: OpenGL, and Vulkan on a machine it has a window host
+// for (Linux), where a Vulkan driver is then expected (Mesa's lavapipe serves).
+fn backends() -> vector<i64> {
+  out: vector<i64> = [gpu_gl::table()];
+  if gpu_vulkan::table() != 0 { out += [gpu_vulkan::table()]; }
+  out
+}
 
 fn display() -> boolean {
   (env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1"
@@ -21,20 +31,45 @@ const RED = 0xFFFF0000;
 const GREEN = 0xFF00FF00;
 const BLUE = 0xFF0000FF;
 
-fn same(old: const vector<u32>, new: const vector<u32>, what: text) {
-  assert(len(old) == len(new) && len(old) > 0, "{what}: {len(old)} pixels through graphics, {len(new)} through gpu");
+// The largest gap between two pixels in any one channel.
+fn channel_gap(a: u32, b: u32) -> integer {
+  worst = 0;
+  for shift in [0, 8, 16, 24] {
+    x = ((a as integer) >> shift) & 255;
+    y = ((b as integer) >> shift) & 255;
+    gap = if x > y { x - y } else { y - x };
+    if gap > worst { worst = gap; }
+  }
+  worst
+}
+
+// The same pixels, byte for byte, through OpenGL: graphics draws on OpenGL too.  Through another
+// stack two differences are measured and allowed, the rest held byte for byte:
+//   - a channel off by 1, where a stack rounds a blend or a filter's weights its own way (RADV
+//     against llvmpipe's OpenGL: 504 pixels of the rectangles, 223 of the images);
+//   - `edges` pixels more, where an edge passes within a quarter of a pixel of pixels' middles
+//     and llvmpipe's OpenGL places it a quarter of a pixel off where Vulkan places it by the
+//     spec's arithmetic (the sprites: their one top row, 11 pixels, on lavapipe and RADV).
+fn same(old: const vector<u32>, new: const vector<u32>, what: text, edges: integer) {
+  assert(len(old) == len(new) && len(old) > 0, "{what}: {len(old)} pixels through graphics, {len(new)} through {gpu::backend_name()}");
+  other = gpu::backend_name() != "gpu_gl";
   differ = 0;
   first = -1;
   colours = 0;
   for p in old {
-    if p != (new[p#index] ?? 0) {
-      differ += 1;
-      if first < 0 { first = p#index; }
+    q = new[p#index] ?? 0;
+    if p != q {
+      gap = channel_gap(p, q);
+      if !other || gap > 1 {
+        differ += 1;
+        if first < 0 { first = p#index; }
+      }
     }
     if p != old[0] { colours += 1; }
   }
+  allowed = if other { edges } else { 0 };
   assert(colours > 0, "{what}: the scene shows one colour only");
-  assert(differ == 0, "{what}: {differ} pixels differ, the first at {first}: {old[first] ?? 0:x} through graphics, {new[first] ?? 0:x} through gpu");
+  assert(differ <= allowed, "{what}: {differ} pixels differ ({allowed} allowed), the first at {first}: {old[first] ?? 0:x} through graphics, {new[first] ?? 0:x} through {gpu::backend_name()}");
 }
 
 // The old painter blends where its window does: plain transparency, as the new one blends.
@@ -62,11 +97,11 @@ fn placed(sx: float, sy: float, z: float) -> vector<float> {
   [sx, 0.0, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -sx / 2.0, -sy / 2.0, z, 1.0]
 }
 
-fn test_rectangles_opaque_blended_and_after_a_resize() {
+fn rectangles_opaque_blended_and_after_a_resize_on(table: i64) {
   wo = graphics::open_window(64, 48, "old-rect");
   if !display() { return; }
   w = wo ?? return assert(false, "a display is set and no window opened");
-  dev = gpu::open(gpu_gl::table(), 64, 48, "new-rect") ?? return assert(false, "no device");
+  dev = gpu::open(table, 64, 48, "new-rect") ?? return assert(false, "no device");
   op = w.painter() ?? return assert(false, "the old painter");
   np = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return assert(false, "the new painter");
 
@@ -89,15 +124,19 @@ fn test_rectangles_opaque_blended_and_after_a_resize() {
   np.resize(32, 24);
   np.rect(dev, 24.0, 18.0, 8.0, 6.0, 1.0, 1.0, 0.0, 0.5);
   dev.end();
-  same(old.data, dev.capture(), "rectangles");
-  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  same(old.data, dev.capture(), "rectangles", 0);
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()} [{gpu::backend_name()}]");
 }
 
-fn test_an_image_keeps_its_rows_and_skips_the_transparent() {
+fn test_rectangles_opaque_blended_and_after_a_resize() {
+  for t in backends() { rectangles_opaque_blended_and_after_a_resize_on(t); }
+}
+
+fn an_image_keeps_its_rows_and_skips_the_transparent_on(table: i64) {
   wo = graphics::open_window(64, 48, "old-image");
   if !display() { return; }
   w = wo ?? return assert(false, "a display is set and no window opened");
-  dev = gpu::open(gpu_gl::table(), 64, 48, "new-image") ?? return assert(false, "no device");
+  dev = gpu::open(table, 64, 48, "new-image") ?? return assert(false, "no device");
   op = w.painter() ?? return assert(false, "the old painter");
   np = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return assert(false, "the new painter");
   px = sheet_pixels();
@@ -118,15 +157,19 @@ fn test_an_image_keeps_its_rows_and_skips_the_transparent() {
   np.image(dev, nt, 30.0, 2.0, 32.0, 40.0);
   np.image(dev, nl, 2.0, 20.0, 24.0, 24.0);
   dev.end();
-  same(old.data, dev.capture(), "images");
-  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  same(old.data, dev.capture(), "images", 0);
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()} [{gpu::backend_name()}]");
 }
 
-fn test_sprites_at_pixel_positions_and_in_a_scene_with_depth() {
+fn test_an_image_keeps_its_rows_and_skips_the_transparent() {
+  for t in backends() { an_image_keeps_its_rows_and_skips_the_transparent_on(t); }
+}
+
+fn sprites_at_pixel_positions_and_in_a_scene_with_depth_on(table: i64) {
   wo = graphics::open_window(64, 48, "old-sprites");
   if !display() { return; }
   w = wo ?? return assert(false, "a display is set and no window opened");
-  dev = gpu::open(gpu_gl::table(), 64, 48, "new-sprites") ?? return assert(false, "no device");
+  dev = gpu::open(table, 64, 48, "new-sprites") ?? return assert(false, "no device");
   op = w.painter() ?? return assert(false, "the old painter");
   np = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return assert(false, "the new painter");
   px = sheet_pixels();
@@ -146,7 +189,7 @@ fn test_sprites_at_pixel_positions_and_in_a_scene_with_depth() {
   os.draw(placed(1.9, 0.8, 0.5), 0);
   op.sprite(os, 2.0, 30.0, 20.0, 16.0, 0);
   op.sprite(os, 12.0, 34.0, 20.0, 12.0, 1);
-  assert(w.enabled(graphics::GL_DEPTH_TEST), "the old painter handed depth testing back on");
+  assert(w.enabled(graphics::GL_DEPTH_TEST), "the old painter handed depth testing back on [{gpu::backend_name()}]");
   old = w.capture();
 
   ns = gpu_paint::sprites(dev, px, 4, 2, 2, 1, gpu::INTO_WINDOW) ?? return assert(false, "the new sheet");
@@ -158,15 +201,19 @@ fn test_sprites_at_pixel_positions_and_in_a_scene_with_depth() {
   np.sprite(dev, ns, 2.0, 30.0, 20.0, 16.0, 0);
   np.sprite(dev, ns, 12.0, 34.0, 20.0, 12.0, 1);
   dev.end();
-  same(old.data, dev.capture(), "sprites");
-  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  same(old.data, dev.capture(), "sprites", 11);
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()} [{gpu::backend_name()}]");
 }
 
-fn test_a_painter_draws_into_a_texture_that_another_shows() {
+fn test_sprites_at_pixel_positions_and_in_a_scene_with_depth() {
+  for t in backends() { sprites_at_pixel_positions_and_in_a_scene_with_depth_on(t); }
+}
+
+fn a_painter_draws_into_a_texture_that_another_shows_on(table: i64) {
   wo = graphics::open_window(64, 48, "old-into");
   if !display() { return; }
   w = wo ?? return assert(false, "a display is set and no window opened");
-  dev = gpu::open(gpu_gl::table(), 64, 48, "new-into") ?? return assert(false, "no device");
+  dev = gpu::open(table, 64, 48, "new-into") ?? return assert(false, "no device");
   op = w.painter() ?? return assert(false, "the old painter");
   inner = gpu_paint::painter(dev, gpu::INTO_COLOUR) ?? return assert(false, "a painter into a texture");
   outer = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return assert(false, "a painter into the window");
@@ -201,13 +248,17 @@ fn test_a_painter_draws_into_a_texture_that_another_shows() {
   dev.begin_window(gpu::CLEAR, BLACK);
   outer.image(dev, nc, 8.0, 6.0, 48.0, 36.0);
   dev.end();
-  same(old.data, dev.capture(), "a painted texture shown");
-  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  same(old.data, dev.capture(), "a painted texture shown", 0);
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()} [{gpu::backend_name()}]");
 }
 
-fn test_a_painter_for_the_window_is_refused_in_a_pass_into_a_texture() {
+fn test_a_painter_draws_into_a_texture_that_another_shows() {
+  for t in backends() { a_painter_draws_into_a_texture_that_another_shows_on(t); }
+}
+
+fn a_painter_for_the_window_is_refused_in_a_pass_into_a_texture_on(table: i64) {
   if !display() { return; }
-  dev = gpu::open(gpu_gl::table(), 64, 48, "new-kind") ?? return assert(false, "no device");
+  dev = gpu::open(table, 64, 48, "new-kind") ?? return assert(false, "no device");
   np = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return assert(false, "the new painter");
   t = dev.texture(16, 16);
   f = dev.colour_target(t);
@@ -215,5 +266,9 @@ fn test_a_painter_for_the_window_is_refused_in_a_pass_into_a_texture() {
   np.rect(dev, 0.0, 0.0, 8.0, 8.0, 1.0, 0.0, 0.0, 1.0);
   dev.end();
   got = dev.refusals();
-  assert((got[0] ?? "") == "bind: the pipeline was built for another kind of target than this pass draws into", "the painter's pipeline is the window's: {got}");
+  assert((got[0] ?? "") == "bind: the pipeline was built for another kind of target than this pass draws into", "the painter's pipeline is the window's: {got} [{gpu::backend_name()}]");
+}
+
+fn test_a_painter_for_the_window_is_refused_in_a_pass_into_a_texture() {
+  for t in backends() { a_painter_for_the_window_is_refused_in_a_pass_into_a_texture_on(t); }
 }

@@ -22,6 +22,7 @@
 use gpu;
 use gpu_gl;
 use gpu_metal;
+use gpu_vulkan;
 use scene3d;
 
 fn display() -> boolean {
@@ -29,7 +30,7 @@ fn display() -> boolean {
 }
 
 fn backends() -> vector<i64> {
-  [for t in [gpu_gl::table(), gpu_metal::table()] if t != 0 { t }]
+  [for t in [gpu_gl::table(), gpu_metal::table(), gpu_vulkan::table()] if t != 0 { t }]
 }
 
 fn s(v: const vector<float>) -> vector<single> {
@@ -90,18 +91,22 @@ fn test_a_town_in_perspective_is_one_picture_but_for_pixels_on_an_edge() {
   if !display() { return; }
   tables = backends();
   if len(tables) < 2 { return; }
+  // the first backend against each other one
   first = views(tables[0]);
-  second = views(tables[1]);
-  assert(len(first) == 4 && len(second) == 4, "both backends drew four views: {len(first)} and {len(second)}");
-  for i in 0..4 {
-    differ = 0;
-    colours = 0;
-    for p in first[i] {
-      if p != (second[i][p#index] ?? 0) { differ += 1; }
-      if p != first[i][0] { colours += 1; }
+  for t in tables {
+    if t#index == 0 { continue; }
+    second = views(t);
+    assert(len(first) == 4 && len(second) == 4, "both backends drew four views: {len(first)} and {len(second)}");
+    for i in 0..4 {
+      differ = 0;
+      colours = 0;
+      for p in first[i] {
+        if p != (second[i][p#index] ?? 0) { differ += 1; }
+        if p != first[i][0] { colours += 1; }
+      }
+      assert(colours > 10000, "view {i} shows the town: {colours} pixels are not the first one's colour");
+      // 1 in 5,000 of 76,800
+      assert(differ <= 15, "view {i}: {differ} of 76800 pixels differ between backend 0 and backend {t#index}, more than an edge's rounding gives");
     }
-    assert(colours > 10000, "view {i} shows the town: {colours} pixels are not the first one's colour");
-    // 1 in 5,000 of 76,800
-    assert(differ <= 15, "view {i}: {differ} of 76800 pixels differ between the backends, more than an edge's rounding gives");
   }
 }

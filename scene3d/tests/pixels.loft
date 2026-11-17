@@ -8,6 +8,7 @@
 use gpu;
 use gpu_gl;
 use gpu_metal;
+use gpu_vulkan;
 use scene3d;
 
 // The numbers of a face, a light box or an actor as the scene takes them: single precision.
@@ -19,7 +20,7 @@ fn s(v: const vector<float>) -> vector<single> {
 // the same pixels.  One backend serves a program at a time, so a scene's device is closed
 // before the next one's opens.
 fn backends() -> vector<i64> {
-  [for t in [gpu_gl::table(), gpu_metal::table()] if t != 0 { t }]
+  [for t in [gpu_gl::table(), gpu_metal::table(), gpu_vulkan::table()] if t != 0 { t }]
 }
 
 fn display() -> boolean {

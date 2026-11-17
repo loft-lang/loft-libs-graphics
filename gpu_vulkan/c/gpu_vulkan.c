@@ -25,7 +25,7 @@
  * copied there, the pass it falls in split around the copy.  Uniform values are copied at
  * `uniforms`, so each draw reads what was set when it was given.
  *
- * What a shader source for it follows (tag "spirv"): SPIR-V for Vulkan 1.3, as base64 text;
+ * What a shader source for it follows (tag "spirv"): a SPIR-V 1.3 module as base64 text;
  *   - the inputs read per vertex are `location = 0` onwards in the program's order, the inputs
  *     read per copy follow them;
  *   - the uniform block is `set = 0, binding = 0`, std140;

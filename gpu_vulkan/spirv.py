@@ -20,7 +20,7 @@ file.  The GLSL is given what Vulkan asks for and OpenGL does not, the rest left
     stage declares them (glslang's --auto-map-locations), so declare them in the same order.
 
 A plain `uniform` outside the block has no place in Vulkan and is refused.  The module is
-compiled for Vulkan 1.3 with no debug names, checked by spirv-val, and written as base64 in
+compiled for Vulkan 1.1 (SPIR-V 1.3, so `discard` is OpKill and asks for no device feature) with no debug names, checked by spirv-val, and written as base64 in
 lines of 76.  Needs glslangValidator and spirv-val (glslang-tools, spirv-tools).
 """
 import base64
@@ -47,8 +47,8 @@ def vulkan_glsl(src, name):
         s = line.strip()
         if re.match(r"#version\s+330(\s+core)?$", s):
             line = "#version 450"
-        elif re.match(r"layout\(std140\)\s+uniform\b", s):
-            line = line.replace("layout(std140)", "layout(std140, set = 0, binding = 0)", 1)
+        elif re.match(r"layout\s*\(\s*std140\s*\)\s*uniform\b", s):
+            line = re.sub(r"layout\s*\(\s*std140\s*\)", "layout(std140, set = 0, binding = 0)", line, count=1)
         else:
             m = re.match(r"uniform\s+sampler2D\s+tex(\d+)\s*;", s)
             if m:
@@ -65,12 +65,12 @@ def compile_spirv(src, stage, name):
         spv = os.path.join(work, "shader.spv")
         with open(path, "w") as fh:
             fh.write(src)
-        r = subprocess.run(["glslangValidator", "-V", "--target-env", "vulkan1.3", "-g0",
+        r = subprocess.run(["glslangValidator", "-V", "--target-env", "vulkan1.1", "-g0",
                             "--auto-map-locations", path, "-o", spv],
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise SystemExit(f"spirv.py: {name} does not compile for Vulkan:\n{r.stdout}{r.stderr}")
-        r = subprocess.run(["spirv-val", "--target-env", "vulkan1.3", spv], capture_output=True, text=True)
+        r = subprocess.run(["spirv-val", "--target-env", "vulkan1.1", spv], capture_output=True, text=True)
         if r.returncode != 0:
             raise SystemExit(f"spirv.py: {name}: spirv-val refuses the module:\n{r.stdout}{r.stderr}")
         with open(spv, "rb") as fh:

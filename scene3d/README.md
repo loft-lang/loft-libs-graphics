@@ -122,10 +122,11 @@ given last.
 
 ## Verified
 
-- **On every backend.**  Its shaders carry a source for `gpu_gl` and one for `gpu_metal`.
+- **On every backend.**  Its shaders carry a source for `gpu_gl`, one for `gpu_metal` and the
+  SPIR-V of `gpu_vulkan` (written from the GLSL by `gpu_vulkan/spirv.py`).
   `tests/pixels.loft` and `tests/torches.loft` check each scene's pixels, worked out by hand,
-  on every backend the machine has; `tests/backends.loft` draws a town in perspective on two
-  backends and bounds the pixels that differ, with what causes them.
+  on every backend the machine has; `tests/backends.loft` draws a town in perspective on the
+  first backend and on each other one, and bounds the pixels that differ, with what causes them.
 - **Against the CPU implementation.**  `bench/against_raster3d.loft` draws one scene — lit
   ground, blocks whose faces are groups, a slanted triangle, three actors (the hero behind a
   block, one turned and mirrored, one turned about its middle), an overlay — through
@@ -156,4 +157,6 @@ given last.
   hand between its four cells — by the torch, at its cell's edge and just past it, past a wall,
   under the cell's own light, at half its glow, with five torches at a cell, on a card.
 - On a Mac on the interpreter, the C backend, the Rust backend and a shipped program, and in
-  both writers' browser pages.  Ten planted breaks each turn a test red.  Not run: X11.
+  both writers' browser pages.  Ten planted breaks each turn a test red.
+- **On Linux** (X11, under Xvfb): the same tests on `gpu_gl` (llvmpipe) and `gpu_vulkan`
+  (RADV and lavapipe), on the interpreter, the C backend and the Rust backend.
