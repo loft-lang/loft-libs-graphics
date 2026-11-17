@@ -57,6 +57,12 @@ typedef struct gq_dev {
     int in_pass, unit;
     int shown; /* the window's frame was presented and nothing was drawn in it since */
     unsigned unit_tex[GQ_MAX_SLOTS];
+#if defined(GQ_X11)
+    /* The frame last presented, copied before the swap (see `gq_keep_frame`). */
+    void (*copy_tex)(unsigned, int, int, int, int, int, int, int); /* glCopyTexSubImage2D */
+    unsigned kept_tex, kept_fbo;
+    int kept_w, kept_h;
+#endif
     struct gq_dev *next;
 } gq_dev;
 
@@ -122,6 +128,10 @@ static int64_t gq_t_open(int64_t width, int64_t height, const char *title, int64
     }
     d->w = gq_of(h);
     d->more_ok = gq_bind_block_api(d);
+#if defined(GQ_X11)
+    *(void **) (&d->copy_tex) =
+        d->w->xa.glXGetProcAddressARB((const unsigned char *) "glCopyTexSubImage2D");
+#endif
     d->next = gq_devs;
     gq_devs = d;
     return h;
@@ -135,6 +145,12 @@ static void gq_t_close(int64_t dev) {
     gq_dev **at, *d;
     for (at = &gq_devs; (d = *at) != NULL; at = &d->next) {
         if (d->w == gq_of(dev)) {
+#if defined(GQ_X11)
+            if ((d->kept_tex || d->kept_fbo) && gq_use(d->w, "gpu close")) {
+                if (d->kept_fbo) d->w->api.glDeleteFramebuffers(1, &d->kept_fbo);
+                if (d->kept_tex) d->w->api.glDeleteTextures(1, &d->kept_tex);
+            }
+#endif
             *at = d->next;
             free(d);
             break;
@@ -255,21 +271,70 @@ static void gq_t_texture_put565(int64_t tex, int64_t x, int64_t y, int64_t w, in
     free(wide);
 }
 
-/* The window's frame after it was presented: OpenGL shows it by swapping two buffers, so the
- * one drawn into next holds an older frame and the frame itself is the one in front. */
+/* The window's frame after it was presented.  OpenGL shows it by swapping two buffers, so the
+ * one drawn into next holds an older frame; where the frame itself still is differs:
+ *   - X11: the front buffer is not kept for reading (Mesa under Xvfb reads it back black), so
+ *     the device copies the frame into a texture of its own as it presents it
+ *     (`gq_keep_frame`), and a capture reads that copy;
+ *   - a Mac: the frame is the front buffer, read as it is (measured there with gpu_metal's
+ *     comparison scenes). */
+#if defined(GQ_X11)
+/* Copy the window's frame, as drawn, into the device's own texture before it is swapped away:
+ * one copy on the GPU, no wait for it.  A texture of the window's size, made again when the
+ * window changed size. */
+static void gq_keep_frame(gq_dev *d) {
+    gq_window *w = d->w;
+    gq_api *gl = &w->api;
+    if (!d->copy_tex || w->width <= 0 || w->height <= 0 || !gq_use(w, "gpu present")) return;
+    if (!d->kept_tex || d->kept_w != w->width || d->kept_h != w->height) {
+        if (!d->kept_tex) gl->glGenTextures(1, &d->kept_tex);
+        gl->glBindTexture(GL_TEXTURE_2D, d->kept_tex);
+        gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w->width, w->height, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, NULL);
+        gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        if (!d->kept_fbo) gl->glGenFramebuffers(1, &d->kept_fbo);
+        gl->glBindFramebuffer(GL_FRAMEBUFFER, d->kept_fbo);
+        gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                   d->kept_tex, 0);
+        d->kept_w = w->width;
+        d->kept_h = w->height;
+    }
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    gl->glReadBuffer(GL_BACK);
+    gl->glBindTexture(GL_TEXTURE_2D, d->kept_tex);
+    d->copy_tex(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w->width, w->height);
+    gl->glBindTexture(GL_TEXTURE_2D, 0);
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, w->target);
+}
+#endif
+
 #if defined(GQ_X11) || defined(GQ_COCOA)
-static void gq_read_shown(gq_window *w, uint32_t *out, int64_t n) {
+/* The frame last presented, 0xAARRGGBB, the top row first; opaque, as a window has no alpha. */
+static void gq_read_shown(gq_dev *d, uint32_t *out, int64_t n) {
+    gq_window *w = d->w;
     unsigned char *rgba;
     int64_t x, y;
     if (!gq_use(w, "gpu capture") || n != (int64_t) w->width * w->height || n <= 0) return;
+#if defined(GQ_X11)
+    if (!d->kept_fbo || d->kept_w != w->width || d->kept_h != w->height) return;
+#endif
     rgba = (unsigned char *) malloc((size_t) n * 4u);
     if (!rgba) return;
+#if defined(GQ_X11)
+    w->api.glBindFramebuffer(GL_FRAMEBUFFER, d->kept_fbo);
+    w->api.glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    w->api.glReadBuffer(GL_COLOR_ATTACHMENT0);
+    w->api.glReadPixels(0, 0, w->width, w->height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    w->api.glBindFramebuffer(GL_FRAMEBUFFER, w->target);
+#else
     if (w->target) w->api.glBindFramebuffer(GL_FRAMEBUFFER, 0);
     w->api.glPixelStorei(GL_PACK_ALIGNMENT, 1);
     w->api.glReadBuffer(GL_FRONT);
     w->api.glReadPixels(0, 0, w->width, w->height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     w->api.glReadBuffer(GL_BACK);
     if (w->target) w->api.glBindFramebuffer(GL_FRAMEBUFFER, w->target);
+#endif
     for (y = 0; y < w->height; y++) {
         const unsigned char *row = rgba + (size_t) (w->height - 1 - y) * w->width * 4u;
         for (x = 0; x < w->width; x++) {
@@ -283,6 +348,9 @@ static void gq_read_shown(gq_window *w, uint32_t *out, int64_t n) {
 
 static void gq_t_present(int64_t dev) {
     gq_dev *d = gq_dev_of(dev);
+#if defined(GQ_X11)
+    if (d) gq_keep_frame(d);
+#endif
     gq_swap(dev);
     if (d) d->shown = 1;
 }
@@ -297,7 +365,7 @@ static void gq_t_capture(int64_t dev, int64_t target, uint32_t *out, int64_t n) 
 #if defined(GQ_X11) || defined(GQ_COCOA)
         gq_dev *d = gq_dev_of(dev);
         if (d && d->shown) {
-            gq_read_shown(w, out, n);
+            gq_read_shown(d, out, n);
             return;
         }
 #endif
