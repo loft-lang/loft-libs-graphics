@@ -86,7 +86,8 @@ by a script as `gpu_gl`'s is, because the two differ in every function that touc
 
 ## Verified
 
-On an Apple M3 Max, on the interpreter, the C backend, the Rust backend and a shipped program:
+On an Apple M3 Max; the tests on the interpreter, the C backend and the Rust backend, the
+timed scene also as a shipped program (one executable that links the system library alone):
 
 - **`tests/same_as_gl.loft`** draws each scene through `gpu` on this backend and on `gpu_gl`,
   with the same loft code, and compares the two captures: one triangle with slanted edges and
@@ -101,8 +102,8 @@ On an Apple M3 Max, on the interpreter, the C backend, the Rust backend and a sh
   device closed before what it made, and frames presented one after another.
 - **The tolerance** between this backend and `gpu_gl`: none for a scene whose edges lie on pixel
   borders.  In perspective, a pixel whose middle a face's edge passes through may show the face
-  on the other side: at most 39 of 691,200 pixels in the views measured, as many as either
-  backend differs from itself between a window and a target.  The guard and its numbers are in
+  on the other side: 20 to 80 of 691,200 pixels a view in the views measured (at most 0.012 %),
+  as many as either backend differs from itself between a window and a target.  The guard and its numbers are in
   `scene3d/tests/backends.loft`.
 - **Planted breaks**: 25 changes to `c/gpu_metal.c`, one at a time (the depth left in `gpu`'s
   range, a target not turned, rows counted from the wrong end, a filter, a blend factor, a

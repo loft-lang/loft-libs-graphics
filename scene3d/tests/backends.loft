@@ -9,8 +9,8 @@
 //     backends' own suites) is the same byte for byte;
 //   - a scene in perspective differs in single pixels where a face's edge, or the border of two
 //     texels, passes within rounding of a pixel's middle: the pixel then shows the face or the
-//     texel on the other side.  At 960 x 720, 12 views of the town of gpu_host/bench: at most 39
-//     of 691,200 pixels a frame (0.006 %), 336 in all;
+//     texel on the other side.  At 960 x 720, 12 views of the town of gpu_host/bench: 336 of
+//     their 691,200 pixels each in all, at most 39 in one; its 600th frame: 80 (0.012 %);
 //   - that is as much as one backend differs from ITSELF when it draws the same view into a
 //     texture instead of the window (OpenGL 358, Metal 371 over the same 12 views), so it is the
 //     rasteriser's rounding at an edge, not a difference in what the two are asked to draw;
