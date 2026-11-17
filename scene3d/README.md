@@ -122,6 +122,10 @@ given last.
 
 ## Verified
 
+- **On every backend.**  Its shaders carry a source for `gpu_gl` and one for `gpu_metal`.
+  `tests/pixels.loft` and `tests/torches.loft` check each scene's pixels, worked out by hand,
+  on every backend the machine has; `tests/backends.loft` draws a town in perspective on two
+  backends and bounds the pixels that differ, with what causes them.
 - **Against the CPU implementation.**  `bench/against_raster3d.loft` draws one scene — lit
   ground, blocks whose faces are groups, a slanted triangle, three actors (the hero behind a
   block, one turned and mirrored, one turned about its middle), an overlay — through

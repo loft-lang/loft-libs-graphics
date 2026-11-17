@@ -4,7 +4,7 @@
 // A town seen by the free camera is one picture on every backend this machine has, but for
 // the pixels an edge runs through the middle of.
 //
-// THE TOLERANCE, measured (2026-11-17, an Apple M3 Max, `gpu_metal` against `gpu_gl`):
+// THE TOLERANCE, measured on an Apple M3 Max, `gpu_metal` against `gpu_gl`:
 //   - a scene whose edges lie on pixel borders (tests/pixels.loft, tests/torches.loft, and the
 //     backends' own suites) is the same byte for byte;
 //   - a scene in perspective differs in single pixels where a face's edge, or the border of two
