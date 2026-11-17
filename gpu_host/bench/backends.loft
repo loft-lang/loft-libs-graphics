@@ -1,0 +1,120 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// One scene drawn by each backend this machine has, timed: what the order `gpu_host` asks them
+// in rests on.  A town of 48 x 32 cells (a tile a row, a block on every fifth cell), 64 actors
+// that move every frame and a camera that circles it, in a 960 x 720 window.
+//
+//   loft --lib <loft-libs-graphics> gpu_host/bench/backends.loft
+//
+// It needs a display.  For each backend it prints two numbers: a frame's cost with nothing
+// waited for (600 frames drawn into one frame of the window, the last read back so the GPU has
+// finished), and a frame shown (240 frames presented, each waiting for the display).  It also
+// says how many pixels of the last frame differ between the backends.
+use gpu;
+use gpu_host;
+use scene3d;
+
+fn s(v: const vector<float>) -> vector<single> {
+  [for x in v { x as single }]
+}
+
+fn rgb565(r: integer, g: integer, b: integer) -> integer { ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3) }
+
+// A picture: a grid of two colours.
+fn picture(a: integer, b: integer) -> vector<i32> {
+  out: vector<i32> = [];
+  for y in 0..16 { for x in 0..16 { out += [((if (x / 4 + y / 4) % 2 == 0 { a } else { b }) & 65535) as i32]; } }
+  out
+}
+
+fn face(out: vector<float>, pic: integer, group: integer, lx: integer, ly: integer, lk: float, corners: const vector<float>) {
+  out += [pic as float, group as float, (len(corners) / 6) as float, lx as float, ly as float, 0.0, lk];
+  out += corners;
+}
+
+// Row `z` of the town: ground, and on every fifth cell a block with its top and four sides.
+fn row(z: integer) -> vector<float> {
+  out: vector<float> = [];
+  fz = z as float;
+  for x in 0..48 {
+    fx = x as float;
+    if (x + 2 * z) % 5 == 0 {
+      g = 100 + x + 64 * z;
+      face(out, 1, g, x, z, 1.0, [fx, 1.0, fz, 0.0, 0.0, 1.0, fx + 1.0, 1.0, fz, 1.0, 0.0, 1.0, fx + 1.0, 1.0, fz + 1.0, 1.0, 1.0, 1.0, fx, 1.0, fz + 1.0, 0.0, 1.0, 1.0]);
+      face(out, 2, g, x, z, 0.8, [fx, 1.0, fz + 1.0, 0.0, 0.0, 1.0, fx + 1.0, 1.0, fz + 1.0, 1.0, 0.0, 1.0, fx + 1.0, 0.0, fz + 1.0, 1.0, 1.0, 1.0, fx, 0.0, fz + 1.0, 0.0, 1.0, 1.0]);
+      face(out, 2, g, x, z, 0.6, [fx + 1.0, 1.0, fz, 0.0, 0.0, 1.0, fx, 1.0, fz, 1.0, 0.0, 1.0, fx, 0.0, fz, 1.0, 1.0, 1.0, fx + 1.0, 0.0, fz, 0.0, 1.0, 1.0]);
+      face(out, 2, g, x, z, 0.7, [fx, 1.0, fz, 0.0, 0.0, 1.0, fx, 1.0, fz + 1.0, 1.0, 0.0, 1.0, fx, 0.0, fz + 1.0, 1.0, 1.0, 1.0, fx, 0.0, fz, 0.0, 1.0, 1.0]);
+      face(out, 2, g, x, z, 0.7, [fx + 1.0, 1.0, fz + 1.0, 0.0, 0.0, 1.0, fx + 1.0, 1.0, fz, 1.0, 0.0, 1.0, fx + 1.0, 0.0, fz, 1.0, 1.0, 1.0, fx + 1.0, 0.0, fz + 1.0, 0.0, 1.0, 1.0]);
+    } else {
+      face(out, 0, -1, x, z, 1.0, [fx, 0.0, fz, 0.0, 0.0, 1.0, fx + 1.0, 0.0, fz, 1.0, 0.0, 1.0, fx + 1.0, 0.0, fz + 1.0, 1.0, 1.0, 1.0, fx, 0.0, fz + 1.0, 0.0, 1.0, 1.0]);
+    }
+  }
+  out
+}
+
+fn lights() -> vector<float> {
+  out: vector<float> = [0.0, 0.0, 0.0, 48.0, 32.0];
+  for z in 0..32 { for x in 0..48 { out += [0.35 + 0.05 * (((x * 7 + z * 3) % 13) as float)]; } }
+  out
+}
+
+// 64 actors in frame `f`: each walks a small circle of its own.
+fn actors(f: integer) -> vector<float> {
+  out: vector<float> = [];
+  for i in 0..64 {
+    turn = (f * 3 + i * 40) as float * PI / 180.0;
+    out += [(i + 1) as float, 3.0, 4.0 + 5.0 * (i % 8) as float + cos(turn), 0.0, 3.0 + 3.5 * (i / 8) as float + sin(turn), 0.8, 1.0, 0.0, 0.5, 1.0, 0.0];
+  }
+  out
+}
+
+// Frame `f` of the scene: the actors where they are then, the camera a step further round.
+fn frame(scene: scene3d::Scene, dev: gpu::Device, f: integer) {
+  turn = f as float * PI / 300.0;
+  scene.set_actors(s(actors(f)), 1);
+  scene.free_camera((24.0 + 20.0 * cos(turn), 9.0, 16.0 + 14.0 * sin(turn)), (24.0, 0.0, 16.0), 55.0);
+  scene.draw(dev);
+}
+
+fn timed(backend: text) -> vector<u32> {
+  dev = gpu_host::open_on(backend, 960, 720, "bench {backend}") ?? return [];
+  scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, 0xFF94BFE6) ?? return [];
+  _ = scene.add_picture(picture(rgb565(90, 140, 60), rgb565(70, 110, 50)));
+  _ = scene.add_picture(picture(rgb565(170, 170, 180), rgb565(120, 120, 130)));
+  _ = scene.add_picture(picture(rgb565(150, 90, 60), rgb565(110, 60, 40)));
+  _ = scene.add_picture(picture(rgb565(220, 60, 60), rgb565(240, 200, 60)));
+  for z in 0..32 { scene.set_tile(dev, z, s(row(z))); }
+  scene.set_light(s(lights()));
+  for f in 0..30 { frame(scene, dev, f); }
+  _ = dev.capture();
+  start = ticks();
+  for f in 0..600 { frame(scene, dev, f); }
+  last = dev.capture();
+  drawn = ticks() - start;
+  start = ticks();
+  for f in 0..240 {
+    _ = dev.poll();
+    frame(scene, dev, f);
+    dev.present();
+  }
+  shown = ticks() - start;
+  println("{backend}: {drawn / 600} us a frame drawn, {shown / 240} us a frame shown");
+  last
+}
+
+fn main() {
+  first: vector<u32> = [];
+  for name in gpu_host::backends() {
+    got = timed(name);
+    if len(got) == 0 {
+      println("{name}: no window");
+    } else if len(first) == 0 {
+      first = got;
+    } else {
+      differ = 0;
+      for p in got { if p != (first[p#index] ?? 0) { differ += 1; } }
+      println("{name}: {differ} of {len(got)} pixels of the last frame differ from the first backend's");
+    }
+  }
+}
