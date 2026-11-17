@@ -116,13 +116,95 @@ void main() {{
 }}
 `;
 
+// The same program in the Metal Shading Language (`gpu_metal`).  `wrap` is GLSL's `mod`, which
+// answers a number from 0 up for a negative one too.  A value marked `flat` is the same on a
+// face's three corners, so it does not matter which corner a backend takes it from.
+const LAND_VERTEX_MSL: text = `
+struct Block {{ float4x4 uView; float4 uPlace[64]; float4 uColour[64]; }};
+struct In {{
+    float3 aPos [[attribute(0)]];
+    float2 aUV [[attribute(1)]];
+    float2 aSlot [[attribute(2)]];
+    float4 aLit [[attribute(3)]];
+    float aOwn [[attribute(4)]];
+}};
+struct Out {{
+    float4 position [[position]];
+    float2 vUV;
+    float2 vSlot [[flat]];
+    float vLight;
+    float2 vGrid;
+    float4 vTorch [[flat]];
+}};
+static float wrap(float x, float y) {{ return x - y * floor(x / y); }}
+vertex Out vertex_main(In in [[stage_in]], constant Block &u [[buffer(0)]],
+                       texture2d<float> tex1 [[texture(1)]], sampler s1 [[sampler(1)]],
+                       texture2d<float> tex2 [[texture(2)]], sampler s2 [[sampler(2)]]) {{
+    Out o;
+    o.position = gpu_position(u.uView * float4(in.aPos, 1.0));
+    o.vUV = in.aUV;
+    o.vSlot = in.aSlot;
+    o.vGrid = in.aPos.xz;
+    o.vTorch = float4(0.0);
+    float l = in.aOwn;
+    if (in.aLit.z > -999999.0) {{
+        float2 at = float2(wrap(in.aLit.x, 256.0) + 0.5, wrap(in.aLit.y, 256.0) + 0.5 + 256.0 * wrap(in.aLit.z, 8.0));
+        // a factor under 0 marks a card: its own light, and the torches of the cell it stands on
+        if (in.aLit.w >= 0.0) {{
+            float4 c = tex1.sample(s1, at / float2(256.0, 2048.0), level(0.0));
+            if (c.a > 0.5) l = (c.r * 255.0 * 256.0 + c.g * 255.0) / 65535.0 * in.aLit.w;
+        }}
+        o.vTorch = tex2.sample(s2, at / float2(256.0, 2048.0), level(0.0)) * 255.0;
+    }}
+    o.vLight = clamp(l, 0.0, 1.0);
+    return o;
+}}
+`;
+
+const LAND_FRAGMENT_MSL: text = `
+struct Block {{ float4x4 uView; float4 uPlace[64]; float4 uColour[64]; }};
+struct Out {{
+    float4 position [[position]];
+    float2 vUV;
+    float2 vSlot [[flat]];
+    float vLight;
+    float2 vGrid;
+    float4 vTorch [[flat]];
+}};
+// The light a torch gives this point, as the GLSL source has it.
+static float3 torch(float id, float2 grid, constant Block &u, texture2d<float> tex3, sampler s3) {{
+    if (id < 0.5) return float3(0.0);
+    int s = int(id + 0.5) - 1;
+    float4 p = u.uPlace[s];
+    float2 t = clamp(grid - p.xy, 0.5, 15.5);
+    float2 o = float2(float(s - 8 * (s / 8)), float(s / 8)) * 16.0;
+    float4 c = tex3.sample(s3, (o + t) / 128.0);
+    return (c.r * 255.0 * 256.0 + c.g * 255.0) / 65535.0 * p.z * u.uColour[s].rgb;
+}}
+fragment float4 fragment_main(Out in [[stage_in]], constant Block &u [[buffer(0)]],
+                              texture2d<float> tex0 [[texture(0)]], sampler s0 [[sampler(0)]],
+                              texture2d<float> tex3 [[texture(3)]], sampler s3 [[sampler(3)]]) {{
+    // a pixel whose middle lies on a texel's edge takes the texel before it, as the CPU does
+    float2 t = clamp(floor(in.vUV * 16.0 - 0.002), 0.0, 15.0);
+    float4 c = tex0.sample(s0, (in.vSlot * 16.0 + t + 0.5) / 1024.0);
+    if (c.a < 0.5) discard_fragment();
+    float3 light = max(max(float3(in.vLight), max(torch(in.vTorch.x, in.vGrid, u, tex3, s3), torch(in.vTorch.y, in.vGrid, u, tex3, s3))),
+                       max(torch(in.vTorch.z, in.vGrid, u, tex3, s3), torch(in.vTorch.w, in.vGrid, u, tex3, s3)));
+    return float4(c.rgb * min(light, float3(1.0)), 1.0);
+}}
+`;
+
 fn land_program() -> gpu::Program {
   gpu::Program {
     vertex: [gpu::F3, gpu::F2, gpu::F2, gpu::F4, gpu::F1],
     instance: [],
     block: [gpu::MAT4, gpu::f4s(TORCHES), gpu::f4s(TORCHES)],
     textures: 4,
-    sources: [gpu::source("glsl-330", LAND_VERTEX_GLSL, LAND_FRAGMENT_GLSL), gpu::source("record", "", "")],
+    sources: [
+      gpu::source("glsl-330", LAND_VERTEX_GLSL, LAND_FRAGMENT_GLSL),
+      gpu::source("msl", LAND_VERTEX_MSL, LAND_FRAGMENT_MSL),
+      gpu::source("record", "", ""),
+    ],
   }
 }
 
@@ -147,13 +229,37 @@ void main() {{
 }}
 `;
 
+const OVER_VERTEX_MSL: text = `
+struct In {{ float2 aPos [[attribute(0)]]; float2 aUV [[attribute(1)]]; }};
+struct Out {{ float4 position [[position]]; float2 vUV; }};
+vertex Out vertex_main(In in [[stage_in]]) {{
+    Out o;
+    o.position = gpu_position(float4(in.aPos, 0.0, 1.0));
+    o.vUV = in.aUV;
+    return o;
+}}
+`;
+
+const OVER_FRAGMENT_MSL: text = `
+struct Out {{ float4 position [[position]]; float2 vUV; }};
+fragment float4 fragment_main(Out in [[stage_in]], texture2d<float> tex0 [[texture(0)]], sampler s0 [[sampler(0)]]) {{
+    float4 c = tex0.sample(s0, in.vUV);
+    if (c.a < 0.5) discard_fragment();
+    return float4(c.rgb, 1.0);
+}}
+`;
+
 fn over_program() -> gpu::Program {
   gpu::Program {
     vertex: [gpu::F2, gpu::F2],
     instance: [],
     block: [],
     textures: 1,
-    sources: [gpu::source("glsl-330", OVER_VERTEX_GLSL, OVER_FRAGMENT_GLSL), gpu::source("record", "", "")],
+    sources: [
+      gpu::source("glsl-330", OVER_VERTEX_GLSL, OVER_FRAGMENT_GLSL),
+      gpu::source("msl", OVER_VERTEX_MSL, OVER_FRAGMENT_MSL),
+      gpu::source("record", "", ""),
+    ],
   }
 }
 

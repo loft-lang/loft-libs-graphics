@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Jurjen Stellingwerff
 // SPDX-License-Identifier: LGPL-3.0-or-later
 //
-// Torchlight drawn by `gpu_gl`, against values worked out by hand.  The window is 64 x 48 and
+// Torchlight drawn by each backend this machine has, against values worked out by hand.  The window is 64 x 48 and
 // the fixed camera's top-left is the world's origin: a cell is 48 pixels across and 40 deep, so
 // pixel (px, py) shows the ground at x = (px + 0.5) / 48, y = (py + 0.5) / 40.  The picture is
 // white, so a pixel shows the light itself.  A reach is read between the cells' middles: at
@@ -10,10 +10,18 @@
 // every test returns at once (`DISPLAY`, or `GRAPHICS_TEST_WINDOW=1` on a Mac).
 use gpu;
 use gpu_gl;
+use gpu_metal;
 use scene3d;
 
 fn s(v: const vector<float>) -> vector<single> {
   [for x in v { x as single }]
+}
+
+// The backends this machine has: each test's scene is drawn by every one of them, against
+// the same pixels.  One backend serves a program at a time, so a scene's device is closed
+// before the next one's opens.
+fn backends() -> vector<i64> {
+  [for t in [gpu_gl::table(), gpu_metal::table()] if t != 0 { t }]
 }
 
 fn display() -> boolean {
@@ -55,9 +63,8 @@ fn ring() -> vector<float> {
   [1.0, 0.0, -1.0, -1.0, 3.0, 3.0, 0.5, 0.5, 0.5, 0.5, 1.0, 0.5, 0.5, 0.5, 0.5]
 }
 
-fn test_a_torch_lights_smoothly_across_the_cells_it_reaches() {
-  if !display() { return; }
-  dev = gpu::open(gpu_gl::table(), 64, 48, "torch-smooth") ?? return assert(false, "no device");
+fn a_torch_lights_smoothly_across_the_cells_it_reaches_on(table: i64) {
+  dev = gpu::open(table, 64, 48, "torch-smooth") ?? return assert(false, "no device");
   scene = dark(dev);
   scene.draw(dev);
   c = dev.capture();
@@ -79,9 +86,13 @@ fn test_a_torch_lights_smoothly_across_the_cells_it_reaches() {
   assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
 }
 
-fn test_a_cell_a_torch_does_not_reach_stays_dark() {
+fn test_a_torch_lights_smoothly_across_the_cells_it_reaches() {
   if !display() { return; }
-  dev = gpu::open(gpu_gl::table(), 64, 48, "torch-mask") ?? return assert(false, "no device");
+  for table in backends() { a_torch_lights_smoothly_across_the_cells_it_reaches_on(table); }
+}
+
+fn a_cell_a_torch_does_not_reach_stays_dark_on(table: i64) {
+  dev = gpu::open(table, 64, 48, "torch-mask") ?? return assert(false, "no device");
   scene = dark(dev);
   // A reach of one cell: a wall stands east of it.
   assert(scene.set_torch_reach(s([1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0])), "the reach");
@@ -95,9 +106,13 @@ fn test_a_cell_a_torch_does_not_reach_stays_dark() {
   assert(near(c, 48, 20, (0, 0, 0)) && near(c, 60, 20, (0, 0, 0)), "past the wall: {hex(c, 48, 20)} {hex(c, 60, 20)}");
 }
 
-fn test_the_brightest_of_the_cells_light_and_the_torch_a_channel_at_a_time() {
+fn test_a_cell_a_torch_does_not_reach_stays_dark() {
   if !display() { return; }
-  dev = gpu::open(gpu_gl::table(), 64, 48, "torch-channels") ?? return assert(false, "no device");
+  for table in backends() { a_cell_a_torch_does_not_reach_stays_dark_on(table); }
+}
+
+fn the_brightest_of_the_cells_light_and_the_torch_a_channel_at_a_time_on(table: i64) {
+  dev = gpu::open(table, 64, 48, "torch-channels") ?? return assert(false, "no device");
   scene = dark(dev);
   scene.set_light(s([0.0, 0.0, 0.0, 1.0, 1.0, 0.5]));
   assert(scene.set_torch_reach(s(ring())), "the reach");
@@ -114,9 +129,13 @@ fn test_the_brightest_of_the_cells_light_and_the_torch_a_channel_at_a_time() {
   assert(near(c, 24, 20, (128, 128, 128)), "a faint torch under the cell's light: {hex(c, 24, 20)}");
 }
 
-fn test_a_glow_dims_a_torch_and_one_not_named_is_dark() {
+fn test_the_brightest_of_the_cells_light_and_the_torch_a_channel_at_a_time() {
   if !display() { return; }
-  dev = gpu::open(gpu_gl::table(), 64, 48, "torch-glow") ?? return assert(false, "no device");
+  for table in backends() { the_brightest_of_the_cells_light_and_the_torch_a_channel_at_a_time_on(table); }
+}
+
+fn a_glow_dims_a_torch_and_one_not_named_is_dark_on(table: i64) {
+  dev = gpu::open(table, 64, 48, "torch-glow") ?? return assert(false, "no device");
   scene = dark(dev);
   assert(scene.set_torch_reach(s(ring())), "the reach");
   // 0.9886 * 0.5 = 0.4943: 126
@@ -135,9 +154,13 @@ fn test_a_glow_dims_a_torch_and_one_not_named_is_dark() {
   assert(near(c, 24, 20, (252, 252, 0)), "named again: {hex(c, 24, 20)}");
 }
 
-fn test_the_four_strongest_torches_light_a_cell_and_a_dropped_one_gives_way() {
+fn test_a_glow_dims_a_torch_and_one_not_named_is_dark() {
   if !display() { return; }
-  dev = gpu::open(gpu_gl::table(), 64, 48, "torch-four") ?? return assert(false, "no device");
+  for table in backends() { a_glow_dims_a_torch_and_one_not_named_is_dark_on(table); }
+}
+
+fn the_four_strongest_torches_light_a_cell_and_a_dropped_one_gives_way_on(table: i64) {
+  dev = gpu::open(table, 64, 48, "torch-four") ?? return assert(false, "no device");
   scene = dark(dev);
   // Five torches reach cell (0, 0) alone: red at 1, blue at 0.8, red at 0.5, blue at 0.4, and
   // the weakest, green, at 0.3.
@@ -164,9 +187,13 @@ fn test_the_four_strongest_torches_light_a_cell_and_a_dropped_one_gives_way() {
   assert(near(c, 24, 20, (125, 75, 199)), "the strongest dropped: {hex(c, 24, 20)}");
 }
 
-fn test_a_card_is_lit_by_the_torches_of_the_cell_it_stands_on() {
+fn test_the_four_strongest_torches_light_a_cell_and_a_dropped_one_gives_way() {
   if !display() { return; }
-  dev = gpu::open(gpu_gl::table(), 64, 48, "torch-card") ?? return assert(false, "no device");
+  for table in backends() { the_four_strongest_torches_light_a_cell_and_a_dropped_one_gives_way_on(table); }
+}
+
+fn a_card_is_lit_by_the_torches_of_the_cell_it_stands_on_on(table: i64) {
+  dev = gpu::open(table, 64, 48, "torch-card") ?? return assert(false, "no device");
   scene = dark(dev);
   assert(scene.set_torch_reach(s(ring())), "the reach");
   scene.set_torches(s([1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0]));
@@ -182,4 +209,9 @@ fn test_a_card_is_lit_by_the_torches_of_the_cell_it_stands_on() {
   scene.draw(dev);
   c = dev.capture();
   assert(near(c, 24, 10, (254, 254, 153)), "and its own light in blue: {hex(c, 24, 10)}");
+}
+
+fn test_a_card_is_lit_by_the_torches_of_the_cell_it_stands_on() {
+  if !display() { return; }
+  for table in backends() { a_card_is_lit_by_the_torches_of_the_cell_it_stands_on_on(table); }
 }
