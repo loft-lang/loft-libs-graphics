@@ -58,8 +58,9 @@ names its own blending.
 ## Backends
 
 It carries a shader source for `gpu_gl` (OpenGL, OpenGL ES 3, WebGL2), one for `gpu_metal`
-(a Mac's Metal) and an empty one for `gpu_record`, so a program's 2D drawing can be tested with
-no display.  Each further backend adds a source here.
+(a Mac's Metal), the SPIR-V `gpu_vulkan` takes (Vulkan on Linux, written from the same GLSL by
+`gpu_vulkan/spirv.py`), and an empty one for `gpu_record`, so a program's 2D drawing can be
+tested with no display.  Each further backend adds a source here.
 
 ## Verified
 
@@ -72,3 +73,12 @@ interpreter, the C backend, the Rust backend and a shipped program, and in both 
 browser pages.  `tests/record.loft` reads what a painter asks of a backend from the recording
 one, on every machine.  `tests/same_on_metal.loft` draws the same four scenes on `gpu_metal`
 and on `gpu_gl` and compares them byte for byte, on a Mac.
+
+On Linux (X11, under Xvfb) `tests/same_as_graphics.loft` runs each test on `gpu_gl` (llvmpipe)
+and on `gpu_vulkan` (RADV and lavapipe), on the interpreter, the C backend and the Rust
+backend.  Through Vulkan two differences from graphics' OpenGL are measured and allowed, the
+rest held byte for byte: a channel off by 1 where a stack rounds a blend or a filter its own
+way (RADV), and the sprites' one top row (11 pixels), an edge a quarter of a pixel from pixels'
+middles that llvmpipe's OpenGL places a quarter of a pixel off.  `a painter into a texture that
+another shows` fails there on both backends: graphics' own painter, the reference, leaves the
+green rectangle it paints into a texture transparent on llvmpipe, where the Mac shows it.

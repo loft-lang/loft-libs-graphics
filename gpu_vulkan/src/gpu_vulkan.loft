@@ -1,0 +1,25 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The Vulkan backend of `gpu`, on Linux.
+//
+//   dev = gpu::open(gpu_vulkan::table(), 960, 720, "view") ?? return;
+//
+// A game does not name this library: `gpu_host` asks each backend in turn.  A program's
+// source for it carries the tag "spirv": a SPIR-V 1.3 module as base64 text, which
+// gpu_vulkan/spirv.py writes from the program's "glsl-330" source, so a program is written once:
+//   - the inputs read per vertex are `location = 0` onwards, in the program's order, and the
+//     inputs read per copy follow them;
+//   - the uniform block is at set 0, binding 0, std140; a block laid out otherwise than the
+//     program declares builds no pipeline, and stderr shows both layouts;
+//   - texture slot n is a `sampler2D` at set 0, binding 1 + n;
+//   - a program that draws points writes `gl_PointSize`.
+
+fn gv_table() -> integer;
+#c "gv_table" "int64_t()"
+
+// This backend's table, for `gpu::open`; 0 on a machine it has no window host for.  `open`
+// answers null where no Vulkan 1.3 driver draws into the window.
+pub fn table() -> i64 {
+  gv_table()
+}

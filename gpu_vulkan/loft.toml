@@ -1,0 +1,36 @@
+[package]
+name = "gpu_vulkan"
+version = "0.1.0"
+# Its shim includes gpu's header by the dependency's name (`gpu/gpu_backend.h`), which loft
+# provides from the daily build that carries its decision C165 on.
+loft = ">=2026.11.20261116"
+repository = "loft-libs-graphics"
+description = "The Vulkan backend of gpu: Vulkan 1.3 on Linux, in an X11 window"
+categories  = ["graphics", "game"]
+
+# ⚠ FIRST release, so both floors are this release itself.
+api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
+data_compatible_with = "0.1.0"   # oldest own release whose stored data this reads
+
+[dependencies]
+gpu = ">=0.3.0"
+
+[library]
+entry = "src/gpu_vulkan.loft"
+
+# The backend's table in C99 (c/gpu_vulkan.c), over the Vulkan declarations it uses
+# (c/vk_decl.h, checked against the Khronos header by c/check_decl.py) and an X11 window host
+# (c/x11_host.h).  The Vulkan loader and X11 are opened at run time.
+[c]
+shim = "c/gpu_vulkan.c"
+
+# What this package opens that it did not write (loft THIRDPARTY.md).
+[thirdparty.vulkan]
+kind     = "system"
+names    = ["vulkan"]
+provider = "the Vulkan loader and the GPU driver's Vulkan (Mesa's RADV, ANV, NVK or lavapipe, or the vendor driver on Linux), opened at run time"
+
+[thirdparty.windowing]
+kind     = "system"
+names    = ["X11"]
+provider = "the OS windowing and input library (Xorg / XWayland on Linux), opened at run time"

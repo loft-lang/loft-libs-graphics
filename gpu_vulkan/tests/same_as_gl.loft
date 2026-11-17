@@ -1,0 +1,935 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The same scene drawn through `gpu` on OpenGL (`gpu_gl`) and on Vulkan gives the same pixels.
+// Each test draws one scene from one program — its "glsl-330" source and the "spirv" that
+// gpu_vulkan/spirv.py writes from it — once per backend, and compares the two captures whole;
+// it also asks that the scene shows more than one colour, so that two empty frames do not pass.
+//
+// The two stacks are held to the same pixels except where `SAME` below says otherwise.  A
+// backend serves a whole program, so each scene is drawn in a function of its own, and every
+// object of the first backend is gone before the second opens.  gpu_gl is not a dependency of
+// this package: it is the backend this one is measured against.  Without a display every test
+// returns at once; where one of the two backends opens no window the test says so and fails.
+use gpu;
+use gpu_gl;
+use gpu_vulkan;
+
+// A display, on a machine this backend has a window host for (Linux).
+fn display() -> boolean {
+  (env_variable("DISPLAY") ?? "") != "" && gpu_vulkan::table() != 0
+}
+
+const BLUE = 0xFF0000FF;
+
+// ── the shaders, each written once ──
+
+const FLAT_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(std140) uniform Block {{ vec4 color; float z; }};
+void main() {{ gl_Position = vec4(pos.xy, z, 1.0); }}
+`;
+
+const FLAT_F: text = `
+#version 330 core
+layout(std140) uniform Block {{ vec4 color; float z; }};
+out vec4 frag;
+void main() {{ frag = color; }}
+`;
+
+// SPIR-V of FLAT_V (vertex), written by gpu_vulkan/spirv.py: do not edit.
+const FLAT_V_SPV: text = `AwIjBwADAQALAAgAIwAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABwAAAAAABAAAAG1haW4AAAAADQAAABIAAABHAAMACwAAAAIAAABIAAUACwAAAAAA
+AAALAAAAAAAAAEgABQALAAAAAQAAAAsAAAABAAAASAAFAAsAAAACAAAACwAAAAMAAABIAAUACwAA
+AAMAAAALAAAABAAAAEcABAASAAAAHgAAAAAAAABHAAMAFgAAAAIAAABIAAUAFgAAAAAAAAAjAAAA
+AAAAAEgABQAWAAAAAQAAACMAAAAQAAAARwAEABgAAAAhAAAAAAAAAEcABAAYAAAAIgAAAAAAAAAT
+AAIAAgAAACEAAwADAAAAAgAAABYAAwAGAAAAIAAAABcABAAHAAAABgAAAAQAAAAVAAQACAAAACAA
+AAAAAAAAKwAEAAgAAAAJAAAAAQAAABwABAAKAAAABgAAAAkAAAAeAAYACwAAAAcAAAAGAAAACgAA
+AAoAAAAgAAQADAAAAAMAAAALAAAAOwAEAAwAAAANAAAAAwAAABUABAAOAAAAIAAAAAEAAAArAAQA
+DgAAAA8AAAAAAAAAFwAEABAAAAAGAAAAAwAAACAABAARAAAAAQAAABAAAAA7AAQAEQAAABIAAAAB
+AAAAFwAEABMAAAAGAAAAAgAAAB4ABAAWAAAABwAAAAYAAAAgAAQAFwAAAAIAAAAWAAAAOwAEABcA
+AAAYAAAAAgAAACsABAAOAAAAGQAAAAEAAAAgAAQAGgAAAAIAAAAGAAAAKwAEAAYAAAAdAAAAAACA
+PyAABAAhAAAAAwAAAAcAAAA2AAUAAgAAAAQAAAAAAAAAAwAAAPgAAgAFAAAAPQAEABAAAAAUAAAA
+EgAAAE8ABwATAAAAFQAAABQAAAAUAAAAAAAAAAEAAABBAAUAGgAAABsAAAAYAAAAGQAAAD0ABAAG
+AAAAHAAAABsAAABRAAUABgAAAB4AAAAVAAAAAAAAAFEABQAGAAAAHwAAABUAAAABAAAAUAAHAAcA
+AAAgAAAAHgAAAB8AAAAcAAAAHQAAAEEABQAhAAAAIgAAAA0AAAAPAAAAPgADACIAAAAgAAAA/QAB
+ADgAAQA=`;
+
+// SPIR-V of FLAT_F (fragment), written by gpu_vulkan/spirv.py: do not edit.
+const FLAT_F_SPV: text = `AwIjBwADAQALAAgAEgAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABgAEAAAABAAAAG1haW4AAAAACQAAABAAAwAEAAAABwAAAEcABAAJAAAAHgAAAAAA
+AABHAAMACgAAAAIAAABIAAUACgAAAAAAAAAjAAAAAAAAAEgABQAKAAAAAQAAACMAAAAQAAAARwAE
+AAwAAAAhAAAAAAAAAEcABAAMAAAAIgAAAAAAAAATAAIAAgAAACEAAwADAAAAAgAAABYAAwAGAAAA
+IAAAABcABAAHAAAABgAAAAQAAAAgAAQACAAAAAMAAAAHAAAAOwAEAAgAAAAJAAAAAwAAAB4ABAAK
+AAAABwAAAAYAAAAgAAQACwAAAAIAAAAKAAAAOwAEAAsAAAAMAAAAAgAAABUABAANAAAAIAAAAAEA
+AAArAAQADQAAAA4AAAAAAAAAIAAEAA8AAAACAAAABwAAADYABQACAAAABAAAAAAAAAADAAAA+AAC
+AAUAAABBAAUADwAAABAAAAAMAAAADgAAAD0ABAAHAAAAEQAAABAAAAA+AAMACQAAABEAAAD9AAEA
+OAABAA==`;
+
+fn flat() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3],
+    instance: [],
+    block: [gpu::F4, gpu::F1],
+    textures: 0,
+    sources: [gpu::source("glsl-330", FLAT_V, FLAT_F), gpu::source("spirv", FLAT_V_SPV, FLAT_F_SPV)],
+  }
+}
+
+// a texture over the frame: position, an unused normal, a texture coordinate
+const TEX_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(location = 2) in vec2 uv;
+out vec2 v_uv;
+void main() {{ v_uv = uv; gl_Position = vec4(pos, 1.0); }}
+`;
+
+const TEX_F: text = `
+#version 330 core
+uniform sampler2D tex0;
+in vec2 v_uv;
+out vec4 frag;
+void main() {{ frag = texture(tex0, v_uv); }}
+`;
+
+// SPIR-V of TEX_V (vertex), written by gpu_vulkan/spirv.py: do not edit.
+const TEX_V_SPV: text = `AwIjBwADAQALAAgAIQAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ACQAAAAAABAAAAG1haW4AAAAACQAAAAsAAAATAAAAGAAAAEcABAAJAAAAHgAAAAAA
+AABHAAQACwAAAB4AAAACAAAARwADABEAAAACAAAASAAFABEAAAAAAAAACwAAAAAAAABIAAUAEQAA
+AAEAAAALAAAAAQAAAEgABQARAAAAAgAAAAsAAAADAAAASAAFABEAAAADAAAACwAAAAQAAABHAAQA
+GAAAAB4AAAAAAAAAEwACAAIAAAAhAAMAAwAAAAIAAAAWAAMABgAAACAAAAAXAAQABwAAAAYAAAAC
+AAAAIAAEAAgAAAADAAAABwAAADsABAAIAAAACQAAAAMAAAAgAAQACgAAAAEAAAAHAAAAOwAEAAoA
+AAALAAAAAQAAABcABAANAAAABgAAAAQAAAAVAAQADgAAACAAAAAAAAAAKwAEAA4AAAAPAAAAAQAA
+ABwABAAQAAAABgAAAA8AAAAeAAYAEQAAAA0AAAAGAAAAEAAAABAAAAAgAAQAEgAAAAMAAAARAAAA
+OwAEABIAAAATAAAAAwAAABUABAAUAAAAIAAAAAEAAAArAAQAFAAAABUAAAAAAAAAFwAEABYAAAAG
+AAAAAwAAACAABAAXAAAAAQAAABYAAAA7AAQAFwAAABgAAAABAAAAKwAEAAYAAAAaAAAAAACAPyAA
+BAAfAAAAAwAAAA0AAAA2AAUAAgAAAAQAAAAAAAAAAwAAAPgAAgAFAAAAPQAEAAcAAAAMAAAACwAA
+AD4AAwAJAAAADAAAAD0ABAAWAAAAGQAAABgAAABRAAUABgAAABsAAAAZAAAAAAAAAFEABQAGAAAA
+HAAAABkAAAABAAAAUQAFAAYAAAAdAAAAGQAAAAIAAABQAAcADQAAAB4AAAAbAAAAHAAAAB0AAAAa
+AAAAQQAFAB8AAAAgAAAAEwAAABUAAAA+AAMAIAAAAB4AAAD9AAEAOAABAA==`;
+
+// SPIR-V of TEX_F (fragment), written by gpu_vulkan/spirv.py: do not edit.
+const TEX_F_SPV: text = `AwIjBwADAQALAAgAFAAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABwAEAAAABAAAAG1haW4AAAAACQAAABEAAAAQAAMABAAAAAcAAABHAAQACQAAAB4A
+AAAAAAAARwAEAA0AAAAhAAAAAQAAAEcABAANAAAAIgAAAAAAAABHAAQAEQAAAB4AAAAAAAAAEwAC
+AAIAAAAhAAMAAwAAAAIAAAAWAAMABgAAACAAAAAXAAQABwAAAAYAAAAEAAAAIAAEAAgAAAADAAAA
+BwAAADsABAAIAAAACQAAAAMAAAAZAAkACgAAAAYAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAb
+AAMACwAAAAoAAAAgAAQADAAAAAAAAAALAAAAOwAEAAwAAAANAAAAAAAAABcABAAPAAAABgAAAAIA
+AAAgAAQAEAAAAAEAAAAPAAAAOwAEABAAAAARAAAAAQAAADYABQACAAAABAAAAAAAAAADAAAA+AAC
+AAUAAAA9AAQACwAAAA4AAAANAAAAPQAEAA8AAAASAAAAEQAAAFcABQAHAAAAEwAAAA4AAAASAAAA
+PgADAAkAAAATAAAA/QABADgAAQA=`;
+
+fn textured() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3, gpu::F3, gpu::F2],
+    instance: [],
+    block: [],
+    textures: 1,
+    sources: [gpu::source("glsl-330", TEX_V, TEX_F), gpu::source("spirv", TEX_V_SPV, TEX_F_SPV)],
+  }
+}
+
+// copies: a strip moved by a float read once per copy
+const COPY_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(location = 1) in float dx;
+layout(std140) uniform Block {{ vec4 color; float z; }};
+void main() {{ gl_Position = vec4(pos.x + dx, pos.y, 0.0, 1.0); }}
+`;
+
+// SPIR-V of COPY_V (vertex), written by gpu_vulkan/spirv.py: do not edit.
+const COPY_V_SPV: text = `AwIjBwADAQALAAgAJAAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ACAAAAAAABAAAAG1haW4AAAAADQAAABIAAAAXAAAARwADAAsAAAACAAAASAAFAAsA
+AAAAAAAACwAAAAAAAABIAAUACwAAAAEAAAALAAAAAQAAAEgABQALAAAAAgAAAAsAAAADAAAASAAF
+AAsAAAADAAAACwAAAAQAAABHAAQAEgAAAB4AAAAAAAAARwAEABcAAAAeAAAAAQAAAEcAAwAhAAAA
+AgAAAEgABQAhAAAAAAAAACMAAAAAAAAASAAFACEAAAABAAAAIwAAABAAAABHAAQAIwAAACEAAAAA
+AAAARwAEACMAAAAiAAAAAAAAABMAAgACAAAAIQADAAMAAAACAAAAFgADAAYAAAAgAAAAFwAEAAcA
+AAAGAAAABAAAABUABAAIAAAAIAAAAAAAAAArAAQACAAAAAkAAAABAAAAHAAEAAoAAAAGAAAACQAA
+AB4ABgALAAAABwAAAAYAAAAKAAAACgAAACAABAAMAAAAAwAAAAsAAAA7AAQADAAAAA0AAAADAAAA
+FQAEAA4AAAAgAAAAAQAAACsABAAOAAAADwAAAAAAAAAXAAQAEAAAAAYAAAADAAAAIAAEABEAAAAB
+AAAAEAAAADsABAARAAAAEgAAAAEAAAArAAQACAAAABMAAAAAAAAAIAAEABQAAAABAAAABgAAADsA
+BAAUAAAAFwAAAAEAAAArAAQABgAAABwAAAAAAAAAKwAEAAYAAAAdAAAAAACAPyAABAAfAAAAAwAA
+AAcAAAAeAAQAIQAAAAcAAAAGAAAAIAAEACIAAAACAAAAIQAAADsABAAiAAAAIwAAAAIAAAA2AAUA
+AgAAAAQAAAAAAAAAAwAAAPgAAgAFAAAAQQAFABQAAAAVAAAAEgAAABMAAAA9AAQABgAAABYAAAAV
+AAAAPQAEAAYAAAAYAAAAFwAAAIEABQAGAAAAGQAAABYAAAAYAAAAQQAFABQAAAAaAAAAEgAAAAkA
+AAA9AAQABgAAABsAAAAaAAAAUAAHAAcAAAAeAAAAGQAAABsAAAAcAAAAHQAAAEEABQAfAAAAIAAA
+AA0AAAAPAAAAPgADACAAAAAeAAAA/QABADgAAQA=`;
+
+fn copied() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3],
+    instance: [gpu::F1],
+    block: [gpu::F4, gpu::F1],
+    textures: 0,
+    sources: [gpu::source("glsl-330", COPY_V, FLAT_F), gpu::source("spirv", COPY_V_SPV, FLAT_F_SPV)],
+  }
+}
+
+// a matrix, an array and a float in one block: each field where `gpu::layout` puts it
+const MAT_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(std140) uniform Block {{ mat4 m; vec4 tint[3]; float pick; }};
+void main() {{ gl_Position = m * vec4(pos, 1.0); }}
+`;
+
+const MAT_F: text = `
+#version 330 core
+layout(std140) uniform Block {{ mat4 m; vec4 tint[3]; float pick; }};
+out vec4 frag;
+void main() {{ frag = tint[int(pick)]; }}
+`;
+
+// SPIR-V of MAT_V (vertex), written by gpu_vulkan/spirv.py: do not edit.
+const MAT_V_SPV: text = `AwIjBwADAQALAAgAJQAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABwAAAAAABAAAAG1haW4AAAAADQAAABsAAABHAAMACwAAAAIAAABIAAUACwAAAAAA
+AAALAAAAAAAAAEgABQALAAAAAQAAAAsAAAABAAAASAAFAAsAAAACAAAACwAAAAMAAABIAAUACwAA
+AAMAAAALAAAABAAAAEcABAASAAAABgAAABAAAABHAAMAEwAAAAIAAABIAAQAEwAAAAAAAAAFAAAA
+SAAFABMAAAAAAAAABwAAABAAAABIAAUAEwAAAAAAAAAjAAAAAAAAAEgABQATAAAAAQAAACMAAABA
+AAAASAAFABMAAAACAAAAIwAAAHAAAABHAAQAFQAAACEAAAAAAAAARwAEABUAAAAiAAAAAAAAAEcA
+BAAbAAAAHgAAAAAAAAATAAIAAgAAACEAAwADAAAAAgAAABYAAwAGAAAAIAAAABcABAAHAAAABgAA
+AAQAAAAVAAQACAAAACAAAAAAAAAAKwAEAAgAAAAJAAAAAQAAABwABAAKAAAABgAAAAkAAAAeAAYA
+CwAAAAcAAAAGAAAACgAAAAoAAAAgAAQADAAAAAMAAAALAAAAOwAEAAwAAAANAAAAAwAAABUABAAO
+AAAAIAAAAAEAAAArAAQADgAAAA8AAAAAAAAAGAAEABAAAAAHAAAABAAAACsABAAIAAAAEQAAAAMA
+AAAcAAQAEgAAAAcAAAARAAAAHgAFABMAAAAQAAAAEgAAAAYAAAAgAAQAFAAAAAIAAAATAAAAOwAE
+ABQAAAAVAAAAAgAAACAABAAWAAAAAgAAABAAAAAXAAQAGQAAAAYAAAADAAAAIAAEABoAAAABAAAA
+GQAAADsABAAaAAAAGwAAAAEAAAArAAQABgAAAB0AAAAAAIA/IAAEACMAAAADAAAABwAAADYABQAC
+AAAABAAAAAAAAAADAAAA+AACAAUAAABBAAUAFgAAABcAAAAVAAAADwAAAD0ABAAQAAAAGAAAABcA
+AAA9AAQAGQAAABwAAAAbAAAAUQAFAAYAAAAeAAAAHAAAAAAAAABRAAUABgAAAB8AAAAcAAAAAQAA
+AFEABQAGAAAAIAAAABwAAAACAAAAUAAHAAcAAAAhAAAAHgAAAB8AAAAgAAAAHQAAAJEABQAHAAAA
+IgAAABgAAAAhAAAAQQAFACMAAAAkAAAADQAAAA8AAAA+AAMAJAAAACIAAAD9AAEAOAABAA==`;
+
+// SPIR-V of MAT_F (fragment), written by gpu_vulkan/spirv.py: do not edit.
+const MAT_F_SPV: text = `AwIjBwADAQALAAgAGwAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABgAEAAAABAAAAG1haW4AAAAACQAAABAAAwAEAAAABwAAAEcABAAJAAAAHgAAAAAA
+AABHAAQADQAAAAYAAAAQAAAARwADAA4AAAACAAAASAAEAA4AAAAAAAAABQAAAEgABQAOAAAAAAAA
+AAcAAAAQAAAASAAFAA4AAAAAAAAAIwAAAAAAAABIAAUADgAAAAEAAAAjAAAAQAAAAEgABQAOAAAA
+AgAAACMAAABwAAAARwAEABAAAAAhAAAAAAAAAEcABAAQAAAAIgAAAAAAAAATAAIAAgAAACEAAwAD
+AAAAAgAAABYAAwAGAAAAIAAAABcABAAHAAAABgAAAAQAAAAgAAQACAAAAAMAAAAHAAAAOwAEAAgA
+AAAJAAAAAwAAABgABAAKAAAABwAAAAQAAAAVAAQACwAAACAAAAAAAAAAKwAEAAsAAAAMAAAAAwAA
+ABwABAANAAAABwAAAAwAAAAeAAUADgAAAAoAAAANAAAABgAAACAABAAPAAAAAgAAAA4AAAA7AAQA
+DwAAABAAAAACAAAAFQAEABEAAAAgAAAAAQAAACsABAARAAAAEgAAAAEAAAArAAQAEQAAABMAAAAC
+AAAAIAAEABQAAAACAAAABgAAACAABAAYAAAAAgAAAAcAAAA2AAUAAgAAAAQAAAAAAAAAAwAAAPgA
+AgAFAAAAQQAFABQAAAAVAAAAEAAAABMAAAA9AAQABgAAABYAAAAVAAAAbgAEABEAAAAXAAAAFgAA
+AEEABgAYAAAAGQAAABAAAAASAAAAFwAAAD0ABAAHAAAAGgAAABkAAAA+AAMACQAAABoAAAD9AAEA
+OAABAA==`;
+
+fn matrixed() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3],
+    instance: [],
+    block: [gpu::MAT4, gpu::f4s(3), gpu::F1],
+    textures: 0,
+    sources: [gpu::source("glsl-330", MAT_V, MAT_F), gpu::source("spirv", MAT_V_SPV, MAT_F_SPV)],
+  }
+}
+
+// points, one pixel each: a program that draws points writes its size
+const POINT_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(std140) uniform Block {{ vec4 color; float z; }};
+void main() {{ gl_Position = vec4(pos.xy, z, 1.0); gl_PointSize = 1.0; }}
+`;
+
+// SPIR-V of POINT_V (vertex), written by gpu_vulkan/spirv.py: do not edit.
+const POINT_V_SPV: text = `AwIjBwADAQALAAgAJQAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABwAAAAAABAAAAG1haW4AAAAADQAAABIAAABHAAMACwAAAAIAAABIAAUACwAAAAAA
+AAALAAAAAAAAAEgABQALAAAAAQAAAAsAAAABAAAASAAFAAsAAAACAAAACwAAAAMAAABIAAUACwAA
+AAMAAAALAAAABAAAAEcABAASAAAAHgAAAAAAAABHAAMAFgAAAAIAAABIAAUAFgAAAAAAAAAjAAAA
+AAAAAEgABQAWAAAAAQAAACMAAAAQAAAARwAEABgAAAAhAAAAAAAAAEcABAAYAAAAIgAAAAAAAAAT
+AAIAAgAAACEAAwADAAAAAgAAABYAAwAGAAAAIAAAABcABAAHAAAABgAAAAQAAAAVAAQACAAAACAA
+AAAAAAAAKwAEAAgAAAAJAAAAAQAAABwABAAKAAAABgAAAAkAAAAeAAYACwAAAAcAAAAGAAAACgAA
+AAoAAAAgAAQADAAAAAMAAAALAAAAOwAEAAwAAAANAAAAAwAAABUABAAOAAAAIAAAAAEAAAArAAQA
+DgAAAA8AAAAAAAAAFwAEABAAAAAGAAAAAwAAACAABAARAAAAAQAAABAAAAA7AAQAEQAAABIAAAAB
+AAAAFwAEABMAAAAGAAAAAgAAAB4ABAAWAAAABwAAAAYAAAAgAAQAFwAAAAIAAAAWAAAAOwAEABcA
+AAAYAAAAAgAAACsABAAOAAAAGQAAAAEAAAAgAAQAGgAAAAIAAAAGAAAAKwAEAAYAAAAdAAAAAACA
+PyAABAAhAAAAAwAAAAcAAAAgAAQAIwAAAAMAAAAGAAAANgAFAAIAAAAEAAAAAAAAAAMAAAD4AAIA
+BQAAAD0ABAAQAAAAFAAAABIAAABPAAcAEwAAABUAAAAUAAAAFAAAAAAAAAABAAAAQQAFABoAAAAb
+AAAAGAAAABkAAAA9AAQABgAAABwAAAAbAAAAUQAFAAYAAAAeAAAAFQAAAAAAAABRAAUABgAAAB8A
+AAAVAAAAAQAAAFAABwAHAAAAIAAAAB4AAAAfAAAAHAAAAB0AAABBAAUAIQAAACIAAAANAAAADwAA
+AD4AAwAiAAAAIAAAAEEABQAjAAAAJAAAAA0AAAAZAAAAPgADACQAAAAdAAAA/QABADgAAQA=`;
+
+fn pointed() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3],
+    instance: [],
+    block: [gpu::F4, gpu::F1],
+    textures: 0,
+    sources: [gpu::source("glsl-330", POINT_V, FLAT_F), gpu::source("spirv", POINT_V_SPV, FLAT_F_SPV)],
+  }
+}
+
+// a depth texture shown as grey: the depth a pass wrote, read back as a shadow map is
+const DEPTH_F: text = `
+#version 330 core
+uniform sampler2D tex0;
+in vec2 v_uv;
+out vec4 frag;
+void main() {{ float d = texture(tex0, v_uv).r; frag = vec4(d, d * d, 1.0 - d, 1.0); }}
+`;
+
+// SPIR-V of DEPTH_F (fragment), written by gpu_vulkan/spirv.py: do not edit.
+const DEPTH_F_SPV: text = `AwIjBwADAQALAAgAIQAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABwAEAAAABAAAAG1haW4AAAAAEAAAABgAAAAQAAMABAAAAAcAAABHAAQADAAAACEA
+AAABAAAARwAEAAwAAAAiAAAAAAAAAEcABAAQAAAAHgAAAAAAAABHAAQAGAAAAB4AAAAAAAAAEwAC
+AAIAAAAhAAMAAwAAAAIAAAAWAAMABgAAACAAAAAgAAQABwAAAAcAAAAGAAAAGQAJAAkAAAAGAAAA
+AQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAGwADAAoAAAAJAAAAIAAEAAsAAAAAAAAACgAAADsABAAL
+AAAADAAAAAAAAAAXAAQADgAAAAYAAAACAAAAIAAEAA8AAAABAAAADgAAADsABAAPAAAAEAAAAAEA
+AAAXAAQAEgAAAAYAAAAEAAAAFQAEABQAAAAgAAAAAAAAACsABAAUAAAAFQAAAAAAAAAgAAQAFwAA
+AAMAAAASAAAAOwAEABcAAAAYAAAAAwAAACsABAAGAAAAHQAAAAAAgD82AAUAAgAAAAQAAAAAAAAA
+AwAAAPgAAgAFAAAAOwAEAAcAAAAIAAAABwAAAD0ABAAKAAAADQAAAAwAAAA9AAQADgAAABEAAAAQ
+AAAAVwAFABIAAAATAAAADQAAABEAAABRAAUABgAAABYAAAATAAAAAAAAAD4AAwAIAAAAFgAAAD0A
+BAAGAAAAGQAAAAgAAAA9AAQABgAAABoAAAAIAAAAPQAEAAYAAAAbAAAACAAAAIUABQAGAAAAHAAA
+ABoAAAAbAAAAPQAEAAYAAAAeAAAACAAAAIMABQAGAAAAHwAAAB0AAAAeAAAAUAAHABIAAAAgAAAA
+GQAAABwAAAAfAAAAHQAAAD4AAwAYAAAAIAAAAP0AAQA4AAEA`;
+
+fn depth_shown() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3, gpu::F3, gpu::F2],
+    instance: [],
+    block: [],
+    textures: 1,
+    sources: [gpu::source("glsl-330", TEX_V, DEPTH_F), gpu::source("spirv", TEX_V_SPV, DEPTH_F_SPV)],
+  }
+}
+
+// ── geometry ──
+
+// Two triangles over (x0, y0)-(x1, y1), counter-clockwise, or clockwise.
+fn rect(x0: float, y0: float, x1: float, y1: float, clockwise: boolean) -> vector<single> {
+  ccw = [x0, y0, x1, y0, x1, y1, x0, y0, x1, y1, x0, y1];
+  cw = [x0, y0, x1, y1, x1, y0, x0, y0, x0, y1, x1, y1];
+  out: vector<single> = [];
+  for i in 0..6 {
+    x = if clockwise { cw[2 * i] } else { ccw[2 * i] };
+    y = if clockwise { cw[2 * i + 1] } else { ccw[2 * i + 1] };
+    out += [x as single, y as single, 0.0 as single];
+  }
+  out
+}
+
+// The whole frame with a normal nobody reads and a texture coordinate: 8 floats a vertex.
+fn frame8() -> vector<single> {
+  xy = [-1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, 1.0];
+  out: vector<single> = [];
+  for i in 0..6 {
+    x = xy[2 * i];
+    y = xy[2 * i + 1];
+    out += [x as single, y as single, 0.0f, 0.0f, 0.0f, 1.0f, ((x + 1.0) / 2.0) as single, ((y + 1.0) / 2.0) as single];
+  }
+  out
+}
+
+fn rgba(r: integer, g: integer, b: integer, a: integer) -> u32 {
+  ((a * 16777216 + r * 65536 + g * 256 + b) & 4294967295) as u32
+}
+
+// A 4 x 4 picture, every pixel its own colour.
+fn picture() -> vector<u32> {
+  out: vector<u32> = [];
+  for i in 0..16 {
+    out += [rgba(40 + 12 * i, 250 - 13 * i, 17 * (i % 5) + 30, 255)];
+  }
+  out
+}
+
+// A 64 x 64 checkerboard of 1-pixel squares in two colours, which only its smaller copies show
+// as their mixture.
+fn checker() -> vector<u32> {
+  out: vector<u32> = [];
+  for i in 0..64 * 64 {
+    out += [if (i % 64 + i / 64) % 2 == 0 { rgba(250, 30, 30, 255) } else { rgba(20, 40, 230, 255) }];
+  }
+  out
+}
+
+// ── the comparison ──
+
+// How far two stacks may differ in a scene, and why: each exception names its source.
+struct Same {
+  // pixels allowed to differ at all
+  pixels: integer,
+  // and by at most this much in any channel
+  channel: integer,
+}
+
+fn exact() -> Same {
+  Same { pixels: 0, channel: 0 }
+}
+
+// Between a texture's pixels: each stack weighs the two neighbours with its own precision.
+// Measured: RADV against llvmpipe's OpenGL, 1005 of 3072 pixels by 1; lavapipe, none.
+fn filter_weights() -> Same {
+  Same { pixels: 3072, channel: 1 }
+}
+
+// Where a line steps: OpenGL's diamond-exit rule and Vulkan's Bresenham lines choose the same
+// pixels except where a step falls on a pixel's edge.  Measured: lavapipe against llvmpipe's
+// OpenGL, 4 pixels of the steep line; RADV, none.
+fn line_steps() -> Same {
+  Same { pixels: 4, channel: 255 }
+}
+
+// A point within a hair of a pixel's edge (x 63.04 here): the stacks round it to either side.
+// Measured: lavapipe against llvmpipe's OpenGL, the one point, 2 pixels; RADV, none.
+fn point_edges() -> Same {
+  Same { pixels: 2, channel: 255 }
+}
+
+fn channel_gap(a: u32, b: u32) -> integer {
+  worst = 0;
+  for shift in [0, 8, 16, 24] {
+    x = ((a as integer) >> shift) & 255;
+    y = ((b as integer) >> shift) & 255;
+    gap = if x > y { x - y } else { y - x };
+    if gap > worst { worst = gap; }
+  }
+  worst
+}
+
+fn same(gl: const vector<u32>, vk: const vector<u32>, what: text, allowed: Same) {
+  assert(len(gl) > 0, "{what}: OpenGL drew nothing (no window, or no device)");
+  assert(len(vk) > 0, "{what}: Vulkan drew nothing (no window, or no device)");
+  assert(len(gl) == len(vk), "{what}: {len(gl)} pixels on OpenGL, {len(vk)} on Vulkan");
+  differ = 0;
+  worst = 0;
+  first = -1;
+  colours = 0;
+  for p in gl {
+    q = vk[p#index] ?? 0;
+    if p != q {
+      differ += 1;
+      if first < 0 { first = p#index; }
+      gap = channel_gap(p, q);
+      if gap > worst { worst = gap; }
+    }
+    if p != gl[0] { colours += 1; }
+  }
+  assert(colours > 0, "{what}: the scene shows one colour only");
+  assert(differ <= allowed.pixels && worst <= allowed.channel, "{what}: {differ} pixels differ, by up to {worst} in a channel, the first at {first} (x {first % 64}, y {first / 64}): {gl[first] ?? 0:x} on OpenGL, {vk[first] ?? 0:x} on Vulkan");
+}
+
+// The scene drawn by `scene` through the backend whose table is `table`; empty when no device
+// opens.  Every object the scene made is gone when it returns.
+fn on(table: i64, title: text, scene: fn(gpu::Device) -> vector<u32>) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, title) ?? return [];
+  out = scene(dev);
+  assert(len(dev.refusals()) == 0, "{title}: nothing refused: {dev.refusals()}");
+  out
+}
+
+fn both(what: text, scene: fn(gpu::Device) -> vector<u32>, allowed: Same) {
+  if !display() { return; }
+  gl = on(gpu_gl::table(), "gl-{what}", scene);
+  vk = on(gpu_vulkan::table(), "vk-{what}", scene);
+  same(gl, vk, what, allowed);
+}
+
+// ── the scenes ──
+
+// Red behind, green in front on the left, blue further back hidden, then a half-transparent
+// white strip blended over the lower half.
+fn depth_and_blend(dev: gpu::Device) -> vector<u32> {
+  solid = dev.pipeline(flat(), gpu::State { depth: gpu::DEPTH_TEST_WRITE }) ?? return [];
+  over = dev.pipeline(flat(), gpu::State { blend: gpu::blend(gpu::SRC_ALPHA, gpu::ONE_MINUS_SRC_ALPHA) }) ?? return [];
+  b_left = dev.buffer(rect(-1.0, -1.0, 0.0, 1.0, false));
+  b_whole = dev.buffer(rect(-1.0, -1.0, 1.0, 1.0, false));
+  b_low = dev.buffer(rect(-1.0, -1.0, 1.0, 0.0, false));
+  u = solid.block();
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(solid);
+  u.f4(0, 1.0, 0.0, 0.0, 1.0);
+  u.f1(1, 0.5);
+  dev.uniforms(u);
+  dev.vertices(b_whole);
+  dev.draw(0, 6);
+  u.f4(0, 0.0, 1.0, 0.0, 1.0);
+  u.f1(1, -0.5);
+  dev.uniforms(u);
+  dev.vertices(b_left);
+  dev.draw(0, 6);
+  u.f4(0, 0.0, 0.0, 1.0, 1.0);
+  u.f1(1, 0.9);
+  dev.uniforms(u);
+  dev.vertices(b_whole);
+  dev.draw(0, 6);
+  dev.bind(over);
+  u.f4(0, 1.0, 1.0, 1.0, 0.4);
+  u.f1(1, 0.0);
+  dev.uniforms(u);
+  dev.vertices(b_low);
+  dev.draw(0, 6);
+  dev.end();
+  dev.capture()
+}
+
+fn test_depth_and_blend() {
+  both("depth-blend", depth_and_blend, exact());
+}
+
+// A clockwise frame culled away; a green frame cut to a rectangle by the scissor; a red frame
+// squeezed into a corner by the viewport; a counter-clockwise strip culled as a front face.
+fn cull_scissor_viewport(dev: gpu::Device) -> vector<u32> {
+  culled = dev.pipeline(flat(), gpu::State { cull: gpu::CULL_BACK }) ?? return [];
+  fronts = dev.pipeline(flat(), gpu::State { cull: gpu::CULL_FRONT }) ?? return [];
+  plain = dev.pipeline(flat(), gpu::State {}) ?? return [];
+  b_whole = dev.buffer(rect(-1.0, -1.0, 1.0, 1.0, false));
+  b_turned = dev.buffer(rect(-1.0, -1.0, 1.0, 1.0, true));
+  b_strip = dev.buffer(rect(-1.0, 0.5, 1.0, 0.8, false));
+  b_strip_cw = dev.buffer(rect(-1.0, -0.8, 1.0, -0.5, true));
+  u = plain.block();
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(culled);
+  u.f4(0, 1.0, 1.0, 0.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(b_turned);
+  dev.draw(0, 6);
+  dev.bind(fronts);
+  u.f4(0, 1.0, 0.0, 1.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(b_strip);
+  dev.draw(0, 6);
+  dev.vertices(b_strip_cw);
+  dev.draw(0, 6);
+  dev.bind(plain);
+  dev.scissor(5, 7, 30, 20);
+  u.f4(0, 0.0, 1.0, 0.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(b_whole);
+  dev.draw(0, 6);
+  dev.no_scissor();
+  dev.viewport(40, 30, 16, 12);
+  u.f4(0, 1.0, 0.0, 0.0, 1.0);
+  dev.uniforms(u);
+  dev.draw(0, 6);
+  dev.end();
+  dev.capture()
+}
+
+fn test_cull_scissor_and_viewport() {
+  both("cull-scissor-viewport", cull_scissor_viewport, exact());
+}
+
+fn texture_nearest(dev: gpu::Device) -> vector<u32> {
+  pipe = dev.pipeline(textured(), gpu::State {}) ?? return [];
+  b = dev.buffer(frame8());
+  t = dev.texture_from(picture(), 4, 4);
+  t.nearest(true);
+  t.put(1, 2, [0xFFFFFFFF as u32, 0xFF000000 as u32], 2, 1);
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(pipe);
+  dev.sample(0, t);
+  dev.vertices(b);
+  dev.draw(0, 6);
+  dev.end();
+  dev.capture()
+}
+
+fn test_a_texture_put_and_sampled_nearest() {
+  both("texture-nearest", texture_nearest, exact());
+}
+
+// Between its pixels a texture is sampled from both neighbours, and at its edge from the edge
+// pixel alone.
+fn texture_linear(dev: gpu::Device) -> vector<u32> {
+  pipe = dev.pipeline(textured(), gpu::State {}) ?? return [];
+  b = dev.buffer(frame8());
+  t = dev.texture_from(picture(), 4, 4);
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(pipe);
+  dev.sample(0, t);
+  dev.vertices(b);
+  dev.draw(0, 6);
+  dev.end();
+  dev.capture()
+}
+
+fn test_a_texture_sampled_between_its_pixels() {
+  both("texture-linear", texture_linear, filter_weights());
+}
+
+// Three copies of a strip from an offset into the per-copy buffer, and a box from an index list.
+fn copies_and_indices(dev: gpu::Device) -> vector<u32> {
+  many = dev.pipeline(copied(), gpu::State {}) ?? return [];
+  one = dev.pipeline(flat(), gpu::State {}) ?? return [];
+  b = dev.buffer(rect(-1.0, -1.0, -0.75, 1.0, false));
+  per_copy = dev.buffer([9.0f, 9.0f, 0.0f, 0.5f, 1.25f]);
+  b_box = dev.buffer([-0.5f, -0.5f, 0.0f, 0.5f, -0.5f, 0.0f, 0.5f, 0.5f, 0.0f, -0.5f, 0.5f, 0.0f]);
+  list = dev.index_buffer([0, 1, 2, 0, 2, 3]);
+  u = many.block();
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(many);
+  u.f4(0, 0.0, 1.0, 0.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(b);
+  dev.instances(per_copy, 2);
+  dev.draw_copies(6, 3);
+  dev.bind(one);
+  u.f4(0, 1.0, 0.0, 0.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(b_box);
+  dev.indices(list);
+  dev.draw_indexed(6);
+  dev.end();
+  dev.capture()
+}
+
+fn test_copies_and_an_index_list() {
+  both("copies-indices", copies_and_indices, exact());
+}
+
+fn lines(dev: gpu::Device) -> vector<u32> {
+  pipe = dev.pipeline(flat(), gpu::State { shape: gpu::LINES }) ?? return [];
+  b = dev.buffer([-0.9f, -0.9f, 0.0f, 0.9f, 0.7f, 0.0f, -0.9f, 0.5f, 0.0f, 0.9f, 0.5f, 0.0f, -0.6f, -0.9f, 0.0f, -0.4f, 0.9f, 0.0f]);
+  u = pipe.block();
+  u.f4(0, 1.0, 1.0, 0.0, 1.0);
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(pipe);
+  dev.uniforms(u);
+  dev.vertices(b);
+  dev.draw(0, 6);
+  dev.end();
+  dev.capture()
+}
+
+fn test_lines() {
+  both("lines", lines, line_steps());
+}
+
+fn points(dev: gpu::Device) -> vector<u32> {
+  pipe = dev.pipeline(pointed(), gpu::State { shape: gpu::POINTS }) ?? return [];
+  b = dev.buffer([-0.9f, -0.9f, 0.0f, 0.1f, 0.2f, 0.0f, 0.5f, -0.3f, 0.0f, 0.97f, 0.97f, 0.0f]);
+  u = pipe.block();
+  u.f4(0, 1.0, 1.0, 1.0, 1.0);
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(pipe);
+  dev.uniforms(u);
+  dev.vertices(b);
+  dev.draw(0, 4);
+  dev.end();
+  dev.capture()
+}
+
+fn test_points() {
+  both("points", points, point_edges());
+}
+
+// Into a 32 x 24 colour and depth target — green on the left in front of red below — then the
+// target shown over the window.
+fn into_a_target(dev: gpu::Device) -> vector<u32> {
+  inner = dev.pipeline(flat(), gpu::State { depth: gpu::DEPTH_TEST_WRITE, into: gpu::INTO_COLOUR_DEPTH }) ?? return [];
+  outer = dev.pipeline(textured(), gpu::State {}) ?? return [];
+  b_left = dev.buffer(rect(-1.0, -1.0, 0.0, 1.0, false));
+  b_low = dev.buffer(rect(-1.0, -1.0, 1.0, -0.25, false));
+  b_frame = dev.buffer(frame8());
+  colour = dev.texture(32, 24);
+  colour.nearest(true);
+  depth = dev.depth_texture(32, 24);
+  target = dev.target(colour, depth);
+  u = inner.block();
+  dev.begin(target, gpu::CLEAR, 0xFF202020);
+  dev.bind(inner);
+  u.f4(0, 0.0, 1.0, 0.0, 1.0);
+  u.f1(1, -0.5);
+  dev.uniforms(u);
+  dev.vertices(b_left);
+  dev.draw(0, 6);
+  u.f4(0, 1.0, 0.0, 0.0, 1.0);
+  u.f1(1, 0.5);
+  dev.uniforms(u);
+  dev.vertices(b_low);
+  dev.draw(0, 6);
+  dev.end();
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(outer);
+  dev.sample(0, colour);
+  dev.vertices(b_frame);
+  dev.draw(0, 6);
+  dev.end();
+  dev.capture()
+}
+
+fn test_a_scene_drawn_into_a_texture_first() {
+  both("target", into_a_target, exact());
+}
+
+// A target's colour read back without being shown: its first row at the bottom, as drawn.
+fn target_read_back(dev: gpu::Device) -> vector<u32> {
+  inner = dev.pipeline(flat(), gpu::State { into: gpu::INTO_COLOUR, blend: gpu::blend(gpu::SRC_ALPHA, gpu::ONE_MINUS_SRC_ALPHA) }) ?? return [];
+  b = dev.buffer(rect(-1.0, -1.0, 0.25, -0.5, false));
+  colour = dev.texture(64, 48);
+  target = dev.colour_target(colour);
+  u = inner.block();
+  dev.begin(target, gpu::CLEAR, 0x80402010);
+  dev.bind(inner);
+  u.f4(0, 0.0, 1.0, 0.5, 0.75);
+  dev.uniforms(u);
+  dev.vertices(b);
+  dev.draw(0, 6);
+  dev.end();
+  dev.capture_of(target)
+}
+
+fn test_a_targets_colour_and_alpha_read_back() {
+  both("target-read", target_read_back, exact());
+}
+
+// The depth a pass wrote, sampled as a texture: a shadow map's path.
+fn depth_sampled(dev: gpu::Device) -> vector<u32> {
+  inner = dev.pipeline(flat(), gpu::State { depth: gpu::DEPTH_TEST_WRITE, into: gpu::INTO_DEPTH }) ?? return [];
+  outer = dev.pipeline(depth_shown(), gpu::State {}) ?? return [];
+  b_left = dev.buffer(rect(-1.0, -1.0, 0.0, 1.0, false));
+  b_low = dev.buffer(rect(-1.0, -1.0, 1.0, -0.25, false));
+  b_frame = dev.buffer(frame8());
+  depth = dev.depth_texture(32, 24);
+  target = dev.depth_target(depth);
+  u = inner.block();
+  dev.begin(target, gpu::CLEAR, 0);
+  dev.bind(inner);
+  u.f4(0, 1.0, 1.0, 1.0, 1.0);
+  u.f1(1, -0.5);
+  dev.uniforms(u);
+  dev.vertices(b_left);
+  dev.draw(0, 6);
+  u.f1(1, 0.25);
+  dev.uniforms(u);
+  dev.vertices(b_low);
+  dev.draw(0, 6);
+  dev.end();
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(outer);
+  dev.sample(0, depth);
+  dev.vertices(b_frame);
+  dev.draw(0, 6);
+  dev.end();
+  dev.capture()
+}
+
+fn test_a_depth_target_sampled_as_a_texture() {
+  both("depth-sampled", depth_sampled, exact());
+}
+
+// A matrix, an array of vectors and a float in one block: a rectangle turned a quarter and
+// moved, coloured by the array entry the float picks.
+fn matrix_block(dev: gpu::Device) -> vector<u32> {
+  pipe = dev.pipeline(matrixed(), gpu::State {}) ?? return [];
+  b = dev.buffer(rect(-0.5, -0.25, 0.5, 0.25, false));
+  u = pipe.block();
+  // column-major: x' = -y * 0.8 + 0.3, y' = x * 0.8 - 0.1
+  u.mat4(0, [0.0, 0.8, 0.0, 0.0, -0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.3, -0.1, 0.0, 1.0]);
+  u.f4_at(1, 0, 1.0, 0.0, 0.0, 1.0);
+  u.f4_at(1, 1, 0.0, 1.0, 0.0, 1.0);
+  u.f4_at(1, 2, 1.0, 0.5, 0.0, 1.0);
+  u.f1(2, 2.0);
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(pipe);
+  dev.uniforms(u);
+  dev.vertices(b);
+  dev.draw(0, 6);
+  dev.end();
+  dev.capture()
+}
+
+fn test_a_matrix_and_an_array_in_the_block() {
+  both("matrix-block", matrix_block, exact());
+}
+
+// A buffer, a texture and the block rewritten between two draws of one pass: each draw reads
+// what was there when it was drawn.
+fn rewritten_mid_pass(dev: gpu::Device) -> vector<u32> {
+  pipe = dev.pipeline(flat(), gpu::State {}) ?? return [];
+  show = dev.pipeline(textured(), gpu::State { blend: gpu::blend(gpu::ONE, gpu::ONE) }) ?? return [];
+  b = dev.buffer(rect(-1.0, -1.0, 0.0, 0.0, false));
+  half = dev.buffer(frame8());
+  t = dev.texture_from([0xFF400000 as u32], 1, 1);
+  u = pipe.block();
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(pipe);
+  u.f4(0, 1.0, 0.0, 0.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(b);
+  dev.draw(0, 6);
+  b.update(rect(0.0, 0.0, 1.0, 1.0, false));
+  u.f4(0, 0.0, 1.0, 0.0, 1.0);
+  dev.uniforms(u);
+  dev.draw(0, 6);
+  dev.bind(show);
+  dev.sample(0, t);
+  dev.vertices(half);
+  dev.draw(0, 6);
+  t.put(0, 0, [0xFF000040 as u32], 1, 1);
+  dev.bind(show);
+  dev.sample(0, t);
+  dev.vertices(half);
+  dev.draw(0, 6);
+  dev.end();
+  dev.capture()
+}
+
+fn test_what_is_rewritten_mid_pass_is_read_in_order() {
+  both("rewritten", rewritten_mid_pass, exact());
+}
+
+// A checkerboard drawn small: through its smaller copies it shows their mixture.
+fn mipmapped(dev: gpu::Device) -> vector<u32> {
+  pipe = dev.pipeline(textured(), gpu::State {}) ?? return [];
+  b = dev.buffer(frame8());
+  t = dev.texture_from(checker(), 64, 64);
+  t.mipmaps();
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(pipe);
+  dev.sample(0, t);
+  dev.vertices(b);
+  dev.viewport(4, 4, 16, 8);
+  dev.draw(0, 6);
+  dev.end();
+  dev.capture()
+}
+
+fn test_mipmaps() {
+  both("mipmaps", mipmapped, exact());
+}
+
+// A frame drawn twice, presented between: a window keeps its pixels and its alpha at 1.
+fn presented(dev: gpu::Device) -> vector<u32> {
+  pipe = dev.pipeline(flat(), gpu::State { blend: gpu::blend(gpu::DST_ALPHA, gpu::ONE_MINUS_DST_ALPHA) }) ?? return [];
+  b = dev.buffer(rect(-0.5, -0.5, 0.5, 0.5, false));
+  u = pipe.block();
+  for frame in 0..3 {
+    _ = dev.poll();
+    dev.begin_window(gpu::CLEAR, 0x00102030);
+    dev.bind(pipe);
+    u.f4(0, 0.25 * frame as float, 1.0, 0.5, 0.0);
+    dev.uniforms(u);
+    dev.vertices(b);
+    dev.draw(0, 6);
+    dev.end();
+    if frame < 2 { dev.present(); }
+  }
+  dev.capture()
+}
+
+fn test_a_presented_window_with_its_alpha_held_at_one() {
+  both("presented", presented, exact());
+}
+
+// ── a shader that does not fit its program builds no pipeline ──
+
+const WRONG_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(std140) uniform Block {{ vec3 tint; float z; }};
+void main() {{ gl_Position = vec4(pos.xy + tint.xy, z, 1.0); }}
+`;
+
+const PLAIN_F: text = `
+#version 330 core
+out vec4 frag;
+void main() {{ frag = vec4(1.0); }}
+`;
+
+const SHORT_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(std140) uniform Block {{ vec4 color; }};
+void main() {{ gl_Position = vec4(pos.xy + color.xy, 0.0, 1.0); }}
+`;
+
+const FAR_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(location = 3) in vec2 uv;
+void main() {{ gl_Position = vec4(pos.xy + uv, 0.0, 1.0); }}
+`;
+
+// SPIR-V of WRONG_V (vertex), written by gpu_vulkan/spirv.py: do not edit.
+const WRONG_V_SPV: text = `AwIjBwADAQALAAgAKAAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABwAAAAAABAAAAG1haW4AAAAADQAAABIAAABHAAMACwAAAAIAAABIAAUACwAAAAAA
+AAALAAAAAAAAAEgABQALAAAAAQAAAAsAAAABAAAASAAFAAsAAAACAAAACwAAAAMAAABIAAUACwAA
+AAMAAAALAAAABAAAAEcABAASAAAAHgAAAAAAAABHAAMAFgAAAAIAAABIAAUAFgAAAAAAAAAjAAAA
+AAAAAEgABQAWAAAAAQAAACMAAAAMAAAARwAEABgAAAAhAAAAAAAAAEcABAAYAAAAIgAAAAAAAAAT
+AAIAAgAAACEAAwADAAAAAgAAABYAAwAGAAAAIAAAABcABAAHAAAABgAAAAQAAAAVAAQACAAAACAA
+AAAAAAAAKwAEAAgAAAAJAAAAAQAAABwABAAKAAAABgAAAAkAAAAeAAYACwAAAAcAAAAGAAAACgAA
+AAoAAAAgAAQADAAAAAMAAAALAAAAOwAEAAwAAAANAAAAAwAAABUABAAOAAAAIAAAAAEAAAArAAQA
+DgAAAA8AAAAAAAAAFwAEABAAAAAGAAAAAwAAACAABAARAAAAAQAAABAAAAA7AAQAEQAAABIAAAAB
+AAAAFwAEABMAAAAGAAAAAgAAAB4ABAAWAAAAEAAAAAYAAAAgAAQAFwAAAAIAAAAWAAAAOwAEABcA
+AAAYAAAAAgAAACAABAAZAAAAAgAAABAAAAArAAQADgAAAB4AAAABAAAAIAAEAB8AAAACAAAABgAA
+ACsABAAGAAAAIgAAAAAAgD8gAAQAJgAAAAMAAAAHAAAANgAFAAIAAAAEAAAAAAAAAAMAAAD4AAIA
+BQAAAD0ABAAQAAAAFAAAABIAAABPAAcAEwAAABUAAAAUAAAAFAAAAAAAAAABAAAAQQAFABkAAAAa
+AAAAGAAAAA8AAAA9AAQAEAAAABsAAAAaAAAATwAHABMAAAAcAAAAGwAAABsAAAAAAAAAAQAAAIEA
+BQATAAAAHQAAABUAAAAcAAAAQQAFAB8AAAAgAAAAGAAAAB4AAAA9AAQABgAAACEAAAAgAAAAUQAF
+AAYAAAAjAAAAHQAAAAAAAABRAAUABgAAACQAAAAdAAAAAQAAAFAABwAHAAAAJQAAACMAAAAkAAAA
+IQAAACIAAABBAAUAJgAAACcAAAANAAAADwAAAD4AAwAnAAAAJQAAAP0AAQA4AAEA`;
+
+// SPIR-V of PLAIN_F (fragment), written by gpu_vulkan/spirv.py: do not edit.
+const PLAIN_F_SPV: text = `AwIjBwADAQALAAgADAAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABgAEAAAABAAAAG1haW4AAAAACQAAABAAAwAEAAAABwAAAEcABAAJAAAAHgAAAAAA
+AAATAAIAAgAAACEAAwADAAAAAgAAABYAAwAGAAAAIAAAABcABAAHAAAABgAAAAQAAAAgAAQACAAA
+AAMAAAAHAAAAOwAEAAgAAAAJAAAAAwAAACsABAAGAAAACgAAAAAAgD8sAAcABwAAAAsAAAAKAAAA
+CgAAAAoAAAAKAAAANgAFAAIAAAAEAAAAAAAAAAMAAAD4AAIABQAAAD4AAwAJAAAACwAAAP0AAQA4
+AAEA`;
+
+// SPIR-V of SHORT_V (vertex), written by gpu_vulkan/spirv.py: do not edit.
+const SHORT_V_SPV: text = `AwIjBwADAQALAAgAJQAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABwAAAAAABAAAAG1haW4AAAAADQAAABIAAABHAAMACwAAAAIAAABIAAUACwAAAAAA
+AAALAAAAAAAAAEgABQALAAAAAQAAAAsAAAABAAAASAAFAAsAAAACAAAACwAAAAMAAABIAAUACwAA
+AAMAAAALAAAABAAAAEcABAASAAAAHgAAAAAAAABHAAMAFgAAAAIAAABIAAUAFgAAAAAAAAAjAAAA
+AAAAAEcABAAYAAAAIQAAAAAAAABHAAQAGAAAACIAAAAAAAAAEwACAAIAAAAhAAMAAwAAAAIAAAAW
+AAMABgAAACAAAAAXAAQABwAAAAYAAAAEAAAAFQAEAAgAAAAgAAAAAAAAACsABAAIAAAACQAAAAEA
+AAAcAAQACgAAAAYAAAAJAAAAHgAGAAsAAAAHAAAABgAAAAoAAAAKAAAAIAAEAAwAAAADAAAACwAA
+ADsABAAMAAAADQAAAAMAAAAVAAQADgAAACAAAAABAAAAKwAEAA4AAAAPAAAAAAAAABcABAAQAAAA
+BgAAAAMAAAAgAAQAEQAAAAEAAAAQAAAAOwAEABEAAAASAAAAAQAAABcABAATAAAABgAAAAIAAAAe
+AAMAFgAAAAcAAAAgAAQAFwAAAAIAAAAWAAAAOwAEABcAAAAYAAAAAgAAACAABAAZAAAAAgAAAAcA
+AAArAAQABgAAAB4AAAAAAAAAKwAEAAYAAAAfAAAAAACAPyAABAAjAAAAAwAAAAcAAAA2AAUAAgAA
+AAQAAAAAAAAAAwAAAPgAAgAFAAAAPQAEABAAAAAUAAAAEgAAAE8ABwATAAAAFQAAABQAAAAUAAAA
+AAAAAAEAAABBAAUAGQAAABoAAAAYAAAADwAAAD0ABAAHAAAAGwAAABoAAABPAAcAEwAAABwAAAAb
+AAAAGwAAAAAAAAABAAAAgQAFABMAAAAdAAAAFQAAABwAAABRAAUABgAAACAAAAAdAAAAAAAAAFEA
+BQAGAAAAIQAAAB0AAAABAAAAUAAHAAcAAAAiAAAAIAAAACEAAAAeAAAAHwAAAEEABQAjAAAAJAAA
+AA0AAAAPAAAAPgADACQAAAAiAAAA/QABADgAAQA=`;
+
+// SPIR-V of FAR_V (vertex), written by gpu_vulkan/spirv.py: do not edit.
+const FAR_V_SPV: text = `AwIjBwADAQALAAgAIQAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ACAAAAAAABAAAAG1haW4AAAAADQAAABIAAAAXAAAARwADAAsAAAACAAAASAAFAAsA
+AAAAAAAACwAAAAAAAABIAAUACwAAAAEAAAALAAAAAQAAAEgABQALAAAAAgAAAAsAAAADAAAASAAF
+AAsAAAADAAAACwAAAAQAAABHAAQAEgAAAB4AAAAAAAAARwAEABcAAAAeAAAAAwAAABMAAgACAAAA
+IQADAAMAAAACAAAAFgADAAYAAAAgAAAAFwAEAAcAAAAGAAAABAAAABUABAAIAAAAIAAAAAAAAAAr
+AAQACAAAAAkAAAABAAAAHAAEAAoAAAAGAAAACQAAAB4ABgALAAAABwAAAAYAAAAKAAAACgAAACAA
+BAAMAAAAAwAAAAsAAAA7AAQADAAAAA0AAAADAAAAFQAEAA4AAAAgAAAAAQAAACsABAAOAAAADwAA
+AAAAAAAXAAQAEAAAAAYAAAADAAAAIAAEABEAAAABAAAAEAAAADsABAARAAAAEgAAAAEAAAAXAAQA
+EwAAAAYAAAACAAAAIAAEABYAAAABAAAAEwAAADsABAAWAAAAFwAAAAEAAAArAAQABgAAABoAAAAA
+AAAAKwAEAAYAAAAbAAAAAACAPyAABAAfAAAAAwAAAAcAAAA2AAUAAgAAAAQAAAAAAAAAAwAAAPgA
+AgAFAAAAPQAEABAAAAAUAAAAEgAAAE8ABwATAAAAFQAAABQAAAAUAAAAAAAAAAEAAAA9AAQAEwAA
+ABgAAAAXAAAAgQAFABMAAAAZAAAAFQAAABgAAABRAAUABgAAABwAAAAZAAAAAAAAAFEABQAGAAAA
+HQAAABkAAAABAAAAUAAHAAcAAAAeAAAAHAAAAB0AAAAaAAAAGwAAAEEABQAfAAAAIAAAAA0AAAAP
+AAAAPgADACAAAAAeAAAA/QABADgAAQA=`;
+
+fn program(vertex: text, block: vector<integer>, textures: integer) -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3],
+    instance: [],
+    block: block,
+    textures: textures,
+    sources: [gpu::source("spirv", vertex, PLAIN_F_SPV)],
+  }
+}
+
+fn test_a_shader_that_does_not_fit_builds_no_pipeline() {
+  if !display() { return; }
+  dev = gpu::open(gpu_vulkan::table(), 64, 48, "vk-wrong") ?? return assert(false, "no Vulkan device");
+  // declared as a vector and a float (the float at byte 16); a vec3 puts it at byte 12
+  assert(dev.pipeline(program(WRONG_V_SPV, [gpu::F4, gpu::F1], 0), gpu::State {}) == null, "the float sits at byte 12 in the shader and 16 in the program");
+  // every field the shader has is where the program has one; only the size differs
+  assert(dev.pipeline(program(SHORT_V_SPV, [gpu::F4, gpu::F1], 0), gpu::State {}) == null, "the shader's block is 16 bytes and the program's 32");
+  // a block the program does not declare
+  assert(dev.pipeline(program(SHORT_V_SPV, [], 0), gpu::State {}) == null, "the shader has a block and the program none");
+  // an input past the program's
+  assert(dev.pipeline(program(FAR_V_SPV, [], 0), gpu::State {}) == null, "the shader reads location 3 of one input");
+  // not SPIR-V at all
+  assert(dev.pipeline(program("not base64 at all!", [], 0), gpu::State {}) == null, "text that is not SPIR-V");
+  assert(dev.pipeline(program(PLAIN_F_SPV, [], 0), gpu::State {}) == null, "a fragment stage given as the vertex one");
+  assert(dev.pipeline(program(SHORT_V_SPV, [gpu::F4], 0), gpu::State {}) != null, "and a program the shader fits builds");
+}

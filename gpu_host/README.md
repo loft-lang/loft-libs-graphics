@@ -23,9 +23,12 @@ Each backend is asked in turn, and the first that opens a window serves the prog
 |---|---|---|
 | 1 | [`gpu_metal`](../gpu_metal/README.md) | A Mac |
 | 2 | [`gpu_gl`](../gpu_gl/README.md) | Linux, Android, a browser page, and a Mac with no Metal |
+| 3 | [`gpu_vulkan`](../gpu_vulkan/README.md) | Linux, where OpenGL opens no window; by name (`GPU_HOST=gpu_vulkan`, `open_on`) otherwise |
 
 Metal is first on a Mac because it draws the same picture as OpenGL at the same cost a frame
 (`bench/backends.loft` measures both), and OpenGL on a Mac gets no further work from its maker.
+Vulkan comes after OpenGL until `bench/backends.loft` has timed the two on a Linux machine's
+own display: under Xvfb OpenGL is llvmpipe, drawn on the CPU, and no measure of the order.
 
 | Call | What it does |
 |---|---|
@@ -35,7 +38,7 @@ Metal is first on a Mac because it draws the same picture as OpenGL at the same 
 | `open_on(backend, width, height, title)` | A window on that backend alone: for a test or a measurement that compares two |
 
 The environment variable `GPU_HOST` names the one backend `open` and `open_fullscreen` ask
-(`GPU_HOST=gpu_gl`): for comparing two backends with a program as it is, not for a game to set.
+(`GPU_HOST=gpu_vulkan`): for comparing two backends with a program as it is, not for a game to set.
 
 A program's shaders carry a source for each backend it may meet; a device of a backend a
 program has no source for builds no pipeline (`dev.pipeline` answers null).
