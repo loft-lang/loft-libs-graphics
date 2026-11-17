@@ -148,11 +148,15 @@ typedef struct gm_res {
     int kind;
     gm_id obj;   /* the MTLBuffer, MTLTexture or MTLRenderPipelineState */
     int64_t held; /* a texture: the targets that draw into it, and its own handle */
+    /* a buffer: how many bytes it has room for, and one put aside while a frame still read it */
+    unsigned long room, spare_room;
+    gm_id spare, spare_used;
     /* a texture */
     int width, height, depth;
     int min_nearest, mag_nearest, mipped; /* how it is sampled */
     int levels;                           /* 1, or its whole chain once `mipmaps` was asked */
-    gm_id used; /* the last command buffer that reads or draws into it: a `put` waits for it */
+    gm_id used; /* the last command buffer that reads it or draws into it: a texture's `put`
+                 * waits for it, a buffer's `update` writes elsewhere while it is in flight */
     /* a target */
     struct gm_res *colour, *zbuf;
     /* a pipeline */
@@ -209,7 +213,22 @@ static struct {
     gm_window *open;
 } gm;
 
+/* A selector by its name: registered once, then found by the name's own address (every name
+ * here is a string in this file), so a message costs no lookup by text. */
 static gm_sel gm_s(const char *name) {
+    static struct {
+        const char *name;
+        gm_sel sel;
+    } known[512];
+    size_t at = ((size_t) (uintptr_t) name >> 3) & 511u, tries;
+    for (tries = 0; tries < 512; tries++, at = (at + 1) & 511u) {
+        if (known[at].name == name) return known[at].sel;
+        if (!known[at].name) {
+            known[at].sel = gm.selector(name);
+            known[at].name = name;
+            return known[at].sel;
+        }
+    }
     return gm.selector(name);
 }
 static gm_id gm_class(const char *name) {
@@ -878,6 +897,16 @@ static gm_id gm_bytes(const void *data, int64_t bytes) {
         gm.device, gm_s("newBufferWithBytes:length:options:"), data, (unsigned long) bytes, 0ul);
 }
 
+/* Whether the GPU work `cb` (none: 0) has not finished: not handed over yet, or still running. */
+static int gm_in_flight(gm_id cb) {
+    return cb && gm_l(cb, "status") < 4ul; /* MTLCommandBufferStatusCompleted */
+}
+
+/* The pass in progress reads `r` (a buffer or a texture): remembered until that work is done. */
+static void gm_reads(gm_window *w, gm_res *r) {
+    if (r->used != w->cb) gm_keep(&r->used, w->cb);
+}
+
 static int64_t gm_buffer(int64_t dev, const float *data, int64_t n) {
     gm_res *r;
     void *pool;
@@ -886,6 +915,7 @@ static int64_t gm_buffer(int64_t dev, const float *data, int64_t n) {
     if (!r) return 0;
     pool = gm.pool_push();
     r->obj = gm_bytes(data, n * 4);
+    r->room = (unsigned long) (n > 0 ? n * 4 : 4);
     gm.pool_pop(pool);
     return (int64_t) (intptr_t) r;
 }
@@ -909,14 +939,34 @@ static int64_t gm_index_buffer(int64_t dev, const int64_t *idx, int64_t n) {
     return (int64_t) (intptr_t) r;
 }
 
-/* New floats are a new buffer: a frame already handed over keeps the one it was drawn with. */
+/* New floats.  A frame already handed over keeps the ones it was drawn with: while one still
+ * reads this buffer the new floats go into another — the one put aside on an earlier update,
+ * once its own frame is done, or a new one — so floats replaced every frame move between two
+ * buffers and none is made after the first frames. */
 static void gm_buffer_update(int64_t buf, const float *data, int64_t n) {
     gm_res *r = gm_res_of(buf, GM_BUFFER);
+    unsigned long bytes = (unsigned long) (n > 0 ? n * 4 : 0);
     void *pool;
     if (!r || n < 0 || gm.loaded <= 0) return;
     pool = gm.pool_push();
-    gm_drop(&r->obj);
-    r->obj = gm_bytes(data, n * 4);
+    if (gm_in_flight(r->used)) {
+        gm_id obj = r->obj, used = r->used;
+        unsigned long room = r->room;
+        r->obj = r->spare;
+        r->used = r->spare_used;
+        r->room = r->spare_room;
+        r->spare = obj;
+        r->spare_used = used;
+        r->spare_room = room;
+    }
+    if (!r->obj || r->room < bytes || gm_in_flight(r->used)) {
+        gm_drop(&r->obj); /* a frame that reads it keeps it */
+        r->room = bytes + bytes / 2 > 4 ? bytes + bytes / 2 : 4; /* room to grow into */
+        r->obj = ((gm_id (*)(gm_id, gm_sel, unsigned long, unsigned long)) gm.msg)(
+            gm.device, gm_s("newBufferWithLength:options:"), r->room, 0ul);
+    }
+    gm_drop(&r->used);
+    if (r->obj && bytes > 0) memcpy(gm_o(r->obj, "contents"), data, bytes);
     gm.pool_pop(pool);
 }
 
@@ -1297,6 +1347,9 @@ static void gm_release(int64_t h) {
             gm_texture_unhold(r->zbuf);
         }
         gm_drop(&r->obj);
+        gm_drop(&r->used);
+        gm_drop(&r->spare);
+        gm_drop(&r->spare_used);
         gm_drop(&r->depth_state);
         r->magic = 0;
         free(r);
@@ -1472,23 +1525,25 @@ static void gm_sample(int64_t dev, int64_t slot, int64_t tex) {
     gm_v_ol(w->enc, "setFragmentTexture:atIndex:", t->obj, (unsigned long) slot);
     gm_v_ol(w->enc, "setVertexSamplerState:atIndex:", sampler, (unsigned long) slot);
     gm_v_ol(w->enc, "setFragmentSamplerState:atIndex:", sampler, (unsigned long) slot);
-    gm_keep(&t->used, w->cb);
+    gm_reads(w, t);
     gm.pool_pop(pool);
 }
 
 static void gm_vertices(int64_t dev, int64_t buf) {
     gm_window *w = gm_of(dev);
     gm_res *b = gm_res_of(buf, GM_BUFFER);
-    if (!gm_use(w, "vertices") || !w->enc || !w->pipe || !b) return;
+    if (!gm_use(w, "vertices") || !w->enc || !w->pipe || !b || !b->obj) return;
     gm_v_oll(w->enc, "setVertexBuffer:offset:atIndex:", b->obj, 0, GM_SLOT_VERTEX);
+    gm_reads(w, b);
 }
 
 static void gm_instances(int64_t dev, int64_t buf, int64_t first_float) {
     gm_window *w = gm_of(dev);
     gm_res *b = gm_res_of(buf, GM_BUFFER);
-    if (!gm_use(w, "instances") || !w->enc || !w->pipe || !b || first_float < 0) return;
+    if (!gm_use(w, "instances") || !w->enc || !w->pipe || !b || !b->obj || first_float < 0) return;
     gm_v_oll(w->enc, "setVertexBuffer:offset:atIndex:", b->obj, (unsigned long) first_float * 4,
              GM_SLOT_COPY);
+    gm_reads(w, b);
     w->has_copies = 1;
 }
 
