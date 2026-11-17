@@ -1,0 +1,136 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// What `gpu` promises of every backend and OpenGL does not give by itself, against values
+// worked out by hand: a texture changed between two draws of a pass, and a window that has no
+// alpha and reads back the frame it shows.
+// Without a display every test returns at once (`DISPLAY`, or `GRAPHICS_TEST_WINDOW=1` on a
+// Mac).
+use gpu;
+use gpu_gl;
+
+fn display() -> boolean {
+  (env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1"
+}
+
+const TEX_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(location = 1) in vec2 uv;
+out vec2 v_uv;
+void main() {{ v_uv = uv; gl_Position = vec4(pos, 1.0); }}
+`;
+
+const TEX_F: text = `
+#version 330 core
+uniform sampler2D tex0;
+in vec2 v_uv;
+out vec4 frag;
+void main() {{ frag = texture(tex0, v_uv); }}
+`;
+
+fn textured() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3, gpu::F2],
+    instance: [],
+    block: [],
+    textures: 1,
+    sources: [gpu::source("glsl-330", TEX_V, TEX_F)],
+  }
+}
+
+// The rectangle (x0, y0)-(x1, y1) with the whole texture over it.
+fn frame(x0: float, y0: float, x1: float, y1: float) -> vector<single> {
+  xy = [x0, y0, x1, y0, x1, y1, x0, y0, x1, y1, x0, y1];
+  uv = [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+  out: vector<single> = [];
+  for i in 0..6 {
+    out += [xy[2 * i] as single, xy[2 * i + 1] as single, 0.0f, uv[2 * i] as single, uv[2 * i + 1] as single];
+  }
+  out
+}
+
+// A 4 x 4 picture, every pixel its own colour, half transparent: pixel i is red 40 + 12 i,
+// green 250 - 13 i, blue 30 + 17 (i % 5).
+fn picture() -> vector<u32> {
+  out: vector<u32> = [];
+  for i in 0..16 {
+    r = 40 + 12 * i;
+    g = 250 - 13 * i;
+    b = 17 * (i % 5) + 30;
+    out += [((0x80000000 | (r << 16) | (g << 8) | b) & 4294967295) as u32];
+  }
+  out
+}
+
+// Pixel 9 of the picture (column 1, row 2) covers x 8..15 and the rows 12..23 from the top of
+// a 32 x 48 rectangle; opaque, as a window shows it.
+const NINTH = 0xFF948562;
+const PATCH = 0xFF00FF00;
+
+fn test_a_texture_put_and_refiltered_between_two_draws_of_a_pass() {
+  if !display() { return; }
+  dev = gpu::open(gpu_gl::table(), 64, 48, "in order") ?? return assert(false, "no device");
+  pipe = dev.pipeline(textured(), gpu::State {}) ?? return assert(false, "no pipeline");
+  left = dev.buffer(frame(-1.0, -1.0, 0.0, 1.0));
+  right = dev.buffer(frame(0.0, -1.0, 1.0, 1.0));
+  t = dev.texture_from(picture(), 4, 4);
+  t.nearest(true);
+  dev.begin_window(gpu::CLEAR, 0x40203040);
+  dev.bind(pipe);
+  dev.sample(0, t);
+  dev.vertices(left);
+  dev.draw(0, 6);
+  t.put(1, 2, [PATCH as u32, PATCH as u32], 2, 1);
+  dev.vertices(right);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture();
+  assert(c[18 * 64 + 12] as integer == NINTH, "drawn before the put: {c[18 * 64 + 12]:x}");
+  assert(c[18 * 64 + 44] as integer == PATCH, "drawn after the put: {c[18 * 64 + 44]:x}");
+  // sampled between its pixels from here on: a pixel off a texel's middle is a mix
+  dev.begin_window(gpu::CLEAR, 0x40203040);
+  dev.bind(pipe);
+  dev.sample(0, t);
+  dev.vertices(left);
+  dev.draw(0, 6);
+  t.nearest(false);
+  dev.vertices(right);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture();
+  assert(c[18 * 64 + 9] as integer == PATCH, "drawn nearest: {c[18 * 64 + 9]:x}");
+  assert(c[18 * 64 + 41] as integer != PATCH, "drawn between its pixels: {c[18 * 64 + 41]:x}");
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+}
+
+fn test_a_window_has_no_alpha_and_reads_back_the_frame_it_shows() {
+  if !display() { return; }
+  dev = gpu::open(gpu_gl::table(), 64, 48, "window") ?? return assert(false, "no device");
+  pipe = dev.pipeline(textured(), gpu::State {}) ?? return assert(false, "no pipeline");
+  left = dev.buffer(frame(-1.0, -1.0, 0.0, 1.0));
+  t = dev.texture_from(picture(), 4, 4);
+  t.nearest(true);
+  for round in 0..3 {
+    dev.begin_window(gpu::CLEAR, 0x40203040l + 0x200000l * (round as i64));
+    dev.bind(pipe);
+    dev.sample(0, t);
+    dev.vertices(left);
+    dev.draw(0, 6);
+    dev.end();
+    before = dev.capture();
+    for p in before {
+      assert((p as integer >> 24) & 255 == 255, "round {round}: pixel {p#index} reads back {p:x}");
+    }
+    assert(before[18 * 64 + 12] as integer == NINTH, "round {round}: the picture, {before[18 * 64 + 12]:x}");
+    assert(before[18 * 64 + 44] as integer == 0xFF203040 + 0x200000 * round, "round {round}: the cleared part, {before[18 * 64 + 44]:x}");
+    dev.present();
+    after = dev.capture();
+    differ = 0;
+    for p in before {
+      if p != (after[p#index] ?? 0) { differ += 1; }
+    }
+    assert(differ == 0, "round {round}: {differ} pixels differ once the frame was presented");
+  }
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+}

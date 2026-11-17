@@ -473,6 +473,7 @@ pub fn texture_from(self: const Device, pixels: const vector<u32>, width: intege
 }
 
 // Replace the `width` x `height` pixels at (`x`, `y`), counted from the texture's first pixel.
+// Inside a pass, what was drawn before this call shows the pixels as they were.
 pub fn put(self: const Texture, x: integer, y: integer, pixels: const vector<u32>, width: integer, height: integer) {
   if len(pixels) >= width * height { gp_texture_put(self.handle, x, y, width, height, pixels); }
 }
@@ -483,13 +484,14 @@ pub fn put_rgb565(self: const Texture, x: integer, y: integer, pixels: const vec
   if len(pixels) >= width * height { gp_texture_put565(self.handle, x, y, width, height, pixels); }
 }
 
-// Sample the nearest pixel (pixel art), or between pixels (how a texture starts).
+// Sample the nearest pixel (pixel art), or between pixels (how a texture starts).  It holds
+// for every draw after this call, also of a pass that named the texture before it.
 pub fn nearest(self: const Texture, on: boolean) {
   gp_texture_nearest(self.handle, if on { 1 } else { 0 });
 }
 
 // Build smaller copies from the pixels it holds now and sample through them when it is drawn
-// small; call again after `put`.
+// small; call again after `put`, or after drawing into it.
 pub fn mipmaps(self: const Texture) {
   gp_texture_mipmaps(self.handle);
 }
@@ -858,7 +860,8 @@ pub fn present(self: Device) {
   gp_present(self.handle);
 }
 
-// The window's pixels as they are now, 0xAARRGGBB, top row first, `width()` to a row.
+// The window's pixels as they are now, 0xAARRGGBB, top row first, `width()` to a row.  A window
+// has no alpha: every pixel reads opaque.
 pub fn capture(self: const Device) -> vector<u32> {
   out: vector<u32> = [for _ in 0..self.width() * self.height() { 0 as u32 }];
   gp_capture(self.handle, 0, out);

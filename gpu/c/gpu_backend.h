@@ -7,7 +7,14 @@
  * address of one `gpu_backend` (0 where its stack is absent on this machine).  Handles are the
  * backend's own numbers, 0 for none.  `gpu` checks every call before it arrives here: a
  * backend sees a draw only inside a pass, with a pipeline built for that pass's target, its
- * block and every texture slot set. */
+ * block and every texture slot set.
+ *
+ * What `gpu` does not check and a backend keeps:
+ *   - a call takes effect where it is made: `texture_put`, `texture_put565`, `texture_nearest`,
+ *     `texture_mipmaps` and `buffer_update` may come between two draws of a pass, for a texture
+ *     the pass samples or draws into, and change the second draw only;
+ *   - a window has no alpha: it is cleared opaque, no draw writes its alpha, and `capture`
+ *     answers 0xFF in every pixel's high byte. */
 #ifndef GPU_BACKEND_H
 #define GPU_BACKEND_H
 #include <stdint.h>

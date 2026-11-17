@@ -763,3 +763,299 @@ fn test_a_depth_alone_and_a_colour_alone() {
   if !display() { return; }
   agree(depth_alone(gpu_gl::table()), depth_alone(gpu_metal::table()), "a depth target and a colour target", 0, 0);
 }
+
+// ── calls in the order they are made ──
+//
+// A texture written, re-filtered or given its smaller copies between two draws of one pass: the
+// first draw shows it as it was, the second as it is.
+
+fn checker() -> vector<u32> {
+  px: vector<u32> = [];
+  for i in 0..32 * 32 {
+    on = (((i % 32) / 4) + ((i / 32) / 4)) % 2 == 0;
+    px += [if on { 0xFFFFE010 as u32 } else { 0xFF2040C0 as u32 }];
+  }
+  px
+}
+
+fn put_in_a_pass(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "put in a pass") ?? return [];
+  pipe = dev.pipeline(textured(), gpu::State {}) ?? return [];
+  left = dev.buffer(frame8(-1.0, -1.0, 0.0, 1.0));
+  right = dev.buffer(frame8(0.0, -1.0, 1.0, 1.0));
+  low = dev.buffer(frame8(-0.5, -1.0, 0.5, -0.5));
+  t = dev.texture_from(picture(4), 4, 4);
+  t.nearest(true);
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(pipe);
+  dev.sample(0, t);
+  dev.vertices(left);
+  dev.draw(0, 6);
+  t.put(1, 2, [0xFF00FF00 as u32, 0xFFFF00FF as u32], 2, 1);
+  dev.vertices(right);
+  dev.draw(0, 6);
+  t.put_rgb565(0, 0, [63488 as i32, 2016 as i32, 31 as i32, 33800 as i32], 2, 2);
+  dev.vertices(low);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_a_texture_put_between_two_draws_of_a_pass() {
+  if !display() { return; }
+  gl = put_in_a_pass(gpu_gl::table());
+  // the left half holds the picture as it was, the right half the patch
+  assert(gl[20 * 64 + 12] != gl[20 * 64 + 44], "the patch shows on the right only");
+  agree(gl, put_in_a_pass(gpu_metal::table()), "a texture put inside a pass", 0, 0);
+}
+
+// The pass's own colour written between two of its draws: over the first, under the second.
+fn put_on_the_target(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "put on the target") ?? return [];
+  only = dev.pipeline(flat(), gpu::State { into: gpu::INTO_COLOUR }) ?? return [];
+  b_left = dev.buffer(rect(-1.0, -1.0, 0.0, 1.0, false));
+  b_low = dev.buffer(rect(-1.0, -1.0, 1.0, -0.5, false));
+  colour = dev.texture(16, 12);
+  target = dev.colour_target(colour);
+  u = only.block();
+  dev.begin(target, gpu::CLEAR, 0xFF404040);
+  dev.bind(only);
+  u.f4(0, 1.0, 0.0, 0.0, 1.0);
+  u.f1(1, 0.0);
+  dev.uniforms(u);
+  dev.vertices(b_left);
+  dev.draw(0, 6);
+  patch: vector<u32> = [for i in 0..6 * 12 { ((0xFF00FF00 + 3 * i) & 4294967295) as u32 }];
+  colour.put(5, 0, patch, 6, 12);
+  u.f4(0, 0.0, 0.0, 1.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(b_low);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture_of(target);
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_a_pass_whose_own_colour_is_put_between_two_draws() {
+  if !display() { return; }
+  agree(put_on_the_target(gpu_gl::table()), put_on_the_target(gpu_metal::table()), "the target put inside its pass", 0, 0);
+}
+
+// Nearest and between, changed after the texture was named for the pass: each draw is sampled
+// the way that was asked last before it.
+fn filter_in_a_pass(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "filter in a pass") ?? return [];
+  pipe = dev.pipeline(textured(), gpu::State {}) ?? return [];
+  left = dev.buffer(frame8(-1.0, -1.0, 0.0, 1.0));
+  right = dev.buffer(frame8(0.0, -1.0, 1.0, 1.0));
+  t = dev.texture_from(picture(4), 4, 4);
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(pipe);
+  dev.sample(0, t);
+  t.nearest(true);
+  dev.vertices(left);
+  dev.draw(0, 6);
+  t.nearest(false);
+  dev.vertices(right);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_a_texture_filter_changed_between_two_draws_of_a_pass() {
+  if !display() { return; }
+  agree(filter_in_a_pass(gpu_gl::table()), filter_in_a_pass(gpu_metal::table()), "a filter changed inside a pass", 0, 0);
+}
+
+// Smaller copies asked for between two draws: the first small draw reads the picture itself,
+// the second its averages.
+fn mipmaps_in_a_pass(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "mipmaps in a pass") ?? return [];
+  pipe = dev.pipeline(textured(), gpu::State {}) ?? return [];
+  b = dev.buffer(frame8(-1.0, -1.0, 1.0, 1.0));
+  t = dev.texture_from(checker(), 32, 32);
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(pipe);
+  dev.sample(0, t);
+  dev.vertices(b);
+  dev.viewport(2, 2, 6, 6);
+  dev.draw(0, 6);
+  t.mipmaps();
+  dev.viewport(20, 4, 6, 6);
+  dev.draw(0, 6);
+  dev.viewport(30, 10, 32, 32);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_smaller_copies_asked_for_between_two_draws_of_a_pass() {
+  if !display() { return; }
+  agree(mipmaps_in_a_pass(gpu_gl::table()), mipmaps_in_a_pass(gpu_metal::table()), "mipmaps inside a pass", 0, 0);
+}
+
+// The pass's own colour given its smaller copies half way: they hold what was drawn before the
+// call, the texture itself also what was drawn after it.
+fn mipmaps_on_the_target(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "mipmaps on the target") ?? return [];
+  only = dev.pipeline(flat(), gpu::State { into: gpu::INTO_COLOUR }) ?? return [];
+  show = dev.pipeline(textured(), gpu::State {}) ?? return [];
+  b_left = dev.buffer(rect(-1.0, -1.0, 0.0, 1.0, false));
+  b_low = dev.buffer(rect(-1.0, -1.0, 1.0, 0.0, false));
+  b_frame = dev.buffer(frame8(-1.0, -1.0, 1.0, 1.0));
+  colour = dev.texture(32, 32);
+  target = dev.colour_target(colour);
+  u = only.block();
+  dev.begin(target, gpu::CLEAR, 0xFF404040);
+  dev.bind(only);
+  u.f4(0, 1.0, 0.0, 0.0, 1.0);
+  u.f1(1, 0.0);
+  dev.uniforms(u);
+  dev.vertices(b_left);
+  dev.draw(0, 6);
+  colour.mipmaps();
+  u.f4(0, 0.0, 1.0, 0.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(b_low);
+  dev.draw(0, 6);
+  dev.end();
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(show);
+  dev.sample(0, colour);
+  dev.vertices(b_frame);
+  dev.viewport(2, 2, 8, 8);
+  dev.draw(0, 6);
+  dev.viewport(30, 10, 32, 32);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_a_pass_whose_own_colour_is_given_smaller_copies() {
+  if !display() { return; }
+  agree(mipmaps_on_the_target(gpu_gl::table()), mipmaps_on_the_target(gpu_metal::table()), "mipmaps of the target inside its pass", 0, 0);
+}
+
+// ── the window ──
+
+// A window has no alpha: whatever a draw writes there, it reads back opaque and a blend by
+// what the window holds finds 1.
+fn window_alpha(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "alpha") ?? return [];
+  plain = dev.pipeline(tinted(), gpu::State {}) ?? return [];
+  by_held = dev.pipeline(tinted(), gpu::State { blend: gpu::blend(gpu::DST_ALPHA, gpu::ONE_MINUS_DST_ALPHA) }) ?? return [];
+  faint = dev.buffer([
+    -0.8f, -0.7f, 0.0f, 1.0f, 0.0f, 0.0f, 0.25f,
+    0.9f, -0.3f, 0.0f, 0.0f, 1.0f, 0.0f, 0.25f,
+    -0.1f, 0.8f, 0.0f, 0.0f, 0.0f, 1.0f, 0.25f
+  ]);
+  over = dev.buffer([
+    -0.9f, 0.9f, 0.0f, 1.0f, 1.0f, 0.0f, 0.5f,
+    0.2f, -0.9f, 0.0f, 1.0f, 1.0f, 0.0f, 0.5f,
+    0.9f, 0.6f, 0.0f, 1.0f, 1.0f, 0.0f, 0.5f
+  ]);
+  dev.begin_window(gpu::CLEAR, 0x40202020);
+  dev.bind(plain);
+  dev.vertices(faint);
+  dev.draw(0, 3);
+  dev.bind(by_held);
+  dev.vertices(over);
+  dev.draw(0, 3);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn opaque(c: const vector<u32>, what: text) {
+  for p in c {
+    assert((p as integer >> 24) & 255 == 255, "{what}: pixel {p#index} reads back {p:x}");
+  }
+}
+
+fn test_the_window_reads_back_opaque() {
+  if !display() { return; }
+  gl = window_alpha(gpu_gl::table());
+  metal = window_alpha(gpu_metal::table());
+  agree(gl, metal, "a window drawn with alpha", 0, 0);
+  opaque(metal, "through Metal");
+  opaque(gl, "through OpenGL");
+}
+
+// What the window shows is what a capture reads, before and after the frame was presented.
+fn shown(table: i64, present: boolean) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "shown") ?? return [];
+  pipe = dev.pipeline(tinted(), gpu::State {}) ?? return [];
+  corners = dev.buffer([
+    -0.8f, -0.7f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+    0.9f, -0.3f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,
+    -0.1f, 0.8f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f
+  ]);
+  for frame in 0..3 {
+    dev.begin_window(gpu::CLEAR, 0xFF202020l + 0x300000l * (frame as i64));
+    dev.bind(pipe);
+    dev.vertices(corners);
+    dev.draw(0, 3);
+    dev.end();
+    if present || frame < 2 { dev.present(); }
+  }
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_a_capture_after_the_frame_was_presented() {
+  if !display() { return; }
+  before = shown(gpu_metal::table(), false);
+  after = shown(gpu_metal::table(), true);
+  agree(before, after, "the third frame before and after it was presented", 0, 0);
+  agree(shown(gpu_gl::table(), false), after, "the third frame presented", 0, 0);
+  agree(shown(gpu_gl::table(), true), after, "the third frame presented through OpenGL", 0, 0);
+}
+
+// A viewport that reaches outside what the pass draws into: the part inside is drawn, in the
+// window and in a target.
+fn viewport_outside(table: i64, into_target: boolean) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "viewport") ?? return [];
+  pipe = dev.pipeline(tinted(), gpu::State { into: if into_target { gpu::INTO_COLOUR } else { gpu::INTO_WINDOW } }) ?? return [];
+  corners = dev.buffer([
+    -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+    1.0f, -0.6f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,
+    -0.2f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f
+  ]);
+  colour = dev.texture(64, 48);
+  target = dev.colour_target(colour);
+  if into_target { dev.begin(target, gpu::CLEAR, 0xFF202020); } else { dev.begin_window(gpu::CLEAR, 0xFF202020); }
+  dev.bind(pipe);
+  dev.vertices(corners);
+  dev.viewport(-20, -10, 50, 40);
+  dev.draw(0, 3);
+  dev.viewport(40, 30, 64, 48);
+  dev.draw(0, 3);
+  dev.viewport(-100, 20, 300, 20);
+  dev.draw(0, 3);
+  dev.viewport(10, -4000, 20, 8000);
+  dev.draw(0, 3);
+  dev.scissor(30, 2, 30, 12);
+  dev.viewport(-30000, -30000, 60064, 60048);
+  dev.draw(0, 3);
+  dev.end();
+  c = if into_target { dev.capture_of(target) } else { dev.capture() };
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_a_viewport_that_reaches_outside_what_it_draws_into() {
+  if !display() { return; }
+  agree(viewport_outside(gpu_gl::table(), false), viewport_outside(gpu_metal::table(), false), "a viewport outside the window", 0, 0);
+  agree(viewport_outside(gpu_gl::table(), true), viewport_outside(gpu_metal::table(), true), "a viewport outside a target", 0, 0);
+}

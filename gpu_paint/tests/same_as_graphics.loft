@@ -58,8 +58,9 @@ fn same(old: const vector<u32>, new: const vector<u32>, what: text, edges: integ
   colours = 0;
   for p in old {
     q = new[p#index] ?? 0;
-    if p != q {
-      gap = channel_gap(p, q);
+    // a window of `gpu` reads back opaque; graphics' alpha, where its window has one, is not compared
+    if (p as integer) | 0xFF000000 != (q as integer) {
+      gap = channel_gap((((p as integer) | 0xFF000000) & 4294967295) as u32, q);
       if !other || gap > 1 {
         differ += 1;
         if first < 0 { first = p#index; }

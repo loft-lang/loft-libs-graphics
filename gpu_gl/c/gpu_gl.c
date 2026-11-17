@@ -19,6 +19,7 @@
 #if defined(GQ_X11) || defined(GQ_COCOA) || defined(GQ_BROWSER) || defined(GQ_ANDROID)
 
 #define GQ_UNIFORM_BUFFER 0x8A11
+#define GQ_MAX_SLOTS 16
 #define GQ_ACTIVE_UNIFORM_BLOCKS 0x8A36
 #define GQ_UNIFORM_OFFSET 0x8A3B
 #define GQ_UNIFORM_BLOCK_DATA_SIZE 0x8A40
@@ -45,13 +46,17 @@ void gq_glGetActiveUniformsiv(unsigned, int, const unsigned *, unsigned, int *);
 struct gq_pipe;
 
 /* What a device holds beyond its window: the block entry points, a vertex array to upload
- * index lists under, and the pipeline bound in the pass in progress. */
+ * index lists under, and of the pass in progress its pipeline, the texture named for each
+ * slot and the slot named last (OpenGL's active unit); and where the window's frame is. */
 typedef struct gq_dev {
     gq_window *w;
     gq_block_api more;
     int more_ok;
     unsigned scratch;
     struct gq_pipe *bound;
+    int in_pass, unit;
+    int shown; /* the window's frame was presented and nothing was drawn in it since */
+    unsigned unit_tex[GQ_MAX_SLOTS];
     struct gq_dev *next;
 } gq_dev;
 
@@ -204,6 +209,34 @@ static int64_t gq_t_target(int64_t dev, int64_t colour, int64_t depth) {
     return fb;
 }
 
+/* OpenGL writes a texture, sets its filter and builds its smaller copies through the active
+ * unit, and leaves that unit empty.  A pass in progress named a texture for it: that one is
+ * bound again, so the pass's next draw reads what it was told to. */
+static void gq_rebind(int64_t tex) {
+    gq_res *r = gq_res_of(tex);
+    gq_dev *d;
+    if (!r || r->kind != GQ_TEXTURE) return;
+    for (d = gq_devs; d; d = d->next) {
+        if (d->w == r->w && d->in_pass) r->w->api.glBindTexture(GL_TEXTURE_2D, d->unit_tex[d->unit]);
+    }
+}
+
+static void gq_t_texture_put(int64_t tex, int64_t x, int64_t y, int64_t w, int64_t h,
+                             const uint32_t *px, int64_t n) {
+    gq_texture_put(tex, x, y, w, h, px, n);
+    gq_rebind(tex);
+}
+
+static void gq_t_texture_nearest(int64_t tex, int64_t on) {
+    gq_texture_filter(tex, on);
+    gq_rebind(tex);
+}
+
+static void gq_t_texture_mipmaps(int64_t tex) {
+    gq_texture_mipmaps(tex);
+    gq_rebind(tex);
+}
+
 /* RGB565 values as 0xAARRGGBB, each opaque, a channel's high bits repeated in its low ones so
  * the brightest value is 255. */
 static void gq_t_texture_put565(int64_t tex, int64_t x, int64_t y, int64_t w, int64_t h,
@@ -218,8 +251,40 @@ static void gq_t_texture_put565(int64_t tex, int64_t x, int64_t y, int64_t w, in
         uint32_t r = (v >> 11) & 31u, g = (v >> 5) & 63u, b = v & 31u;
         wide[i] = 0xFF000000u | ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
     }
-    gq_texture_put(tex, x, y, w, h, wide, count);
+    gq_t_texture_put(tex, x, y, w, h, wide, count);
     free(wide);
+}
+
+/* The window's frame after it was presented: OpenGL shows it by swapping two buffers, so the
+ * one drawn into next holds an older frame and the frame itself is the one in front. */
+#if defined(GQ_X11) || defined(GQ_COCOA)
+static void gq_read_shown(gq_window *w, uint32_t *out, int64_t n) {
+    unsigned char *rgba;
+    int64_t x, y;
+    if (!gq_use(w, "gpu capture") || n != (int64_t) w->width * w->height || n <= 0) return;
+    rgba = (unsigned char *) malloc((size_t) n * 4u);
+    if (!rgba) return;
+    if (w->target) w->api.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    w->api.glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    w->api.glReadBuffer(GL_FRONT);
+    w->api.glReadPixels(0, 0, w->width, w->height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    w->api.glReadBuffer(GL_BACK);
+    if (w->target) w->api.glBindFramebuffer(GL_FRAMEBUFFER, w->target);
+    for (y = 0; y < w->height; y++) {
+        const unsigned char *row = rgba + (size_t) (w->height - 1 - y) * w->width * 4u;
+        for (x = 0; x < w->width; x++) {
+            const unsigned char *p = row + x * 4;
+            out[y * w->width + x] = 0xFF000000u | ((uint32_t) p[0] << 16) | ((uint32_t) p[1] << 8) | p[2];
+        }
+    }
+    free(rgba);
+}
+#endif
+
+static void gq_t_present(int64_t dev) {
+    gq_dev *d = gq_dev_of(dev);
+    gq_swap(dev);
+    if (d) d->shown = 1;
 }
 
 /* The pixels of `target`'s colour, or the window's, the top row first. */
@@ -229,6 +294,13 @@ static void gq_t_capture(int64_t dev, int64_t target, uint32_t *out, int64_t n) 
     unsigned char *rgba;
     int64_t x, y;
     if (!f) {
+#if defined(GQ_X11) || defined(GQ_COCOA)
+        gq_dev *d = gq_dev_of(dev);
+        if (d && d->shown) {
+            gq_read_shown(w, out, n);
+            return;
+        }
+#endif
         gq_read_pixels(dev, out, n);
         return;
     }
@@ -375,6 +447,16 @@ static void gq_t_release(int64_t h) {
             return;
         }
     }
+    if (1) { /* a texture a pass named is not bound again once it is gone */
+        gq_res *r = gq_res_of(h);
+        gq_dev *d;
+        int i;
+        for (d = gq_devs; r && r->kind == GQ_TEXTURE && d; d = d->next) {
+            for (i = 0; i < GQ_MAX_SLOTS; i++) {
+                if (d->w == r->w && d->unit_tex[i] == r->id) d->unit_tex[i] = 0;
+            }
+        }
+    }
     gq_release(h);
 }
 
@@ -385,12 +467,21 @@ static void gq_t_begin(int64_t dev, int64_t target, int64_t load, int64_t colour
     gq_res *f = gq_res_of(target);
     if (!d || !gq_use(d->w, "gpu begin")) return;
     d->bound = NULL;
+    d->in_pass = 1;
+    d->unit = 0;
+    memset(d->unit_tex, 0, sizeof d->unit_tex);
     gq_render_to(dev, target);
     gq_viewport(dev, 0, 0, f ? f->width : d->w->width, f ? f->height : d->w->height);
     gq_capability(dev, 4, 0);
+    d->w->api.glColorMask(1, 1, 1, 1);
     if (load == 0) {
         gq_depth_write(dev, 1); /* a clear writes only the depth a draw may write */
-        gq_clear(dev, colour);
+        gq_clear(dev, f ? colour : colour | (int64_t) 0xFF000000u);
+    }
+    /* a window has no alpha: it is cleared opaque and no draw writes it */
+    if (!f) {
+        d->w->api.glColorMask(1, 1, 1, 0);
+        d->shown = 0;
     }
 }
 
@@ -418,8 +509,13 @@ static void gq_t_uniforms(int64_t dev, const float *block, int64_t n) {
 }
 
 static void gq_t_sample(int64_t dev, int64_t slot, int64_t tex) {
-    (void) dev;
+    gq_dev *d = gq_dev_of(dev);
+    gq_res *r = gq_res_of(tex);
     gq_texture_bind(tex, slot);
+    if (d && r && r->kind == GQ_TEXTURE && slot >= 0 && slot < GQ_MAX_SLOTS) {
+        d->unit = (int) slot;
+        d->unit_tex[slot] = r->id;
+    }
 }
 
 /* Feed `n` inputs from the bound array buffer, numbered from `first_location`, `stride`
@@ -492,18 +588,20 @@ static void gq_t_end(int64_t dev) {
     gq_dev *d = gq_dev_of(dev);
     if (!d || !gq_use(d->w, "gpu end")) return;
     d->w->api.glBindVertexArray(0);
+    d->w->api.glColorMask(1, 1, 1, 1);
     d->bound = NULL;
+    d->in_pass = 0;
 }
 
 static const gpu_backend gq_tab = {
     GPU_BACKEND_VERSION, "gpu_gl", "glsl-330",
     gq_t_open, gq_poll, gq_event_count, gq_events, gq_t_size, gq_t_close,
     gq_key_down, gq_mouse, gq_text_size, gq_text_copy,
-    gq_t_buffer, gq_t_index_buffer, gq_buffer_update, gq_t_texture, gq_texture_put,
+    gq_t_buffer, gq_t_index_buffer, gq_buffer_update, gq_t_texture, gq_t_texture_put,
     gq_t_texture_put565,
-    gq_texture_filter, gq_texture_mipmaps, gq_t_target, gq_t_pipeline, gq_t_release,
+    gq_t_texture_nearest, gq_t_texture_mipmaps, gq_t_target, gq_t_pipeline, gq_t_release,
     gq_t_begin, gq_t_use, gq_t_uniforms, gq_t_sample, gq_t_vertices, gq_t_instances,
-    gq_t_indices, gq_viewport, gq_t_scissor, gq_t_draw, gq_t_end, gq_swap, gq_t_capture,
+    gq_t_indices, gq_viewport, gq_t_scissor, gq_t_draw, gq_t_end, gq_t_present, gq_t_capture,
 };
 
 /* This backend's table: OpenGL is looked for when a device opens, so the table is there on
