@@ -1,0 +1,291 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// What this backend answers on its own, against values worked out by hand: a small machine's
+// RGB565 frame as a texture, a target's pixels read back, a block of any size, the window's
+// keys and pointer, and the sources it refuses.  Without a Mac's display every test returns at
+// once (`GRAPHICS_TEST_WINDOW=1`).
+use gpu;
+use gpu_metal;
+
+fn display() -> boolean {
+  gpu_metal::table() != 0 && (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1"
+}
+
+const SHOW_V: text = `
+struct In {{ float2 pos [[attribute(0)]]; }};
+struct Out {{ float4 position [[position]]; float2 uv; }};
+vertex Out vertex_main(In in [[stage_in]]) {{
+  Out o;
+  o.uv = (in.pos + 1.0) / 2.0;
+  o.position = gpu_position(float4(in.pos, 0.0, 1.0));
+  return o;
+}}
+`;
+
+const SHOW_F: text = `
+struct Out {{ float4 position [[position]]; float2 uv; }};
+fragment float4 fragment_main(Out in [[stage_in]], texture2d<float> tex0 [[texture(0)]], sampler s0 [[sampler(0)]]) {{
+  return tex0.sample(s0, in.uv);
+}}
+`;
+
+// A texture over the whole target: texture coordinate (0, 0) at clip (-1, -1).
+fn show() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F2],
+    instance: [],
+    block: [],
+    textures: 1,
+    sources: [gpu::source("msl", SHOW_V, SHOW_F)],
+  }
+}
+
+fn frame() -> vector<single> {
+  [-1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f]
+}
+
+fn test_this_is_the_metal_backend() {
+  if !display() { return; }
+  dev = gpu::open(gpu_metal::table(), 64, 48, "host-name") ?? return assert(false, "no device");
+  assert(gpu::backend_name() == "gpu_metal", "the backend that serves the program: {gpu::backend_name()}");
+  assert(dev.width() == 64 && dev.height() == 48, "the window's size in pixels: {dev.width()} x {dev.height()}");
+}
+
+fn test_a_small_machines_frame_is_shown_in_its_colours() {
+  if !display() { return; }
+  dev = gpu::open(gpu_metal::table(), 64, 48, "host-565") ?? return assert(false, "no device");
+  pipe = dev.pipeline(show(), gpu::State {}) ?? return assert(false, "pipeline");
+  quad = dev.buffer(frame());
+  // Two by two.  Red, green and blue at their brightest, and a mixed one: red 16 of 31,
+  // green 32 of 63, blue 8 of 31 is 16 * 2048 + 32 * 32 + 8 = 33800, which widens to
+  // (16 << 3 | 16 >> 2, 32 << 2 | 32 >> 4, 8 << 3 | 8 >> 2) = (132, 130, 66).
+  t = dev.texture(2, 2);
+  t.nearest(true);
+  t.put_rgb565(0, 0, [63488 as i32, 2016 as i32, 31 as i32, 33800 as i32], 2, 2);
+  dev.begin_window(gpu::CLEAR, 0xFF000000);
+  dev.bind(pipe);
+  dev.sample(0, t);
+  dev.vertices(quad);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture();
+  // The texture's first row is at the bottom of the frame (clip y = -1), and a capture's first
+  // row is the top: the first two values are in the lower half, the last two in the upper.
+  low_left = c[40 * 64 + 8] ?? 0;
+  low_right = c[40 * 64 + 56] ?? 0;
+  up_left = c[8 * 64 + 8] ?? 0;
+  up_right = c[8 * 64 + 56] ?? 0;
+  assert(low_left == 0xFFFF0000, "five bits of red are full red: {low_left:x}");
+  assert(low_right == 0xFF00FF00, "six of green full green: {low_right:x}");
+  assert(up_left == 0xFF0000FF, "five of blue full blue: {up_left:x}");
+  assert(up_right == 0xFF848242, "a mixed one widens by repeating its high bits: {up_right:x}");
+}
+
+fn test_a_targets_pixels_are_what_the_window_shows_of_it() {
+  if !display() { return; }
+  dev = gpu::open(gpu_metal::table(), 64, 48, "host-target") ?? return assert(false, "no device");
+  into_colour = dev.pipeline(show(), gpu::State { into: gpu::INTO_COLOUR }) ?? return assert(false, "pipeline");
+  into_window = dev.pipeline(show(), gpu::State {}) ?? return assert(false, "pipeline");
+  quad = dev.buffer(frame());
+  picture = dev.texture_from([0xFF102030 as u32, 0xFF405060 as u32, 0xFF708090 as u32, 0xFFA0B0C0 as u32], 2, 2);
+  picture.nearest(true);
+  // The picture drawn into a 64 x 48 target, then that target drawn over the window.
+  held = dev.texture(64, 48);
+  held.nearest(true);
+  target = dev.colour_target(held);
+  dev.begin(target, gpu::CLEAR, 0xFF000000);
+  dev.bind(into_colour);
+  dev.sample(0, picture);
+  dev.vertices(quad);
+  dev.draw(0, 6);
+  dev.end();
+  // A pass into the window in between: the target is read, not whatever was drawn into last.
+  dev.begin_window(gpu::CLEAR, 0xFF00FF00);
+  dev.end();
+  read = dev.capture_of(target);
+  dev.begin_window(gpu::CLEAR, 0xFFFFFFFF);
+  dev.bind(into_window);
+  dev.sample(0, held);
+  dev.vertices(quad);
+  dev.draw(0, 6);
+  dev.end();
+  seen = dev.capture();
+  assert(len(read) == 64 * 48 && len(seen) == len(read), "both are 64 x 48: {len(read)} and {len(seen)}");
+  differ = 0;
+  for p in read { if p != (seen[p#index] ?? 0) { differ += 1; } }
+  assert(differ == 0, "{differ} pixels of the target read back differ from the window showing it");
+  // by hand: the picture's first pixel is at the bottom left, so the capture's last row starts with it
+  assert((read[47 * 64] ?? 0) == 0xFF102030 && (read[63] ?? 0) == 0xFFA0B0C0, "the corners: {read[47 * 64] ?? 0:x} {read[63] ?? 0:x}");
+  // and the target's own first pixel is its bottom left: a put there lands where clip (-1, -1) draws
+  held.put(0, 0, [0xFF112233 as u32], 1, 1);
+  again = dev.capture_of(target);
+  assert((again[47 * 64] ?? 0) == 0xFF112233 && (again[0] ?? 0) == 0xFF708090, "a put at the first pixel: {again[47 * 64] ?? 0:x} {again[0] ?? 0:x}");
+}
+
+// A block of 300 vectors is 4800 bytes: more than Metal copies into a frame.  The fragment
+// stage reads the last one.
+const BIG_V: text = `
+struct In {{ float2 pos [[attribute(0)]]; }};
+struct Out {{ float4 position [[position]]; }};
+vertex Out vertex_main(In in [[stage_in]]) {{
+  Out o;
+  o.position = gpu_position(float4(in.pos, 0.0, 1.0));
+  return o;
+}}
+`;
+
+const BIG_F: text = `
+struct Block {{ float4 first; float4 many[300]; }};
+fragment float4 fragment_main(constant Block &u [[buffer(0)]]) {{ return u.first + u.many[299]; }}
+`;
+
+fn test_a_block_larger_than_a_frame_copies_reaches_the_shader() {
+  if !display() { return; }
+  dev = gpu::open(gpu_metal::table(), 64, 48, "host-block") ?? return assert(false, "no device");
+  big = gpu::Program {
+    vertex: [gpu::F2],
+    instance: [],
+    block: [gpu::F4, gpu::f4s(300)],
+    textures: 0,
+    sources: [gpu::source("msl", BIG_V, BIG_F)],
+  };
+  pipe = dev.pipeline(big, gpu::State {}) ?? return assert(false, "pipeline");
+  quad = dev.buffer(frame());
+  u = pipe.block();
+  u.f4(0, 0.2, 0.0, 0.0, 1.0);
+  u.f4_at(1, 299, 0.0, 0.4, 0.6, 0.0);
+  dev.begin_window(gpu::CLEAR, 0xFF000000);
+  dev.bind(pipe);
+  dev.uniforms(u);
+  dev.vertices(quad);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture();
+  // 0.2, 0.4 and 0.6 of 255 are 51, 102 and 153
+  assert((c[20 * 64 + 30] ?? 0) == 0xFF336699, "the first field plus the last vector: {c[20 * 64 + 30] ?? 0:x}");
+}
+
+// A block the shader lays out otherwise than the program declares builds no pipeline.
+const WRONG_V: text = `
+struct Block {{ packed_float3 tint; float z; }};
+struct In {{ float3 pos [[attribute(0)]]; }};
+struct Out {{ float4 position [[position]]; }};
+vertex Out vertex_main(In in [[stage_in]], constant Block &u [[buffer(0)]]) {{
+  Out o;
+  o.position = gpu_position(float4(in.pos.xy + float3(u.tint).xy, u.z, 1.0));
+  return o;
+}}
+`;
+
+const SHORT_V: text = `
+struct Block {{ float4 color; }};
+struct In {{ float3 pos [[attribute(0)]]; }};
+struct Out {{ float4 position [[position]]; }};
+vertex Out vertex_main(In in [[stage_in]], constant Block &u [[buffer(0)]]) {{
+  Out o;
+  o.position = gpu_position(float4(in.pos.xy + u.color.xy, 0.0, 1.0));
+  return o;
+}}
+`;
+
+const RIGHT_V: text = `
+struct Block {{ float4 color; float z; }};
+struct In {{ float3 pos [[attribute(0)]]; }};
+struct Out {{ float4 position [[position]]; }};
+vertex Out vertex_main(In in [[stage_in]], constant Block &u [[buffer(0)]]) {{
+  Out o;
+  o.position = gpu_position(float4(in.pos.xy + u.color.xy, u.z, 1.0));
+  return o;
+}}
+`;
+
+// The same with its position left in the layer's clip space.
+const UNTURNED_V: text = `
+struct Block {{ float4 color; float z; }};
+struct In {{ float3 pos [[attribute(0)]]; }};
+struct Out {{ float4 position [[position]]; }};
+vertex Out vertex_main(In in [[stage_in]], constant Block &u [[buffer(0)]]) {{
+  Out o;
+  o.position = float4(in.pos.xy + u.color.xy, u.z, 1.0);
+  return o;
+}}
+`;
+
+const WHITE_F: text = `
+fragment float4 fragment_main() {{ return float4(1.0); }}
+`;
+
+fn blocked(vertex: text) -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3],
+    instance: [],
+    block: [gpu::F4, gpu::F1],
+    textures: 0,
+    sources: [gpu::source("msl", vertex, WHITE_F)],
+  }
+}
+
+fn test_a_source_that_breaks_a_rule_builds_no_pipeline() {
+  if !display() { return; }
+  dev = gpu::open(gpu_metal::table(), 64, 48, "host-wrong") ?? return assert(false, "no device");
+  // declared as a vector and a float (the float at byte 16); three packed floats put it at byte 12
+  assert(dev.pipeline(blocked(WRONG_V), gpu::State {}) == null, "the float sits at byte 12 in the shader and 16 in the program");
+  // every field of the shader's block is where the program has one: only the size differs
+  assert(dev.pipeline(blocked(SHORT_V), gpu::State {}) == null, "the shader's block is 16 bytes and the program's 32");
+  assert(dev.pipeline(blocked(UNTURNED_V), gpu::State {}) == null, "a position not handed to gpu_position is in another clip space");
+  assert(dev.pipeline(blocked("gpu_position( is not a shader"), gpu::State {}) == null, "a source that does not compile");
+  none = gpu::Program {
+    vertex: [gpu::F3],
+    instance: [],
+    block: [],
+    textures: 0,
+    sources: [gpu::source("msl", RIGHT_V, WHITE_F)],
+  };
+  assert(dev.pipeline(none, gpu::State {}) == null, "a shader that reads a block the program does not declare");
+  assert(dev.pipeline(blocked(RIGHT_V), gpu::State {}) != null, "and the same program with a matching shader builds");
+}
+
+fn test_a_window_nobody_touches_holds_no_key_and_no_text() {
+  if !display() { return; }
+  dev = gpu::open(gpu_metal::table(), 64, 48, "host-input") ?? return assert(false, "no device");
+  _ = dev.poll();
+  assert(!dev.key_down(65), "no key is down");
+  assert(dev.buttons() == 0, "no button is held");
+  assert(len(dev.typed()) == 0, "nothing was typed");
+  assert(len(dev.events()) % gpu::EVENT_WORDS == 0, "events come whole");
+}
+
+// What a device made outlives it: dropped after the window closed, nothing is touched twice.
+fn test_what_a_device_made_may_outlive_it() {
+  if !display() { return; }
+  dev = gpu::open(gpu_metal::table(), 64, 48, "host-outlive") ?? return assert(false, "no device");
+  pipe = dev.pipeline(show(), gpu::State {}) ?? return assert(false, "pipeline");
+  quad = dev.buffer(frame());
+  t = dev.texture(4, 4);
+  z = dev.depth_texture(4, 4);
+  target = dev.target(t, z);
+  dev.begin(target, gpu::CLEAR, 0xFF000000);
+  dev.end();
+  dev.close();
+  assert(dev.width() == 0 && !dev.poll(), "a closed device has no window");
+  quad.update(frame());
+  t.put(0, 0, [0xFF010203 as u32], 1, 1);
+  assert(len(pipe.block().floats()) == 0, "the pipeline's block is still its own");
+  assert(len(dev.capture_of(target)) == 16, "and a closed device reads nothing into a target's size");
+}
+
+// Frames shown one after another: each is drawn, captured as drawn and handed over.
+fn test_frames_are_presented_one_after_another() {
+  if !display() { return; }
+  dev = gpu::open(gpu_metal::table(), 64, 48, "host-present") ?? return assert(false, "no device");
+  for i in 0..5 {
+    assert(dev.poll(), "the window stays open");
+    dev.begin_window(gpu::CLEAR, 0xFF000000 + 40 * i);
+    dev.end();
+    c = dev.capture();
+    assert((c[0] ?? 0) == ((0xFF000000 + 40 * i) & 4294967295) as u32, "frame {i} holds its own colour: {c[0] ?? 0:x}");
+    dev.present();
+  }
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+}
