@@ -1634,8 +1634,7 @@ pub fn rect(
   a: float
 ) {
   self.flat.set_mat4("uMVP", build_mvp_2d(self.proj, x, y, w, h));
-  self.flat.set_vec3("uColor", r, g, b);
-  self.flat.set_float("uAlpha", a);
+  self.flat.set_vec4("uColor", r, g, b, a);
   gg_draw_over(self.quad.handle, self.flat.handle);
 }
 
@@ -2793,13 +2792,14 @@ uniform mat4 uMVP;
 void main() {{ gl_Position = uMVP * vec4(aPos, 1.0); }}
 `;
 
-// Flat-color fragment shader — uColor (vec3) + uAlpha (float).
+// Flat-color fragment shader — the colour and its alpha as one `vec4` uniform.  Not a `vec3` and a
+// `float`: llvmpipe (Mesa 26.2) compiles `vec4(uColor, uAlpha)` from those two as `uColor.yzxx`
+// when the vertex stage reads one `vec3` input, so a rectangle came out in the wrong colour.
 FLAT_FRAG_2D = `
 #version 330 core
-uniform vec3 uColor;
-uniform float uAlpha;
+uniform vec4 uColor;
 out vec4 FragColor;
-void main() {{ FragColor = vec4(uColor, uAlpha); }}
+void main() {{ FragColor = uColor; }}
 `;
 
 // Textured quad vertex shader — samples the full texture with identity UV.
