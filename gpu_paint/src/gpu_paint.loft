@@ -72,6 +72,58 @@ void main() {{
 }}
 `;
 
+// The same three in the Metal Shading Language (`gpu_metal`): the block at buffer 0, the
+// position handed to `gpu_position`.
+
+const FLAT_VERTEX_MSL: text = `
+struct Block {{ float4x4 uMVP; float4 uColor; }};
+struct In {{ float3 aPos [[attribute(0)]]; }};
+struct Out {{ float4 position [[position]]; }};
+vertex Out vertex_main(In in [[stage_in]], constant Block &u [[buffer(0)]]) {{
+    Out o;
+    o.position = gpu_position(u.uMVP * float4(in.aPos, 1.0));
+    return o;
+}}
+`;
+
+const FLAT_FRAGMENT_MSL: text = `
+struct Block {{ float4x4 uMVP; float4 uColor; }};
+fragment float4 fragment_main(constant Block &u [[buffer(0)]]) {{ return u.uColor; }}
+`;
+
+const IMAGE_VERTEX_MSL: text = `
+struct Block {{ float4x4 uMVP; }};
+struct In {{ float3 aPos [[attribute(0)]]; }};
+struct Out {{ float4 position [[position]]; float2 vUV; }};
+vertex Out vertex_main(In in [[stage_in]], constant Block &u [[buffer(0)]]) {{
+    Out o;
+    o.position = gpu_position(u.uMVP * float4(in.aPos, 1.0));
+    o.vUV = in.aPos.xy;
+    return o;
+}}
+`;
+
+const TEXTURE_FRAGMENT_MSL: text = `
+struct Out {{ float4 position [[position]]; float2 vUV; }};
+fragment float4 fragment_main(Out in [[stage_in]], texture2d<float> tex0 [[texture(0)]], sampler s0 [[sampler(0)]]) {{
+    float4 c = tex0.sample(s0, in.vUV);
+    if (c.a < 0.01) discard_fragment();
+    return c;
+}}
+`;
+
+const CELL_VERTEX_MSL: text = `
+struct Block {{ float4x4 uMVP; float4 uCell; }};
+struct In {{ float3 aPos [[attribute(0)]]; }};
+struct Out {{ float4 position [[position]]; float2 vUV; }};
+vertex Out vertex_main(In in [[stage_in]], constant Block &u [[buffer(0)]]) {{
+    Out o;
+    o.position = gpu_position(u.uMVP * float4(in.aPos, 1.0));
+    o.vUV = float2(mix(u.uCell.x, u.uCell.z, in.aPos.x), mix(u.uCell.y, u.uCell.w, in.aPos.y));
+    return o;
+}}
+`;
+
 // The recording backend reads no shader: an empty source lets a program's drawing be tested
 // with no display.
 fn recorded() -> gpu::Source {
@@ -84,7 +136,11 @@ fn flat_program() -> gpu::Program {
     instance: [],
     block: [gpu::MAT4, gpu::F4],
     textures: 0,
-    sources: [gpu::source("glsl-330", FLAT_VERTEX_GLSL, FLAT_FRAGMENT_GLSL), recorded()],
+    sources: [
+      gpu::source("glsl-330", FLAT_VERTEX_GLSL, FLAT_FRAGMENT_GLSL),
+      gpu::source("msl", FLAT_VERTEX_MSL, FLAT_FRAGMENT_MSL),
+      recorded(),
+    ],
   }
 }
 
@@ -94,7 +150,11 @@ fn image_program() -> gpu::Program {
     instance: [],
     block: [gpu::MAT4],
     textures: 1,
-    sources: [gpu::source("glsl-330", IMAGE_VERTEX_GLSL, TEXTURE_FRAGMENT_GLSL), recorded()],
+    sources: [
+      gpu::source("glsl-330", IMAGE_VERTEX_GLSL, TEXTURE_FRAGMENT_GLSL),
+      gpu::source("msl", IMAGE_VERTEX_MSL, TEXTURE_FRAGMENT_MSL),
+      recorded(),
+    ],
   }
 }
 
@@ -104,7 +164,11 @@ fn cell_program() -> gpu::Program {
     instance: [],
     block: [gpu::MAT4, gpu::F4],
     textures: 1,
-    sources: [gpu::source("glsl-330", CELL_VERTEX_GLSL, TEXTURE_FRAGMENT_GLSL), recorded()],
+    sources: [
+      gpu::source("glsl-330", CELL_VERTEX_GLSL, TEXTURE_FRAGMENT_GLSL),
+      gpu::source("msl", CELL_VERTEX_MSL, TEXTURE_FRAGMENT_MSL),
+      recorded(),
+    ],
   }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "gpu_paint"
-version = "0.1.0"
+version = "0.1.1"
 loft = ">=2026.10.0"
 repository = "loft-libs-graphics"
 description = "Rectangles, images and sprites at pixel positions, drawn through gpu: a painter and sprite sheets for any backend"

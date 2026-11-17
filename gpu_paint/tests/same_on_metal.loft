@@ -1,0 +1,144 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// A painter and a sprite sheet draw the same pixels on `gpu_metal` as on `gpu_gl`, byte for
+// byte.  Each scene is one function that opens a device of the backend it is given, draws and
+// captures; one backend serves a program at a time, so a scene's device is closed before the
+// next opens.  Neither backend is a dependency of this package.  Without a Mac's display every
+// test returns at once (`GRAPHICS_TEST_WINDOW=1`).
+use gpu;
+use gpu_gl;
+use gpu_metal;
+use gpu_paint;
+
+fn display() -> boolean {
+  gpu_metal::table() != 0 && (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1"
+}
+
+const BLACK = 0xFF000000;
+const RED = 0xFFFF0000;
+const BLUE = 0xFF0000FF;
+
+fn same(gl: const vector<u32>, metal: const vector<u32>, what: text) {
+  assert(len(gl) == len(metal) && len(gl) > 0, "{what}: {len(gl)} pixels through OpenGL, {len(metal)} through Metal");
+  differ = 0;
+  first = -1;
+  colours = 0;
+  for p in gl {
+    if p != (metal[p#index] ?? 0) {
+      differ += 1;
+      if first < 0 { first = p#index; }
+    }
+    if p != gl[0] { colours += 1; }
+  }
+  assert(colours > 0, "{what}: the scene shows one colour only");
+  assert(differ == 0, "{what}: {differ} pixels differ, the first at {first}: {gl[first] ?? 0:x} through OpenGL, {metal[first] ?? 0:x} through Metal");
+}
+
+// A 4 x 2 picture: two cells of 2 x 2, each pixel its own colour, one of them see-through.
+fn sheet_pixels() -> vector<u32> {
+  out: vector<u32> = [];
+  for i in 0..8 {
+    alpha = if i == 5 { 0 } else { 255 };
+    out += [(((alpha << 24) | ((30 + 25 * i) << 16) | ((240 - 22 * i) << 8) | (60 + 9 * (i % 3))) & 4294967295) as u32];
+  }
+  out
+}
+
+// The unit quad stretched to `sx` x `sy` around the middle of the target, at depth `z`.
+fn placed(sx: float, sy: float, z: float) -> vector<float> {
+  [sx, 0.0, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -sx / 2.0, -sy / 2.0, z, 1.0]
+}
+
+fn rectangles(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "paint-rect") ?? return [];
+  np = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return [];
+  dev.begin_window(gpu::CLEAR, BLACK);
+  np.blend = false;
+  np.rect(dev, 8.0, 4.0, 16.0, 10.0, 1.0, 0.0, 0.0, 0.3);
+  np.rect(dev, 20.5, 9.25, 30.0, 20.5, 0.0, 0.0, 1.0, 1.0);
+  np.blend = true;
+  np.rect(dev, 4.0, 8.0, 40.0, 30.0, 0.2, 1.0, 0.4, 0.35);
+  np.resize(32, 24);
+  np.rect(dev, 24.0, 18.0, 8.0, 6.0, 1.0, 1.0, 0.0, 0.5);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_rectangles_opaque_blended_and_after_a_resize() {
+  if !display() { return; }
+  same(rectangles(gpu_gl::table()), rectangles(gpu_metal::table()), "rectangles");
+}
+
+fn images(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "paint-image") ?? return [];
+  np = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return [];
+  px = sheet_pixels();
+  nt = dev.texture_from(px, 4, 2);
+  nt.nearest(true);
+  nl = dev.texture_from(px, 4, 2);
+  dev.begin_window(gpu::CLEAR, BLUE);
+  np.image(dev, nt, 30.0, 2.0, 32.0, 40.0);
+  np.image(dev, nl, 2.0, 20.0, 24.0, 24.0);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_an_image_keeps_its_rows_and_skips_the_transparent() {
+  if !display() { return; }
+  same(images(gpu_gl::table()), images(gpu_metal::table()), "images");
+}
+
+// Two sprites in a scene, the near one drawn first, then two by the painter over them.
+fn sprites(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "paint-sprites") ?? return [];
+  np = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return [];
+  ns = gpu_paint::sprites(dev, sheet_pixels(), 4, 2, 2, 1, gpu::INTO_WINDOW) ?? return [];
+  ns.texture.nearest(true);
+  np.blend = false;
+  dev.begin_window(gpu::CLEAR, BLACK);
+  ns.draw(dev, placed(1.2, 1.4, -0.5), 1);
+  ns.draw(dev, placed(1.9, 0.8, 0.5), 0);
+  np.sprite(dev, ns, 2.0, 30.0, 20.0, 16.0, 0);
+  np.sprite(dev, ns, 12.0, 34.0, 20.0, 12.0, 1);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_sprites_at_pixel_positions_and_in_a_scene_with_depth() {
+  if !display() { return; }
+  same(sprites(gpu_gl::table()), sprites(gpu_metal::table()), "sprites");
+}
+
+// A 32 x 24 picture painted first, then shown over part of the window.
+fn painted_texture(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "paint-into") ?? return [];
+  inner = gpu_paint::painter(dev, gpu::INTO_COLOUR) ?? return [];
+  outer = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return [];
+  nc = dev.texture(32, 24);
+  nc.nearest(true);
+  nf = dev.colour_target(nc);
+  inner.blend = false;
+  inner.resize(32, 24);
+  dev.begin(nf, gpu::CLEAR, RED);
+  inner.rect(dev, 4.0, 3.0, 12.0, 8.0, 0.0, 1.0, 0.0, 1.0);
+  dev.end();
+  outer.blend = false;
+  dev.begin_window(gpu::CLEAR, BLACK);
+  outer.image(dev, nc, 8.0, 6.0, 48.0, 36.0);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_a_painter_draws_into_a_texture_that_another_shows() {
+  if !display() { return; }
+  same(painted_texture(gpu_gl::table()), painted_texture(gpu_metal::table()), "a painted texture shown");
+}
