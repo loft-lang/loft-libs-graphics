@@ -1,0 +1,765 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// One scene drawn through `gpu` on this backend and on `gpu_gl` gives the same picture.  Each
+// scene is one function that opens a device of the backend it is given, draws and captures: the
+// drawing is the same loft for both, only the shader source differs.  `gpu_gl` is not a
+// dependency of this package: it is the picture this backend is measured against.  One backend
+// serves a program at a time, so a scene's device is closed before the next one opens.
+// Without a Mac's display every test returns at once (`GRAPHICS_TEST_WINDOW=1`).
+use gpu;
+use gpu_gl;
+use gpu_metal;
+
+fn display() -> boolean {
+  gpu_metal::table() != 0 && (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1"
+}
+
+// ── the comparison ──
+
+// How far two channels of a pixel lie apart at most.
+fn apart(a: integer, b: integer) -> integer {
+  most = 0;
+  for shift in [0, 8, 16, 24] {
+    d = ((a >> shift) & 255) - ((b >> shift) & 255);
+    if d < 0 { d = -d; }
+    if d > most { most = d; }
+  }
+  most
+}
+
+// The two pictures agree: at most `pixels` of them differ, none by more than `step` of 255 in
+// a channel.  A scene of one colour proves nothing and fails.
+fn agree(gl: const vector<u32>, metal: const vector<u32>, what: text, pixels: integer, step: integer) {
+  assert(len(gl) == len(metal) && len(gl) > 0, "{what}: {len(gl)} pixels through OpenGL, {len(metal)} through Metal");
+  differ = 0;
+  worst = 0;
+  first = -1;
+  colours = 0;
+  for p in gl {
+    q = metal[p#index] ?? 0;
+    if p != q {
+      differ += 1;
+      if first < 0 { first = p#index; }
+      d = apart(p as integer, q as integer);
+      if d > worst { worst = d; }
+    }
+    if p != gl[0] { colours += 1; }
+  }
+  assert(colours > 0, "{what}: the scene shows one colour only");
+  assert(differ <= pixels && worst <= step, "{what}: {differ} pixels differ (at most {pixels} may), the worst by {worst} of 255 (at most {step}), the first at {first}: {gl[first] ?? 0:x} through OpenGL, {metal[first] ?? 0:x} through Metal");
+}
+
+// ── M1: one triangle ──
+//
+// A triangle with no edge along a pixel row or column, its corners red, green and blue: which
+// pixels an edge covers and how a colour is carried between the corners are the two things a
+// rasteriser decides on its own.
+
+const TRI_V_GL: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(location = 1) in vec4 tint;
+out vec4 v_tint;
+void main() {{ v_tint = tint; gl_Position = vec4(pos, 1.0); }}
+`;
+
+const TRI_F_GL: text = `
+#version 330 core
+in vec4 v_tint;
+out vec4 frag;
+void main() {{ frag = v_tint; }}
+`;
+
+const TRI_V_MSL: text = `
+struct In {{ float3 pos [[attribute(0)]]; float4 tint [[attribute(1)]]; }};
+struct Out {{ float4 position [[position]]; float4 tint; }};
+vertex Out vertex_main(In in [[stage_in]]) {{
+  Out o;
+  o.tint = in.tint;
+  o.position = gpu_position(float4(in.pos, 1.0));
+  return o;
+}}
+`;
+
+const TRI_F_MSL: text = `
+struct Out {{ float4 position [[position]]; float4 tint; }};
+fragment float4 fragment_main(Out in [[stage_in]]) {{ return in.tint; }}
+`;
+
+fn tinted() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3, gpu::F4],
+    instance: [],
+    block: [],
+    textures: 0,
+    sources: [gpu::source("glsl-330", TRI_V_GL, TRI_F_GL), gpu::source("msl", TRI_V_MSL, TRI_F_MSL)],
+  }
+}
+
+fn triangle(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "triangle") ?? return [];
+  pipe = dev.pipeline(tinted(), gpu::State {}) ?? return [];
+  corners = dev.buffer([
+    -0.8f, -0.7f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+    0.9f, -0.3f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,
+    -0.1f, 0.8f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f
+  ]);
+  dev.begin_window(gpu::CLEAR, 0xFF202020);
+  dev.bind(pipe);
+  dev.vertices(corners);
+  dev.draw(0, 3);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_one_triangle() {
+  if !display() { return; }
+  gl = triangle(gpu_gl::table());
+  metal = triangle(gpu_metal::table());
+  agree(gl, metal, "one triangle", 0, 0);
+}
+
+// ── M2: one capability a scene ──
+
+const BLUE = 0xFF0000FF;
+
+// One colour, placed by a depth: the block is a vector and a float.
+const FLAT_V_GL: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(std140) uniform Block {{ vec4 color; float z; }};
+void main() {{ gl_Position = vec4(pos.xy, z, 1.0); gl_PointSize = 1.0; }}
+`;
+
+const FLAT_F_GL: text = `
+#version 330 core
+layout(std140) uniform Block {{ vec4 color; float z; }};
+out vec4 frag;
+void main() {{ frag = color; }}
+`;
+
+const FLAT_V_MSL: text = `
+struct Block {{ float4 color; float z; }};
+struct In {{ float3 pos [[attribute(0)]]; }};
+struct Out {{ float4 position [[position]]; float size [[point_size]]; }};
+vertex Out vertex_main(In in [[stage_in]], constant Block &u [[buffer(0)]]) {{
+  Out o;
+  o.position = gpu_position(float4(in.pos.xy, u.z, 1.0));
+  o.size = 1.0;
+  return o;
+}}
+`;
+
+const FLAT_F_MSL: text = `
+struct Block {{ float4 color; float z; }};
+fragment float4 fragment_main(constant Block &u [[buffer(0)]]) {{ return u.color; }}
+`;
+
+fn flat() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3],
+    instance: [],
+    block: [gpu::F4, gpu::F1],
+    textures: 0,
+    sources: [gpu::source("glsl-330", FLAT_V_GL, FLAT_F_GL), gpu::source("msl", FLAT_V_MSL, FLAT_F_MSL)],
+  }
+}
+
+// A texture over the vertices: position, a normal nobody reads, a texture coordinate.
+const TEX_V_GL: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(location = 2) in vec2 uv;
+out vec2 v_uv;
+void main() {{ v_uv = uv; gl_Position = vec4(pos, 1.0); }}
+`;
+
+const TEX_F_GL: text = `
+#version 330 core
+uniform sampler2D tex0;
+in vec2 v_uv;
+out vec4 frag;
+void main() {{ frag = texture(tex0, v_uv); }}
+`;
+
+const TEX_V_MSL: text = `
+struct In {{ float3 pos [[attribute(0)]]; float2 uv [[attribute(2)]]; }};
+struct Out {{ float4 position [[position]]; float2 uv; }};
+vertex Out vertex_main(In in [[stage_in]]) {{
+  Out o;
+  o.uv = in.uv;
+  o.position = gpu_position(float4(in.pos, 1.0));
+  return o;
+}}
+`;
+
+const TEX_F_MSL: text = `
+struct Out {{ float4 position [[position]]; float2 uv; }};
+fragment float4 fragment_main(Out in [[stage_in]], texture2d<float> tex0 [[texture(0)]], sampler s0 [[sampler(0)]]) {{
+  return tex0.sample(s0, in.uv);
+}}
+`;
+
+fn textured() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3, gpu::F3, gpu::F2],
+    instance: [],
+    block: [],
+    textures: 1,
+    sources: [gpu::source("glsl-330", TEX_V_GL, TEX_F_GL), gpu::source("msl", TEX_V_MSL, TEX_F_MSL)],
+  }
+}
+
+// The same vertices showing a depth texture: its depth as a grey.
+const DEPTH_F_GL: text = `
+#version 330 core
+uniform sampler2D tex0;
+in vec2 v_uv;
+out vec4 frag;
+void main() {{ float d = texture(tex0, v_uv).r; frag = vec4(d, d, d, 1.0); }}
+`;
+
+const DEPTH_F_MSL: text = `
+struct Out {{ float4 position [[position]]; float2 uv; }};
+fragment float4 fragment_main(Out in [[stage_in]], depth2d<float> tex0 [[texture(0)]], sampler s0 [[sampler(0)]]) {{
+  float d = tex0.sample(s0, in.uv);
+  return float4(d, d, d, 1.0);
+}}
+`;
+
+fn depth_shown() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3, gpu::F3, gpu::F2],
+    instance: [],
+    block: [],
+    textures: 1,
+    sources: [gpu::source("glsl-330", TEX_V_GL, DEPTH_F_GL), gpu::source("msl", TEX_V_MSL, DEPTH_F_MSL)],
+  }
+}
+
+// Copies: a strip moved by a float read once per copy.
+const COPY_V_GL: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(location = 1) in float dx;
+layout(std140) uniform Block {{ vec4 color; float z; }};
+void main() {{ gl_Position = vec4(pos.x + dx, pos.y, 0.0, 1.0); }}
+`;
+
+const COPY_V_MSL: text = `
+struct In {{ float3 pos [[attribute(0)]]; float dx [[attribute(1)]]; }};
+struct Out {{ float4 position [[position]]; }};
+vertex Out vertex_main(In in [[stage_in]]) {{
+  Out o;
+  o.position = gpu_position(float4(in.pos.x + in.dx, in.pos.y, 0.0, 1.0));
+  return o;
+}}
+`;
+
+fn copied() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3],
+    instance: [gpu::F1],
+    block: [gpu::F4, gpu::F1],
+    textures: 0,
+    sources: [gpu::source("glsl-330", COPY_V_GL, FLAT_F_GL), gpu::source("msl", COPY_V_MSL, FLAT_F_MSL)],
+  }
+}
+
+// ── geometry ──
+
+// Two triangles over (x0, y0)-(x1, y1), counter-clockwise, or clockwise.
+fn rect(x0: float, y0: float, x1: float, y1: float, clockwise: boolean) -> vector<single> {
+  ccw = [x0, y0, x1, y0, x1, y1, x0, y0, x1, y1, x0, y1];
+  cw = [x0, y0, x1, y1, x1, y0, x0, y0, x0, y1, x1, y1];
+  out: vector<single> = [];
+  for i in 0..6 {
+    x = if clockwise { cw[2 * i] } else { ccw[2 * i] };
+    y = if clockwise { cw[2 * i + 1] } else { ccw[2 * i + 1] };
+    out += [x as single, y as single, 0.0 as single];
+  }
+  out
+}
+
+// The rectangle (x0, y0)-(x1, y1) with a normal nobody reads and the whole texture over it.
+fn frame8(x0: float, y0: float, x1: float, y1: float) -> vector<single> {
+  xy = [x0, y0, x1, y0, x1, y1, x0, y0, x1, y1, x0, y1];
+  uv = [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+  out: vector<single> = [];
+  for i in 0..6 {
+    out += [xy[2 * i] as single, xy[2 * i + 1] as single, 0.0f, 0.0f, 0.0f, 1.0f, uv[2 * i] as single, uv[2 * i + 1] as single];
+  }
+  out
+}
+
+// A `side` x `side` picture, every pixel its own opaque colour.
+fn picture(side: integer) -> vector<u32> {
+  out: vector<u32> = [];
+  for i in 0..side * side {
+    r = (40 + 12 * i) % 256;
+    g = (250 - 13 * i) & 255;
+    b = 17 * (i % 5) + 30;
+    out += [((0xFF000000 | (r << 16) | (g << 8) | b) & 4294967295) as u32];
+  }
+  out
+}
+
+// ── depth and blending ──
+
+// Red behind, green in front on the left, blue further back hidden, then a half-transparent
+// white strip blended over the lower half; a second pass keeps the frame and adds a strip.
+fn depth_and_blend(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "depth") ?? return [];
+  solid = dev.pipeline(flat(), gpu::State { depth: gpu::DEPTH_TEST_WRITE }) ?? return [];
+  tested = dev.pipeline(flat(), gpu::State { depth: gpu::DEPTH_TEST }) ?? return [];
+  over = dev.pipeline(flat(), gpu::State { blend: gpu::blend(gpu::SRC_ALPHA, gpu::ONE_MINUS_SRC_ALPHA) }) ?? return [];
+  added = dev.pipeline(flat(), gpu::State { blend: gpu::blend(gpu::ONE, gpu::ONE) }) ?? return [];
+  b_left = dev.buffer(rect(-1.0, -1.0, 0.0, 1.0, false));
+  b_whole = dev.buffer(rect(-1.0, -1.0, 1.0, 1.0, false));
+  b_low = dev.buffer(rect(-1.0, -1.0, 1.0, 0.0, false));
+  b_mid = dev.buffer(rect(-0.5, -0.5, 0.5, 0.5, false));
+  u = solid.block();
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(solid);
+  u.f4(0, 1.0, 0.0, 0.0, 1.0);
+  u.f1(1, 0.5);
+  dev.uniforms(u);
+  dev.vertices(b_whole);
+  dev.draw(0, 6);
+  u.f4(0, 0.0, 1.0, 0.0, 1.0);
+  u.f1(1, -0.5);
+  dev.uniforms(u);
+  dev.vertices(b_left);
+  dev.draw(0, 6);
+  u.f4(0, 0.0, 0.0, 1.0, 1.0);
+  u.f1(1, 0.9);
+  dev.uniforms(u);
+  dev.vertices(b_whole);
+  dev.draw(0, 6);
+  // tested and not written: a grey square between the two depths shows on the right only, and
+  // a second one behind it is still drawn over it, as nothing was written
+  dev.bind(tested);
+  u.f4(0, 0.5, 0.5, 0.5, 1.0);
+  u.f1(1, 0.0);
+  dev.uniforms(u);
+  dev.vertices(b_mid);
+  dev.draw(0, 6);
+  u.f4(0, 0.2, 0.6, 0.8, 1.0);
+  u.f1(1, 0.25);
+  dev.uniforms(u);
+  dev.vertices(b_low);
+  dev.draw(0, 6);
+  dev.bind(over);
+  u.f4(0, 1.0, 1.0, 1.0, 0.4);
+  u.f1(1, 0.0);
+  dev.uniforms(u);
+  dev.vertices(b_low);
+  dev.draw(0, 6);
+  dev.end();
+  dev.begin_window(gpu::KEEP, 0);
+  dev.bind(added);
+  u.f4(0, 0.25, 0.125, 0.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(b_mid);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_depth_and_blending() {
+  if !display() { return; }
+  agree(depth_and_blend(gpu_gl::table()), depth_and_blend(gpu_metal::table()), "depth and blending", 0, 0);
+}
+
+// ── culling, a scissor and a viewport ──
+
+fn cull_scissor_viewport(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "rects") ?? return [];
+  back = dev.pipeline(flat(), gpu::State { cull: gpu::CULL_BACK }) ?? return [];
+  front = dev.pipeline(flat(), gpu::State { cull: gpu::CULL_FRONT }) ?? return [];
+  plain = dev.pipeline(flat(), gpu::State {}) ?? return [];
+  b_whole = dev.buffer(rect(-1.0, -1.0, 1.0, 1.0, false));
+  b_turned = dev.buffer(rect(-1.0, -1.0, 1.0, 1.0, true));
+  b_corner = dev.buffer(rect(0.5, 0.5, 1.0, 1.0, false));
+  u = plain.block();
+  dev.begin_window(gpu::CLEAR, BLUE);
+  // a clockwise square is the back: not drawn where the back is dropped
+  dev.bind(back);
+  u.f4(0, 1.0, 1.0, 0.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(b_turned);
+  dev.draw(0, 6);
+  // and drawn where the front is; a counter-clockwise corner is not
+  dev.bind(front);
+  dev.viewport(0, 0, 20, 10);
+  u.f4(0, 1.0, 0.0, 1.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(b_turned);
+  dev.draw(0, 6);
+  dev.viewport(0, 0, 64, 48);
+  u.f4(0, 0.0, 0.0, 0.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(b_corner);
+  dev.draw(0, 6);
+  dev.bind(plain);
+  dev.scissor(5, 7, 30, 20);
+  u.f4(0, 0.0, 1.0, 0.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(b_whole);
+  dev.draw(0, 6);
+  // a scissor that leaves the window is cut to it, and one wholly outside draws nothing
+  dev.scissor(50, 40, 30, 20);
+  u.f4(0, 0.0, 1.0, 1.0, 1.0);
+  dev.uniforms(u);
+  dev.draw(0, 6);
+  dev.scissor(70, 10, 5, 5);
+  u.f4(0, 1.0, 1.0, 1.0, 1.0);
+  dev.uniforms(u);
+  dev.draw(0, 6);
+  dev.no_scissor();
+  dev.viewport(40, 30, 16, 12);
+  u.f4(0, 1.0, 0.0, 0.0, 1.0);
+  dev.uniforms(u);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_culling_a_scissor_and_a_viewport() {
+  if !display() { return; }
+  agree(cull_scissor_viewport(gpu_gl::table()), cull_scissor_viewport(gpu_metal::table()), "cull, scissor and viewport", 0, 0);
+}
+
+// ── textures ──
+
+// A picture sampled nearest, a patch put into it between two passes of one frame, and an
+// RGB565 strip put into another.
+fn textures_put(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "texture") ?? return [];
+  pipe = dev.pipeline(textured(), gpu::State {}) ?? return [];
+  left = dev.buffer(frame8(-1.0, -1.0, 0.0, 1.0));
+  right = dev.buffer(frame8(0.0, -1.0, 1.0, 1.0));
+  low = dev.buffer(frame8(-0.5, -1.0, 0.5, -0.5));
+  t = dev.texture_from(picture(4), 4, 4);
+  t.nearest(true);
+  small = dev.texture(2, 2);
+  small.nearest(true);
+  small.put_rgb565(0, 0, [63488 as i32, 2016 as i32, 31 as i32, 33800 as i32], 2, 2);
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(pipe);
+  dev.sample(0, t);
+  dev.vertices(left);
+  dev.draw(0, 6);
+  dev.end();
+  // the left half was drawn with the picture as it was: the patch shows on the right only
+  t.put(1, 2, [0xFF00FF00 as u32, 0xFFFF00FF as u32], 2, 1);
+  // a put that leaves the texture changes nothing
+  t.put(3, 3, [0xFFFFFFFF as u32, 0xFFFFFFFF as u32], 2, 1);
+  dev.begin_window(gpu::KEEP, 0);
+  dev.bind(pipe);
+  dev.sample(0, t);
+  dev.vertices(right);
+  dev.draw(0, 6);
+  dev.sample(0, small);
+  dev.vertices(low);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_a_texture_put_and_sampled_nearest() {
+  if !display() { return; }
+  agree(textures_put(gpu_gl::table()), textures_put(gpu_metal::table()), "a texture put", 0, 0);
+}
+
+// Between its pixels a texture is sampled from both neighbours, and at its edge from the edge
+// pixel alone: the frame reaches past the texture's edges.
+fn texture_between(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "linear") ?? return [];
+  pipe = dev.pipeline(textured(), gpu::State {}) ?? return [];
+  xy = [-1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, 1.0];
+  wide: vector<single> = [];
+  for i in 0..6 {
+    wide += [xy[2 * i] as single, xy[2 * i + 1] as single, 0.0f, 0.0f, 0.0f, 1.0f, (xy[2 * i] * 0.75 + 0.5) as single, (xy[2 * i + 1] * 0.75 + 0.5) as single];
+  }
+  b = dev.buffer(wide);
+  t = dev.texture_from(picture(4), 4, 4);
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(pipe);
+  dev.sample(0, t);
+  dev.vertices(b);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_a_texture_sampled_between_its_pixels_is_clamped_at_its_edges() {
+  if !display() { return; }
+  agree(texture_between(gpu_gl::table()), texture_between(gpu_metal::table()), "a texture between its pixels", 0, 0);
+}
+
+// A 32 x 32 picture of four-pixel squares drawn a quarter and a tenth of its size: with its
+// smaller copies built, each pixel is an average of the squares it covers.
+fn texture_small(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "mipmaps") ?? return [];
+  pipe = dev.pipeline(textured(), gpu::State {}) ?? return [];
+  b = dev.buffer(frame8(-1.0, -1.0, 1.0, 1.0));
+  px: vector<u32> = [];
+  for i in 0..32 * 32 {
+    on = (((i % 32) / 4) + ((i / 32) / 4)) % 2 == 0;
+    px += [if on { 0xFFFFE010 as u32 } else { 0xFF2040C0 as u32 }];
+  }
+  t = dev.texture_from(px, 32, 32);
+  t.mipmaps();
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(pipe);
+  dev.sample(0, t);
+  dev.vertices(b);
+  dev.viewport(2, 2, 8, 8);
+  dev.draw(0, 6);
+  dev.viewport(20, 4, 3, 3);
+  dev.draw(0, 6);
+  dev.viewport(30, 10, 32, 32);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_a_texture_drawn_small_through_its_smaller_copies() {
+  if !display() { return; }
+  agree(texture_small(gpu_gl::table()), texture_small(gpu_metal::table()), "a texture drawn small", 0, 0);
+}
+
+// ── buffers: copies read from an offset, an index list, floats replaced ──
+
+fn copies_and_indices(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "copies") ?? return [];
+  many = dev.pipeline(copied(), gpu::State {}) ?? return [];
+  one = dev.pipeline(flat(), gpu::State {}) ?? return [];
+  strip = dev.buffer(rect(-0.9, -0.8, -0.7, 0.8, false));
+  // two floats nobody reads, then a step for each of three copies
+  per_copy = dev.buffer([9.0f, 9.0f, 0.0f, 0.5f, 1.25f]);
+  corners = dev.buffer([-0.25f, -0.25f, 0.0f, 0.25f, -0.25f, 0.0f, 0.25f, 0.25f, 0.0f, -0.25f, 0.25f, 0.0f]);
+  list = dev.index_buffer([0, 1, 2, 0, 2, 3]);
+  moving = dev.buffer(rect(-1.0, -1.0, -0.5, -0.5, false));
+  late = dev.buffer([0.0f, 0.0f, 0.0f]);
+  u = many.block();
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(many);
+  u.f4(0, 0.0, 1.0, 0.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(strip);
+  dev.instances(per_copy, 2);
+  dev.draw_copies(6, 3);
+  dev.bind(one);
+  u.f4(0, 1.0, 0.0, 0.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(corners);
+  dev.indices(list);
+  dev.draw_indexed(6);
+  u.f4(0, 1.0, 1.0, 0.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(moving);
+  dev.draw(0, 6);
+  // new floats inside the pass: what was drawn stays, and the next draw reads the new ones
+  moving.update(rect(-1.0, 0.5, -0.5, 1.0, false));
+  dev.draw(0, 6);
+  // a buffer nothing has read yet, given more floats than it was made with
+  late.update(rect(-0.25, -1.0, 0.25, -0.75, false));
+  dev.vertices(late);
+  dev.draw(0, 6);
+  dev.end();
+  // new floats, of another length: the pass before keeps what it drew
+  moving.update(rect(0.5, 0.5, 1.0, 1.0, false) + rect(0.5, -1.0, 1.0, -0.5, false));
+  dev.begin_window(gpu::KEEP, 0);
+  dev.bind(one);
+  dev.uniforms(u);
+  dev.vertices(moving);
+  dev.draw(3, 9);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_copies_an_index_list_and_floats_replaced() {
+  if !display() { return; }
+  agree(copies_and_indices(gpu_gl::table()), copies_and_indices(gpu_metal::table()), "copies and an index list", 0, 0);
+}
+
+// ── lines and points ──
+
+fn lines_and_points(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "lines") ?? return [];
+  lines = dev.pipeline(flat(), gpu::State { shape: gpu::LINES }) ?? return [];
+  points = dev.pipeline(flat(), gpu::State { shape: gpu::POINTS }) ?? return [];
+  ends = dev.buffer([-0.9f, -0.9f, 0.0f, 0.9f, 0.7f, 0.0f, -0.9f, 0.5f, 0.0f, 0.4f, 0.5f, 0.0f, -0.6f, 0.9f, 0.0f, -0.6f, -0.9f, 0.0f]);
+  // pixel middles: a point covers the pixel its middle lies in
+  dots = dev.buffer([0.015625f, 0.0208333f, 0.0f, 0.515625f, -0.479167f, 0.0f, -0.484375f, 0.6875f, 0.0f]);
+  u = lines.block();
+  u.f4(0, 1.0, 1.0, 0.0, 1.0);
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(lines);
+  dev.uniforms(u);
+  dev.vertices(ends);
+  dev.draw(0, 6);
+  dev.bind(points);
+  u.f4(0, 1.0, 1.0, 1.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(dots);
+  dev.draw(0, 3);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_lines_and_points() {
+  if !display() { return; }
+  agree(lines_and_points(gpu_gl::table()), lines_and_points(gpu_metal::table()), "lines and points", 0, 0);
+}
+
+// ── targets ──
+
+// Into a 32 x 24 colour and depth target — green on the left in front of red below, a
+// clockwise square dropped, a scissor in its lower left — then the target shown over the
+// window, with its upper right corner again in a smaller rectangle; then the target itself.
+fn into_a_target(table: i64, read_target: boolean) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "target") ?? return [];
+  inner = dev.pipeline(flat(), gpu::State { depth: gpu::DEPTH_TEST_WRITE, cull: gpu::CULL_BACK, into: gpu::INTO_COLOUR_DEPTH }) ?? return [];
+  outer = dev.pipeline(textured(), gpu::State {}) ?? return [];
+  b_left = dev.buffer(rect(-1.0, -1.0, 0.0, 1.0, false));
+  b_low = dev.buffer(rect(-1.0, -1.0, 1.0, -0.25, false));
+  b_turned = dev.buffer(rect(-1.0, -1.0, 1.0, 1.0, true));
+  b_whole = dev.buffer(rect(-1.0, -1.0, 1.0, 1.0, false));
+  b_frame = dev.buffer(frame8(-1.0, -1.0, 1.0, 1.0));
+  colour = dev.texture(32, 24);
+  colour.nearest(true);
+  depth = dev.depth_texture(32, 24);
+  target = dev.target(colour, depth);
+  u = inner.block();
+  dev.begin(target, gpu::CLEAR, 0xFF202020);
+  dev.bind(inner);
+  u.f4(0, 0.0, 1.0, 0.0, 1.0);
+  u.f1(1, -0.5);
+  dev.uniforms(u);
+  dev.vertices(b_left);
+  dev.draw(0, 6);
+  u.f4(0, 1.0, 0.0, 0.0, 1.0);
+  u.f1(1, 0.5);
+  dev.uniforms(u);
+  dev.vertices(b_low);
+  dev.draw(0, 6);
+  u.f4(0, 1.0, 1.0, 1.0, 1.0);
+  u.f1(1, -0.9);
+  dev.uniforms(u);
+  dev.vertices(b_turned);
+  dev.draw(0, 6);
+  dev.scissor(2, 3, 6, 4);
+  u.f4(0, 1.0, 1.0, 0.0, 1.0);
+  dev.uniforms(u);
+  dev.vertices(b_whole);
+  dev.draw(0, 6);
+  dev.no_scissor();
+  dev.viewport(20, 16, 8, 6);
+  u.f4(0, 0.0, 1.0, 1.0, 1.0);
+  dev.uniforms(u);
+  dev.draw(0, 6);
+  dev.end();
+  if read_target {
+    c = dev.capture_of(target);
+    assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+    return c;
+  }
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(outer);
+  dev.sample(0, colour);
+  dev.vertices(b_frame);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_a_scene_drawn_into_a_texture_first() {
+  if !display() { return; }
+  agree(into_a_target(gpu_gl::table(), false), into_a_target(gpu_metal::table(), false), "a target shown over the window", 0, 0);
+  agree(into_a_target(gpu_gl::table(), true), into_a_target(gpu_metal::table(), true), "a target read back", 0, 0);
+}
+
+// A depth alone: two squares at two depths drawn into a depth texture, which the window then
+// shows as greys; and a colour alone, where a depth test passes whatever was drawn before.
+fn depth_alone(table: i64) -> vector<u32> {
+  dev = gpu::open(table, 64, 48, "depth-target") ?? return [];
+  shadow = dev.pipeline(flat(), gpu::State { depth: gpu::DEPTH_TEST_WRITE, into: gpu::INTO_DEPTH }) ?? return [];
+  only = dev.pipeline(flat(), gpu::State { depth: gpu::DEPTH_TEST_WRITE, into: gpu::INTO_COLOUR }) ?? return [];
+  show_depth = dev.pipeline(depth_shown(), gpu::State {}) ?? return [];
+  show = dev.pipeline(textured(), gpu::State {}) ?? return [];
+  b_left = dev.buffer(rect(-1.0, -1.0, 0.0, 0.5, false));
+  b_low = dev.buffer(rect(-0.5, -1.0, 1.0, 0.0, false));
+  upper = dev.buffer(frame8(-1.0, 0.0, 1.0, 1.0));
+  lower = dev.buffer(frame8(-1.0, -1.0, 1.0, 0.0));
+  depth = dev.depth_texture(16, 12);
+  d_target = dev.depth_target(depth);
+  colour = dev.texture(16, 12);
+  colour.nearest(true);
+  c_target = dev.colour_target(colour);
+  u = shadow.block();
+  dev.begin(d_target, gpu::CLEAR, 0);
+  dev.bind(shadow);
+  u.f1(1, 0.2);
+  dev.uniforms(u);
+  dev.vertices(b_left);
+  dev.draw(0, 6);
+  // behind the first where they overlap, in front of the far end elsewhere
+  u.f1(1, 0.6);
+  dev.uniforms(u);
+  dev.vertices(b_low);
+  dev.draw(0, 6);
+  dev.end();
+  dev.begin(c_target, gpu::CLEAR, 0xFF404040);
+  dev.bind(only);
+  u.f4(0, 1.0, 0.0, 0.0, 1.0);
+  u.f1(1, -0.5);
+  dev.uniforms(u);
+  dev.vertices(b_left);
+  dev.draw(0, 6);
+  u.f4(0, 0.0, 1.0, 0.0, 1.0);
+  u.f1(1, 0.5);
+  dev.uniforms(u);
+  dev.vertices(b_low);
+  dev.draw(0, 6);
+  dev.end();
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(show_depth);
+  dev.sample(0, depth);
+  dev.vertices(upper);
+  dev.draw(0, 6);
+  dev.bind(show);
+  dev.sample(0, colour);
+  dev.vertices(lower);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  c
+}
+
+fn test_a_depth_alone_and_a_colour_alone() {
+  if !display() { return; }
+  agree(depth_alone(gpu_gl::table()), depth_alone(gpu_metal::table()), "a depth target and a colour target", 0, 0);
+}

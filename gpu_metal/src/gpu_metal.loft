@@ -1,0 +1,29 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The Metal backend of `gpu`.
+//
+//   dev = gpu::open(gpu_metal::table(), 960, 720, "view") ?? return;
+//
+// A game does not name this library: its host package asks each backend in turn.  A program's
+// source for it carries the tag "msl" and is the Metal Shading Language:
+//   - the vertex function is `vertex_main` and the fragment function `fragment_main`; the two
+//     sources are compiled apart, so each declares what both use;
+//   - the inputs read per vertex are `[[attribute(0)]]` onwards of the `[[stage_in]]` struct, in
+//     the program's order, and the inputs read per copy follow them;
+//   - the uniform block is a struct at `[[buffer(0)]]`; a block laid out otherwise than the
+//     program declares builds no pipeline, and stderr shows both layouts;
+//   - texture slot n is `[[texture(n)]]` and its sampler `[[sampler(n)]]`; a depth texture is a
+//     `depth2d<float>`;
+//   - the vertex function hands its position to `gpu_position(...)`, which this backend defines
+//     ahead of the source: a position is written in `gpu`'s clip space (depth from -1 to 1), as
+//     for every backend, and that call turns it into Metal's.
+
+fn gm_table() -> integer;
+#c "gm_table" "int64_t()"
+
+// This backend's table, for `gpu::open`; 0 on a machine that is not a Mac.  `open` answers null
+// on a Mac with no Metal.
+pub fn table() -> i64 {
+  gm_table()
+}

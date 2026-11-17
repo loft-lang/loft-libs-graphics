@@ -57,9 +57,9 @@ names its own blending.
 
 ## Backends
 
-It carries a shader source for `gpu_gl` (OpenGL, OpenGL ES 3, WebGL2) and an empty one for
-`gpu_record`, so a program's 2D drawing can be tested with no display.  Each further backend
-adds a source here.
+It carries a shader source for `gpu_gl` (OpenGL, OpenGL ES 3, WebGL2), one for `gpu_metal`
+(a Mac's Metal) and an empty one for `gpu_record`, so a program's 2D drawing can be tested with
+no display.  Each further backend adds a source here.
 
 ## Verified
 
@@ -70,4 +70,5 @@ nearest and between their pixels with a transparent one; sprites by the painter 
 scene with depth; a painter into a texture that another shows.  They pass on a Mac on the
 interpreter, the C backend, the Rust backend and a shipped program, and in both writers'
 browser pages.  `tests/record.loft` reads what a painter asks of a backend from the recording
-one, on every machine.
+one, on every machine.  `tests/same_on_metal.loft` draws the same four scenes on `gpu_metal`
+and on `gpu_gl` and compares them byte for byte, on a Mac.

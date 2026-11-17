@@ -1,17 +1,25 @@
 // Copyright (c) 2026 Jurjen Stellingwerff
 // SPDX-License-Identifier: LGPL-3.0-or-later
 //
-// A scene drawn by `gpu_gl`, against pixels worked out by hand.  The window is 64 x 48 and the
+// A scene drawn by each backend this machine has, against pixels worked out by hand.  The window is 64 x 48 and the
 // fixed camera's top-left is the world's origin, so cell (0, 0) on layer 0 covers the pixels
 // x 0 .. 47, y 0 .. 39 (a cell is 48 across and its ground 40 deep).  Without a display every
 // test returns at once (`DISPLAY`, or `GRAPHICS_TEST_WINDOW=1` on a Mac).
 use gpu;
 use gpu_gl;
+use gpu_metal;
 use scene3d;
 
 // The numbers of a face, a light box or an actor as the scene takes them: single precision.
 fn s(v: const vector<float>) -> vector<single> {
   [for x in v { x as single }]
+}
+
+// The backends this machine has: each test's scene is drawn by every one of them, against
+// the same pixels.  One backend serves a program at a time, so a scene's device is closed
+// before the next one's opens.
+fn backends() -> vector<i64> {
+  [for t in [gpu_gl::table(), gpu_metal::table()] if t != 0 { t }]
 }
 
 fn display() -> boolean {
@@ -34,9 +42,8 @@ fn at(c: const vector<u32>, x: integer, y: integer) -> integer {
   c[y * 64 + x] ?? 0
 }
 
-fn test_a_face_takes_its_cells_light_once_it_is_given() {
-  if !display() { return; }
-  dev = gpu::open(gpu_gl::table(), 64, 48, "scene-light") ?? return assert(false, "no device");
+fn a_face_takes_its_cells_light_once_it_is_given_on(table: i64) {
+  dev = gpu::open(table, 64, 48, "scene-light") ?? return assert(false, "no device");
   scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, SKY) ?? return assert(false, "no scene");
   // 2016 is six bits of green: full green
   _ = scene.add_picture([for _ in 0..256 { 2016 as i32 }]);
@@ -67,9 +74,13 @@ fn test_a_face_takes_its_cells_light_once_it_is_given() {
   assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
 }
 
-fn test_an_actor_stands_over_the_land_and_the_overlay_over_both() {
+fn test_a_face_takes_its_cells_light_once_it_is_given() {
   if !display() { return; }
-  dev = gpu::open(gpu_gl::table(), 64, 48, "scene-actor") ?? return assert(false, "no device");
+  for table in backends() { a_face_takes_its_cells_light_once_it_is_given_on(table); }
+}
+
+fn an_actor_stands_over_the_land_and_the_overlay_over_both_on(table: i64) {
+  dev = gpu::open(table, 64, 48, "scene-actor") ?? return assert(false, "no device");
   scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, SKY) ?? return assert(false, "no scene");
   _ = scene.add_picture([for _ in 0..256 { 2016 as i32 }]);
   // 63488 is five bits of red
@@ -113,9 +124,13 @@ fn test_an_actor_stands_over_the_land_and_the_overlay_over_both() {
   assert(at(c, 0, 0) == GREEN, "no overlay: {at(c, 0, 0):x}");
 }
 
-fn test_the_free_camera_looks_where_it_is_pointed() {
+fn test_an_actor_stands_over_the_land_and_the_overlay_over_both() {
   if !display() { return; }
-  dev = gpu::open(gpu_gl::table(), 64, 48, "scene-free") ?? return assert(false, "no device");
+  for table in backends() { an_actor_stands_over_the_land_and_the_overlay_over_both_on(table); }
+}
+
+fn the_free_camera_looks_where_it_is_pointed_on(table: i64) {
+  dev = gpu::open(table, 64, 48, "scene-free") ?? return assert(false, "no device");
   scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, SKY) ?? return assert(false, "no scene");
   _ = scene.add_picture([for _ in 0..256 { 2016 as i32 }]);
   scene.set_tile(dev, 1, s(ground()));
@@ -143,9 +158,13 @@ fn test_the_free_camera_looks_where_it_is_pointed() {
   assert(at(c, 10, 10) == GREEN && at(c, 60, 44) == SKY, "the fixed camera again: {at(c, 10, 10):x}");
 }
 
-fn test_a_scene_far_from_the_origin_is_drawn_as_one_near_it() {
+fn test_the_free_camera_looks_where_it_is_pointed() {
   if !display() { return; }
-  dev = gpu::open(gpu_gl::table(), 64, 48, "scene-far") ?? return assert(false, "no device");
+  for table in backends() { the_free_camera_looks_where_it_is_pointed_on(table); }
+}
+
+fn a_scene_far_from_the_origin_is_drawn_as_one_near_it_on(table: i64) {
+  dev = gpu::open(table, 64, 48, "scene-far") ?? return assert(false, "no device");
   scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, SKY) ?? return assert(false, "no scene");
   _ = scene.add_picture([for _ in 0..256 { 2016 as i32 }]);
   // the ground of cell (0, 60), 60 rows south of the origin as a town's street is, and the camera
@@ -159,6 +178,11 @@ fn test_a_scene_far_from_the_origin_is_drawn_as_one_near_it() {
   assert(at(c, 10, 10) == GREEN && at(c, 10, 40) == SKY, "the cell 60 rows south: {at(c, 10, 10):x} {at(c, 10, 40):x}");
 }
 
+fn test_a_scene_far_from_the_origin_is_drawn_as_one_near_it() {
+  if !display() { return; }
+  for table in backends() { a_scene_far_from_the_origin_is_drawn_as_one_near_it_on(table); }
+}
+
 // A picture red on its left half and blue on its right.
 fn halves() -> vector<i32> {
   out: vector<i32> = [];
@@ -166,9 +190,8 @@ fn halves() -> vector<i32> {
   out
 }
 
-fn test_a_card_turns_to_face_the_free_camera() {
-  if !display() { return; }
-  dev = gpu::open(gpu_gl::table(), 64, 48, "scene-facing") ?? return assert(false, "no device");
+fn a_card_turns_to_face_the_free_camera_on(table: i64) {
+  dev = gpu::open(table, 64, 48, "scene-facing") ?? return assert(false, "no device");
   scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, SKY) ?? return assert(false, "no scene");
   both = scene.add_picture(halves());
   // A card a cell wide and tall, its foot at (0.5, 0, 0.5), seen level from three cells east.
@@ -196,9 +219,13 @@ fn test_a_card_turns_to_face_the_free_camera() {
   assert(at(c, 10, 10) == RED && at(c, 40, 10) == BLUE && at(c, 50, 10) == SKY, "for the fixed camera, in its plane: {at(c, 10, 10):x} {at(c, 40, 10):x} {at(c, 50, 10):x}");
 }
 
-fn test_the_hero_is_seen_through_a_wall_the_free_camera_looks_at() {
+fn test_a_card_turns_to_face_the_free_camera() {
   if !display() { return; }
-  dev = gpu::open(gpu_gl::table(), 64, 48, "scene-through") ?? return assert(false, "no device");
+  for table in backends() { a_card_turns_to_face_the_free_camera_on(table); }
+}
+
+fn the_hero_is_seen_through_a_wall_the_free_camera_looks_at_on(table: i64) {
+  dev = gpu::open(table, 64, 48, "scene-through") ?? return assert(false, "no device");
   scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, SKY) ?? return assert(false, "no scene");
   _ = scene.add_picture([for _ in 0..256 { 2016 as i32 }]);
   _ = scene.add_picture([for _ in 0..256 { 63488 as i32 }]);
@@ -236,9 +263,13 @@ fn test_the_hero_is_seen_through_a_wall_the_free_camera_looks_at() {
   assert(at(c, 32, 24) == GREEN && at(c, 27, 24) == GREEN && at(c, 25, 24) == SKY, "the wall, shown: {at(c, 32, 24):x} {at(c, 27, 24):x} {at(c, 25, 24):x}");
 }
 
-fn test_a_pixel_on_a_texels_edge_takes_the_texel_before_it() {
+fn test_the_hero_is_seen_through_a_wall_the_free_camera_looks_at() {
   if !display() { return; }
-  dev = gpu::open(gpu_gl::table(), 64, 48, "scene-ties") ?? return assert(false, "no device");
+  for table in backends() { the_hero_is_seen_through_a_wall_the_free_camera_looks_at_on(table); }
+}
+
+fn a_pixel_on_a_texels_edge_takes_the_texel_before_it_on(table: i64) {
+  dev = gpu::open(table, 64, 48, "scene-ties") ?? return assert(false, "no device");
   scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, SKY) ?? return assert(false, "no scene");
   // The picture's first row red, the rest green.  On the ground of cell (0, 0) a texel is 40 / 16
   // = 2.5 pixels deep, so the middle of pixel row 2 (y = 2.5) lies exactly on the edge between
@@ -258,9 +289,13 @@ fn test_a_pixel_on_a_texels_edge_takes_the_texel_before_it() {
   assert(at(c, 10, 7) == GREEN && at(c, 2, 1) == RED && at(c, 3, 1) == RED, "elsewhere: {at(c, 10, 7):x} {at(c, 2, 1):x}");
 }
 
-fn test_a_screen_is_drawn_as_large_as_fits_in_the_window() {
+fn test_a_pixel_on_a_texels_edge_takes_the_texel_before_it() {
   if !display() { return; }
-  dev = gpu::open(gpu_gl::table(), 64, 48, "scene-fit") ?? return assert(false, "no device");
+  for table in backends() { a_pixel_on_a_texels_edge_takes_the_texel_before_it_on(table); }
+}
+
+fn a_screen_is_drawn_as_large_as_fits_in_the_window_on(table: i64) {
+  dev = gpu::open(table, 64, 48, "scene-fit") ?? return assert(false, "no device");
   scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, SKY) ?? return assert(false, "no scene");
   // the picture's first row red, the rest green, on the ground of cell (0, 0)
   rows: vector<i32> = [];
@@ -283,4 +318,9 @@ fn test_a_screen_is_drawn_as_large_as_fits_in_the_window() {
   c = dev.capture();
   assert(at(c, 0, 0) == RED && at(c, 63, 4) == RED && at(c, 10, 5) == GREEN, "twice as large: {at(c, 0, 0):x} {at(c, 63, 4):x} {at(c, 10, 5):x}");
   assert(at(c, 0, 47) == GREEN && at(c, 63, 47) == GREEN, "no bars: {at(c, 0, 47):x}");
+}
+
+fn test_a_screen_is_drawn_as_large_as_fits_in_the_window() {
+  if !display() { return; }
+  for table in backends() { a_screen_is_drawn_as_large_as_fits_in_the_window_on(table); }
 }

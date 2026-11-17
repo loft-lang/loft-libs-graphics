@@ -1,0 +1,64 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// A `gpu` device on the backend this machine has.
+//
+//   dev = gpu_host::open(960, 720, "view") ?? return;
+//
+// A game depends on this library and on `gpu`, and names no backend: each one is asked in turn,
+// and a backend whose stack this machine lacks answers none.  The order is Metal, then OpenGL —
+// so a Mac draws through Metal, and Linux, Android and a browser page through OpenGL.
+//
+// The environment variable `GPU_HOST` names the one backend to ask (`gpu_metal`, `gpu_gl`): for
+// a comparison of two backends on one machine, not for a game to set.
+use gpu;
+use gpu_gl;
+use gpu_metal;
+
+// The backends in the order they are asked, each with its table (0: not on this machine).
+struct Backend {
+  name: text,
+  table: i64,
+}
+
+fn all() -> vector<Backend> {
+  [
+    Backend { name: "gpu_metal", table: gpu_metal::table() },
+    Backend { name: "gpu_gl", table: gpu_gl::table() },
+  ]
+}
+
+// The names of the backends this machine has a table for, in the order they are asked.  One
+// that is listed may still open no window: its stack is looked for when a device opens.
+pub fn backends() -> vector<text> {
+  [for b in all() if b.table != 0 { b.name }]
+}
+
+fn first(only: text, width: integer, height: integer, title: text, whole_screen: boolean) -> gpu::Device? {
+  for b in all() {
+    if b.table != 0 && (only == "" || only == b.name) {
+      dev = if whole_screen { gpu::open_fullscreen(b.table, title) } else { gpu::open(b.table, width, height, title) };
+      if dev != null { return dev; }
+    }
+  }
+  null
+}
+
+// Open a window of `width` x `height` pixels on the first backend that has one to give.  Null
+// when none does: the machine has no GPU this library knows, or no display.
+pub fn open(width: integer, height: integer, title: text) -> gpu::Device? {
+  first(env_variable("GPU_HOST") ?? "", width, height, title, false)
+}
+
+// Open a window over the whole screen, as `gpu::open_fullscreen` does, on the first backend
+// that has one to give.
+pub fn open_fullscreen(title: text) -> gpu::Device? {
+  first(env_variable("GPU_HOST") ?? "", 0, 0, title, true)
+}
+
+// Open a window on the backend named `backend` alone (a name `backends()` lists).  For a test
+// or a measurement that compares two backends; a game calls `open`.
+pub fn open_on(backend: text, width: integer, height: integer, title: text) -> gpu::Device? {
+  if backend == "" { return null; }
+  first(backend, width, height, title, false)
+}
