@@ -1,7 +1,9 @@
 [package]
 name = "gpu_gl"
 version = "0.2.0"
-loft = ">=2026.10.0"
+# Its shim includes gpu's header by the dependency's name (`gpu/gpu_backend.h`), which loft
+# provides from the daily build that carries its decision C165 on.
+loft = ">=2026.11.20261116"
 repository = "loft-libs-graphics"
 description = "The OpenGL backend of gpu: OpenGL 3.3 on Linux and macOS, OpenGL ES 3 on Android, WebGL2 in a page"
 categories  = ["graphics", "game"]

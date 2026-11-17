@@ -1,7 +1,9 @@
 [package]
 name = "gpu_record"
 version = "0.2.0"
-loft = ">=2026.10.0"
+# Its shim includes gpu's header by the dependency's name (`gpu/gpu_backend.h`), which loft
+# provides from the daily build that carries its decision C165 on.
+loft = ">=2026.11.20261116"
 repository = "loft-libs-graphics"
 description = "A GPU backend that draws nothing and writes down every call it receives: for testing a program's drawing on a machine with no display"
 categories  = ["graphics", "development-tools"]
