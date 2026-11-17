@@ -24,7 +24,7 @@
  * `graphics_gl.c`, the GG_COCOA parts), with a Metal layer where that has an OpenGL context:
  * the same key codes, the same events, a size in points.  A window lives on the main thread;
  * Metal itself is called on the thread that draws. */
-#include "../../gpu/c/gpu_backend.h"
+#include "gpu/gpu_backend.h"
 #include <stddef.h>
 
 #if defined(__APPLE__) && !defined(__wasm__)

@@ -1,0 +1,107 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// A town seen by the free camera is one picture on every backend this machine has, but for
+// the pixels an edge runs through the middle of.
+//
+// THE TOLERANCE, measured (2026-11-17, an Apple M3 Max, `gpu_metal` against `gpu_gl`):
+//   - a scene whose edges lie on pixel borders (tests/pixels.loft, tests/torches.loft, and the
+//     backends' own suites) is the same byte for byte;
+//   - a scene in perspective differs in single pixels where a face's edge, or the border of two
+//     texels, passes within rounding of a pixel's middle: the pixel then shows the face or the
+//     texel on the other side.  At 960 x 720, 12 views of the town of gpu_host/bench: at most 39
+//     of 691,200 pixels a frame (0.006 %), 336 in all;
+//   - that is as much as one backend differs from ITSELF when it draws the same view into a
+//     texture instead of the window (OpenGL 358, Metal 371 over the same 12 views), so it is the
+//     rasteriser's rounding at an edge, not a difference in what the two are asked to draw;
+//   - not the cause: Metal's fast-math compilation (the count is the same with it off).
+// So the bound here is a count of pixels and no channel step — a pixel on the wrong side of an
+// edge shows another face's colour whole: at most 1 pixel in 5,000.  This test's four views at
+// 320 x 240 differ in 0, 0, 2 and 0 pixels.
+// Without a display, or on a machine with one backend, the test returns at once.
+use gpu;
+use gpu_gl;
+use gpu_metal;
+use scene3d;
+
+fn display() -> boolean {
+  (env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1"
+}
+
+fn backends() -> vector<i64> {
+  [for t in [gpu_gl::table(), gpu_metal::table()] if t != 0 { t }]
+}
+
+fn s(v: const vector<float>) -> vector<single> {
+  [for x in v { x as single }]
+}
+
+// A picture: a grid of two RGB565 colours.
+fn picture(a: integer, b: integer) -> vector<i32> {
+  out: vector<i32> = [];
+  for y in 0..16 { for x in 0..16 { out += [((if (x / 4 + y / 4) % 2 == 0 { a } else { b }) & 65535) as i32]; } }
+  out
+}
+
+fn face(out: vector<float>, pic: integer, x: integer, z: integer, lk: float, corners: const vector<float>) {
+  out += [pic as float, -1.0, (len(corners) / 6) as float, x as float, z as float, 0.0, lk];
+  out += corners;
+}
+
+// A town of 16 x 12 cells: ground, and on every fifth cell a block with its top and two sides.
+fn town() -> vector<float> {
+  out: vector<float> = [];
+  for z in 0..12 {
+    for x in 0..16 {
+      fx = x as float;
+      fz = z as float;
+      if (x + 2 * z) % 5 == 0 {
+        face(out, 1, x, z, 1.0, [fx, 1.0, fz, 0.0, 0.0, 1.0, fx + 1.0, 1.0, fz, 1.0, 0.0, 1.0, fx + 1.0, 1.0, fz + 1.0, 1.0, 1.0, 1.0, fx, 1.0, fz + 1.0, 0.0, 1.0, 1.0]);
+        face(out, 2, x, z, 0.8, [fx, 1.0, fz + 1.0, 0.0, 0.0, 1.0, fx + 1.0, 1.0, fz + 1.0, 1.0, 0.0, 1.0, fx + 1.0, 0.0, fz + 1.0, 1.0, 1.0, 1.0, fx, 0.0, fz + 1.0, 0.0, 1.0, 1.0]);
+        face(out, 2, x, z, 0.6, [fx + 1.0, 1.0, fz + 1.0, 0.0, 0.0, 1.0, fx + 1.0, 1.0, fz, 1.0, 0.0, 1.0, fx + 1.0, 0.0, fz, 1.0, 1.0, 1.0, fx + 1.0, 0.0, fz + 1.0, 0.0, 1.0, 1.0]);
+      } else {
+        face(out, 0, x, z, 1.0, [fx, 0.0, fz, 0.0, 0.0, 1.0, fx + 1.0, 0.0, fz, 1.0, 0.0, 1.0, fx + 1.0, 0.0, fz + 1.0, 1.0, 1.0, 1.0, fx, 0.0, fz + 1.0, 0.0, 1.0, 1.0]);
+      }
+    }
+  }
+  out
+}
+
+// Four views of the town from the south-east, each a step further round.
+fn views(table: i64) -> vector<vector<u32>> {
+  out: vector<vector<u32>> = [];
+  dev = gpu::open(table, 320, 240, "town") ?? return out;
+  scene = scene3d::new_scene(dev, gpu::INTO_WINDOW, 0xFF94BFE6) ?? return out;
+  _ = scene.add_picture(picture(19270, 17226));
+  _ = scene.add_picture(picture(44374, 31696));
+  _ = scene.add_picture(picture(38603, 27397));
+  scene.set_tile(dev, 1, s(town()));
+  for i in 0..4 {
+    turn = (20 + 37 * i) as float * PI / 180.0;
+    scene.free_camera((8.0 + 9.0 * cos(turn), 5.0, 6.0 + 8.0 * sin(turn)), (8.0, 0.0, 6.0), 55.0);
+    scene.draw(dev);
+    out += [dev.capture()];
+  }
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  out
+}
+
+fn test_a_town_in_perspective_is_one_picture_but_for_pixels_on_an_edge() {
+  if !display() { return; }
+  tables = backends();
+  if len(tables) < 2 { return; }
+  first = views(tables[0]);
+  second = views(tables[1]);
+  assert(len(first) == 4 && len(second) == 4, "both backends drew four views: {len(first)} and {len(second)}");
+  for i in 0..4 {
+    differ = 0;
+    colours = 0;
+    for p in first[i] {
+      if p != (second[i][p#index] ?? 0) { differ += 1; }
+      if p != first[i][0] { colours += 1; }
+    }
+    assert(colours > 10000, "view {i} shows the town: {colours} pixels are not the first one's colour");
+    // 1 in 5,000 of 76,800
+    assert(differ <= 15, "view {i}: {differ} of 76800 pixels differ between the backends, more than an edge's rounding gives");
+  }
+}
