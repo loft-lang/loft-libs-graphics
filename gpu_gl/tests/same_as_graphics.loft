@@ -174,15 +174,35 @@ fn picture() -> vector<u32> {
 
 // ── the comparison ──
 
+// How far two channels of a pixel lie apart at most.
+fn apart(a: integer, b: integer) -> integer {
+  most = 0;
+  for shift in [0, 8, 16, 24] {
+    d = ((a >> shift) & 255) - ((b >> shift) & 255);
+    if d < 0 { d = -d; }
+    if d > most { most = d; }
+  }
+  most
+}
+
+// What two pictures may lie apart in a channel: nothing on a GPU, nor on Mesa's software
+// renderer.  Apple's software renderer, the OpenGL of a Mac with no GPU to give it (a CI
+// runner), does not round a sampled colour the same way every run: 1 of 255 in 5 pixels of one
+// scene, in one run of four.
+fn rounding() -> integer {
+  if gpu_gl::renderer() == "Apple Software Renderer" { 2 } else { 0 }
+}
+
 // A window of `gpu` has no alpha and reads back opaque; one of graphics reads back the alpha
 // that was drawn where the machine's window has one, so its alpha is not compared.
 fn same(old: const vector<u32>, new: const vector<u32>, what: text) {
   assert(len(old) == len(new) && len(old) > 0, "{what}: {len(old)} pixels through graphics, {len(new)} through gpu");
+  allowed = rounding();
   differ = 0;
   first = -1;
   colours = 0;
   for p in old {
-    if (p as integer) | 0xFF000000 != ((new[p#index] ?? 0) as integer) {
+    if apart((p as integer) | 0xFF000000, (new[p#index] ?? 0) as integer) > allowed {
       differ += 1;
       if first < 0 { first = p#index; }
     }
