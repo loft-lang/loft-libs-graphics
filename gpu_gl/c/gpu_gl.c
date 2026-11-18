@@ -98,6 +98,32 @@ static int gq_bind_block_api(gq_dev *d) {
            GQ_MORE(glGetActiveUniformBlockiv) && GQ_MORE(glGetActiveUniformsiv);
 }
 
+/* The OpenGL renderer of the window opened last, as its driver names it; empty in a page. */
+static char gq_renderer_text[256];
+
+static void gq_note_renderer(gq_dev *d) {
+    const unsigned char *(*get)(unsigned) = NULL;
+    const unsigned char *name;
+    gq_window *w = d->w;
+    (void) w;
+#if defined(GQ_X11)
+    *(void **) (&get) = w->xa.glXGetProcAddressARB((const unsigned char *) "glGetString");
+#elif defined(GQ_COCOA)
+    *(void **) (&get) = dlsym(gc.gl, "glGetString");
+#elif defined(GQ_ANDROID)
+    *(void **) (&get) = dlsym(w->libgles, "glGetString");
+#endif
+    if (!get || !gq_use(w, "gpu open")) return;
+    name = get(0x1F01u); /* GL_RENDERER */
+    if (!name) return;
+    strncpy(gq_renderer_text, (const char *) name, sizeof gq_renderer_text - 1);
+    gq_renderer_text[sizeof gq_renderer_text - 1] = 0;
+}
+
+const char *gq_renderer(void) {
+    return gq_renderer_text;
+}
+
 static gq_dev *gq_dev_of(int64_t dev) {
     gq_window *w = gq_of(dev);
     gq_dev *d;
@@ -128,6 +154,7 @@ static int64_t gq_t_open(int64_t width, int64_t height, const char *title, int64
     }
     d->w = gq_of(h);
     d->more_ok = gq_bind_block_api(d);
+    gq_note_renderer(d);
 #if defined(GQ_X11)
     *(void **) (&d->copy_tex) =
         d->w->xa.glXGetProcAddressARB((const unsigned char *) "glCopyTexSubImage2D");
@@ -682,6 +709,10 @@ int64_t gq_table(void) {
 
 int64_t gq_table(void) {
     return 0;
+}
+
+const char *gq_renderer(void) {
+    return "";
 }
 
 #endif

@@ -302,3 +302,63 @@ fn test_frames_are_presented_one_after_another() {
   }
   assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
 }
+
+// ── a viewport that reaches outside what the pass draws into ──
+
+const PLAIN_V: text = `
+struct In {{ float2 pos [[attribute(0)]]; }};
+struct Out {{ float4 position [[position]]; }};
+vertex Out vertex_main(In in [[stage_in]]) {{
+  Out o;
+  o.position = gpu_position(float4(in.pos, 0.0, 1.0));
+  return o;
+}}
+`;
+
+fn plain() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F2],
+    instance: [],
+    block: [],
+    textures: 0,
+    sources: [gpu::source("msl", PLAIN_V, WHITE_F)],
+  }
+}
+
+// The white pixels of one triangle, corners (-1, -1), (1, -0.6) and (-0.2, 1), drawn through the
+// viewport (x, y, width, height) into the window or a 64 x 48 target.
+fn covered(into_target: boolean, x: integer, y: integer, width: integer, height: integer) -> integer {
+  dev = gpu::open(gpu_metal::table(), 64, 48, "host-viewport") ?? return -1;
+  pipe = dev.pipeline(plain(), gpu::State { into: if into_target { gpu::INTO_COLOUR } else { gpu::INTO_WINDOW } }) ?? return -2;
+  corners = dev.buffer([-1.0f, -1.0f, 1.0f, -0.6f, -0.2f, 1.0f]);
+  colour = dev.texture(64, 48);
+  target = dev.colour_target(colour);
+  if into_target { dev.begin(target, gpu::CLEAR, 0xFF000000); } else { dev.begin_window(gpu::CLEAR, 0xFF000000); }
+  dev.bind(pipe);
+  dev.vertices(corners);
+  dev.viewport(x, y, width, height);
+  dev.draw(0, 3);
+  dev.end();
+  c = if into_target { dev.capture_of(target) } else { dev.capture() };
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  white = 0;
+  for p in c {
+    if p == 0xFFFFFFFF { white += 1; }
+  }
+  white
+}
+
+// The part inside is drawn, and it is the part the whole viewport puts there.  Counted by hand,
+// a pixel drawn when its middle lies inside the triangle: the viewport (-100, 20, 300, 20) maps
+// the 64 columns onto clip x from -1/3 to 7/75, and covers 1045 middles, one more lying on an
+// edge, which the rasteriser's tie rule decides; the viewport (10, -4000, 20, 8000) maps the 48
+// rows onto clip y from 0 to 0.012, where the triangle spans 11 columns: 11 x 48 = 528.
+fn test_a_viewport_that_reaches_outside_draws_the_part_inside() {
+  if !display() { return; }
+  for into_target in [false, true] {
+    wide = covered(into_target, -100, 20, 300, 20);
+    assert(wide == 1045 || wide == 1046, "the viewport 300 pixels wide: {wide} pixels drawn (1045, or 1046 with the edge one)");
+    tall = covered(into_target, 10, -4000, 20, 8000);
+    assert(tall == 528, "the viewport 8000 pixels tall: {tall} pixels drawn");
+  }
+}

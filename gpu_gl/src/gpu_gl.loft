@@ -22,3 +22,14 @@ fn gq_table() -> integer;
 pub fn table() -> i64 {
   gq_table()
 }
+
+fn gq_renderer() -> text;
+#c "gq_renderer" "const char*()"
+
+// The OpenGL renderer of the window opened last through this backend, as its driver names it:
+// "Apple M3 Max", "llvmpipe (LLVM 19.1.7, 256 bits)", "Apple Software Renderer".  Empty before
+// a window opened, and in a browser page.  A test that measures another backend against this
+// one reads it to know what it measures against.
+pub fn renderer() -> text {
+  gq_renderer()
+}
