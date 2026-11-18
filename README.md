@@ -59,6 +59,24 @@ packages in this multi-package repo (same as
 | shapes 0.4.1 | `shapes-v0.4.1` |
 | gridmesh 0.2.1 | `gridmesh-v0.2.1` |
 
+## Where the drawing is tested
+
+A test that draws needs a display, and returns at once where it finds none.  A package says
+where its tests draw with a marker file at its root, holding the reason:
+
+| Marker | What the library CI gives the package |
+|---|---|
+| `.x11_window` | An X server that draws in memory (Xvfb) and Mesa's software OpenGL and Vulkan, on the Linux runner |
+| `.macos_window` | A second run on a macOS runner with windows on: a paravirtual Metal and Apple's software OpenGL |
+
+On both, `GRAPHICS_TEST_MUST_DRAW=1` makes a test that finds no display fail; each test file's
+`display()` asks it.  No runner has a GPU of its own, so a comparison that is exact on a GPU
+allows a software renderer its rounding there (`gpu_gl::renderer()` says which one draws).
+
+The exact comparison is run by hand, on a Mac with a GPU, before a release of a `gpu` package:
+[`gpu_on_a_mac.sh`](gpu_on_a_mac.sh) runs their tests on the three backends, `gpu_metal`'s
+under Metal's validation, and its two devices on two threads under the thread sanitizer.
+
 ## License
 
 LGPL-3.0-or-later — see [LICENSE](LICENSE).
