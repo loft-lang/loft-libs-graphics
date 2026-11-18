@@ -1,0 +1,1 @@
+Its tests draw through Metal into a window and compare the pictures with gpu_gl's OpenGL; on Linux they find no Mac and return at once.

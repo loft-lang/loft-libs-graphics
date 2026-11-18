@@ -105,7 +105,8 @@ timed scene also as a shipped program (one executable that links the system libr
   Every scene is the same byte for byte.
 - **`tests/host.loft`** checks against values worked out by hand: an RGB565 frame's colours, a
   target read back, a block larger than a frame copies, each source this backend refuses, a
-  device closed before what it made, and frames presented one after another.
+  device closed before what it made, frames presented one after another, and the pixels a
+  viewport reaching far outside the window and a target covers, counted by hand.
 - **The tolerance** between this backend and `gpu_gl`: none for a scene whose edges lie on pixel
   borders.  In perspective, a pixel whose middle a face's edge passes through may show the face
   on the other side: 20 to 80 of 691,200 pixels a view in the views measured (at most 0.012 %),
@@ -122,6 +123,14 @@ timed scene also as a shipped program (one executable that links the system libr
 - **Timed** by `gpu_host/bench/backends.loft`, a town of 48 x 32 cells with 64 moving actors in
   a 960 x 720 window, as a shipped program: a frame costs 181 to 184 µs here and 185 to 206 µs on
   `gpu_gl`.  A frame shown waits for the display it is on.
+
+On a GitHub macOS runner, in the library CI (`.macos_window`): all the tests pass on the
+interpreter and the C backend.  The runner is a virtual machine: Metal is a paravirtual GPU,
+and the OpenGL measured against is Apple's software renderer (`gpu_gl::renderer()`).  Against
+it `same_as_gl.loft` allows 2 of 255 in a channel, where the software renderer rounds its own
+way, and leaves the viewport scene to `host.loft`'s hand counts: the software renderer covers
+893 of the 1045 pixels the 300-pixel-wide viewport puts in the window, and none of the 528 the
+8000-pixel-tall one does.
 
 | Host | State |
 |---|---|

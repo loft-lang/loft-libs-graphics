@@ -1126,44 +1126,54 @@ static gm_window *gm_touching(const gm_res *t, gm_window *w) {
     return NULL;
 }
 
-/* Wait for the GPU work that still reads or draws into `t`, so its pixels can be touched.  What
- * a pass in progress recorded is handed over first and the pass goes on behind it: a draw made
- * before this call shows the old pixels, a draw made after it the new ones.  The queue runs
- * its work in the order it was handed over, so the last of it is the one to wait for. */
-static void gm_settle(gm_res *t) {
-    gm_window *w;
-    for (w = gm_touching(t, NULL); w; w = gm_touching(t, w)) {
-        if (w->recorded) {
-            gm_hand_over(w);
-            gm_resume(w);
-        }
-        if (w->last) gm_v(w->last, "waitUntilCompleted");
-    }
-    if (!t->used || gm_l(t->used, "status") < 2ul) return; /* none, or a pass that goes on */
-    gm_v(t->used, "waitUntilCompleted");
-    gm_drop(&t->used);
-}
-
 /* Replace a `width` x `height` region at (x, y) of a colour texture: a 0xAARRGGBB word is the
- * texture's own four bytes.  A region that leaves the texture is not written. */
+ * texture's own four bytes.  A region that leaves the texture is not written.
+ *
+ * The pixels reach the texture through the GPU's own queue, copied from a buffer, never written
+ * by the CPU: a texture the GPU drew into is not the CPU's to write on every Mac (on a virtual
+ * one, a CPU write handed the GPU the whole texture as the CPU last saw it, and lost what the
+ * pass had drawn).  What a pass in progress recorded is handed over first and the pass goes on
+ * behind the copy, so a draw made before the put shows the old pixels and one made after it the
+ * new ones: the queue runs its work in the order it was handed over. */
 static void gm_texture_put(int64_t tex, int64_t x, int64_t y, int64_t width, int64_t height,
                            const uint32_t *px, int64_t n) {
     gm_res *r = gm_res_of(tex, GM_TEXTURE);
-    gm_region region;
+    gm_origin at, size;
+    gm_id staged, cb, blit;
+    gm_window *w;
     void *pool;
-    if (!r || r->depth || width <= 0 || height <= 0 || n < width * height) return;
+    if (!r || r->depth || width <= 0 || height <= 0 || n < width * height || gm.loaded <= 0) return;
     if (x < 0 || y < 0 || x + width > r->width || y + height > r->height) return;
     pool = gm.pool_push();
-    gm_settle(r);
-    region.x = (unsigned long) x;
-    region.y = (unsigned long) y;
-    region.z = 0;
-    region.width = (unsigned long) width;
-    region.height = (unsigned long) height;
-    region.depth = 1;
-    ((void (*)(gm_id, gm_sel, gm_region, unsigned long, const void *, unsigned long)) gm.msg)(
-        r->obj, gm_s("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"), region, 0ul, px,
-        (unsigned long) width * 4ul);
+    staged = gm_bytes(px, width * height * 4);
+    cb = staged ? gm_o(gm.queue, "commandBuffer") : NULL;
+    blit = cb ? gm_o(cb, "blitCommandEncoder") : NULL;
+    if (!blit) {
+        gm.pool_pop(pool);
+        return;
+    }
+    for (w = gm_touching(r, NULL); w; w = gm_touching(r, w)) gm_hand_over(w);
+    at.x = (unsigned long) x;
+    at.y = (unsigned long) y;
+    at.z = 0;
+    size.x = (unsigned long) width;
+    size.y = (unsigned long) height;
+    size.z = 1;
+    ((void (*)(gm_id, gm_sel, gm_id, unsigned long, unsigned long, unsigned long, gm_origin, gm_id,
+               unsigned long, unsigned long, gm_origin)) gm.msg)(
+        blit,
+        gm_s("copyFromBuffer:sourceOffset:sourceBytesPerRow:sourceBytesPerImage:sourceSize:"
+             "toTexture:destinationSlice:destinationLevel:destinationOrigin:"),
+        staged, 0ul, (unsigned long) width * 4ul, (unsigned long) (width * height) * 4ul, size,
+        r->obj, 0ul, 0ul, at);
+    gm_v(blit, "endEncoding");
+    gm_v(cb, "commit");
+    gm_keep(&r->used, cb);
+    for (w = gm_own(NULL); w; w = gm_own(w))
+        if (w->paused) {
+            gm_keep(&w->last, cb);
+            gm_resume(w);
+        }
     gm.pool_pop(pool);
 }
 

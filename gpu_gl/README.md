@@ -21,6 +21,10 @@ dev = gpu::open(gpu_gl::table(), 960, 720, "view") ?? return;
 `table()` answers 0 on a machine this library has no window host for, and `open` answers null
 where the machine has no OpenGL: both are how a backend says "not here".
 
+`renderer()` is the OpenGL renderer of the window opened last, as its driver names it ("Apple
+M3 Max", "llvmpipe (LLVM 19.1.7, 256 bits)", "Apple Software Renderer"); empty in a page.  A
+test that measures another backend against this one reads it to know what it measures against.
+
 Built for consumers, none yet: `graphics` and `stage` move onto `gpu` next.
 
 ## What a shader source for it follows
@@ -72,8 +76,9 @@ drawn into a colour and depth target first.
 | Host | State |
 |---|---|
 | macOS (OpenGL 4.1 through AppKit) | The eight tests pass on the interpreter, the C backend, a shipped program and the Rust backend |
+| macOS, a GitHub runner (Apple Software Renderer) | The tests pass on the interpreter and the C backend, in the library CI (`.macos_window`) |
 | A browser page (WebGL2, headless Chrome) | The eight tests pass in both writers' pages |
-| Linux (X11 and GLX) | Not run: the code is graphics' own, the four block calls are looked up as its others are |
+| Linux (X11 and GLX, under Xvfb: llvmpipe) | The tests pass on the interpreter and the C backend |
 | Android (OpenGL ES 3) | Not run |
 
 A page needs a loft whose page bridge has the four uniform-block calls (`loft-gl-wasm.js`,
