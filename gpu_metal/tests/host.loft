@@ -289,6 +289,9 @@ fn test_a_target_dropped_inside_its_pass_is_drawn_into_until_the_pass_ends() {
   dev.end();
   begin_into(dev, held);
   other = dev.colour_target(aside);
+  // a texture written inside the pass: a backend that stops drawing for the copy takes the
+  // pass up again from what it holds of the target
+  picture.put(0, 0, [0xFF102030 as u32, 0xFF405060 as u32, 0xFF708090 as u32, 0xFFA0B0C0 as u32], 2, 2);
   dev.bind(into_colour);
   dev.sample(0, picture);
   dev.vertices(quad);
