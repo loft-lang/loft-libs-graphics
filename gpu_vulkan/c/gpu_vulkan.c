@@ -111,6 +111,7 @@ typedef struct {
     gv_res res;
     gv_image *colour, *depth;
     int width, height;
+    int dropped; /* released inside the pass that draws into it: the record goes when that ends */
 } gv_target;
 
 typedef struct {
@@ -318,11 +319,26 @@ static void gv_wait(gv_dev *d, uint64_t serial) {
 static VkCommandBuffer gv_cmd(gv_dev *d) {
     gv_frame *f = &d->frames[d->cur];
     VkCommandBufferBeginInfo bi;
-    gv_chunk *c;
+    gv_chunk *c, **at;
+    int kept = 0;
     if (d->recording) return f->cb;
     if (f->serial) gv_wait(d, f->serial);
     d->f.vkResetFences(d->device, 1, &f->fence);
-    for (c = f->chunks; c; c = c->next) c->used = 0;
+    /* The GPU is past this frame's last round.  A chunk that round did not write into is given
+     * back, but for one of the usual size; a larger one is made for one upload and goes after
+     * the first round that has no use for it. */
+    for (at = &f->chunks; (c = *at) != NULL;) {
+        if (c->used == 0 && (c->size > GV_CHUNK || kept)) {
+            *at = c->next;
+            d->f.vkDestroyBuffer(d->device, c->buffer, NULL);
+            d->f.vkFreeMemory(d->device, c->memory, NULL);
+            free(c);
+            continue;
+        }
+        if (c->size <= GV_CHUNK) kept = 1;
+        c->used = 0;
+        at = &c->next;
+    }
     d->f.vkResetCommandBuffer(f->cb, 0);
     memset(&bi, 0, sizeof bi);
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -336,7 +352,7 @@ static VkCommandBuffer gv_cmd(gv_dev *d) {
 static unsigned char *gv_stage(gv_dev *d, VkDeviceSize size, VkDeviceSize align, VkBuffer *buffer,
                                VkDeviceSize *offset) {
     gv_frame *f;
-    gv_chunk *c;
+    gv_chunk *c, **at;
     gv_cmd(d);
     f = &d->frames[d->cur];
     if (align < 16) align = 16;
@@ -361,8 +377,10 @@ static unsigned char *gv_stage(gv_dev *d, VkDeviceSize size, VkDeviceSize align,
         free(c);
         return NULL;
     }
-    c->next = f->chunks;
-    f->chunks = c;
+    /* Kept by size, so a small write fills a chunk of the usual size before a larger one. */
+    for (at = &f->chunks; *at && (*at)->size < c->size; at = &(*at)->next) {}
+    c->next = *at;
+    *at = c;
     c->used = size;
     *buffer = c->buffer;
     *offset = 0;
@@ -754,6 +772,7 @@ static int gv_back(gv_dev *d) {
 }
 
 static void gv_free(gv_dev *d);
+static void gv_pass_over(gv_dev *d);
 
 /* Why a device did not open, on stderr, when that is not the stack being absent: a window that
  * did not open on a display that is set, or a driver that suits the window failing to make what
@@ -890,6 +909,7 @@ static void gv_teardown(gv_dev *d) {
     int i;
     if (d->device) {
         d->f.vkDeviceWaitIdle(d->device);
+        gv_pass_over(d);
         while ((r = d->res) != NULL) {
             gv_dead x;
             memset(&x, 0, sizeof x);
@@ -1584,6 +1604,11 @@ static void gv_t_release(int64_t handle) {
     if (!r) return;
     d = r->d;
     if (!r->gone) {
+        if (r->kind == GV_TARGET && d->target == (gv_target *) r) {
+            /* the pass draws into it still: it is released when the pass ends */
+            ((gv_target *) r)->dropped = 1;
+            return;
+        }
         memset(&x, 0, sizeof x);
         gv_unlink(r);
         if (r->kind == GV_BUFFER) {
@@ -1627,6 +1652,13 @@ static void gv_t_release(int64_t handle) {
 }
 
 /* ── a pass ────────────────────────────────────────────────────────────────────────────────── */
+
+/* The pass no longer draws into its target: one released meanwhile is released now. */
+static void gv_pass_over(gv_dev *d) {
+    gv_target *t = d->target;
+    d->target = NULL;
+    if (t && t->dropped) gv_t_release((int64_t) (intptr_t) &t->res);
+}
 
 /* Stop drawing for a copy or a read in the middle of a pass; the next draw draws on. */
 static void gv_pause(gv_dev *d) {
@@ -1685,9 +1717,10 @@ static void gv_t_begin(int64_t dev, int64_t target, int64_t load, int64_t colour
     gv_dev *d = gv_of(dev);
     gv_target *t = (gv_target *) (intptr_t) target;
     if (!d) return;
-    if (t && (t->res.gone || t->res.kind != GV_TARGET)) return;
+    if (t && (t->res.gone || t->res.kind != GV_TARGET || t->dropped)) return;
     if (!t && !gv_back(d)) return;
     gv_pause(d);
+    if (d->target != t) gv_pass_over(d); /* a pass begun inside another ends that one */
     d->in_pass = 1;
     d->target = t;
     d->into = t ? (t->colour && t->depth ? 2 : t->colour ? 1 : 3) : 0;
@@ -1898,7 +1931,7 @@ static void gv_t_end(int64_t dev) {
         if (d->target->depth) gv_layout(d, d->target->depth, gv_rest(d, d->target->depth));
     }
     d->in_pass = 0;
-    d->target = NULL;
+    gv_pass_over(d);
     d->pipe = NULL;
 }
 
@@ -1912,14 +1945,19 @@ static void gv_t_present(int64_t dev) {
     uint32_t index = 0;
     VkResult r;
     if (!d || d->in_pass || !d->back) return;
-    if ((d->sc_stale || !d->swapchain) && !gv_swapchain(d)) return;
-    gv_cmd(d); /* the frame's acquire semaphore is free once its last submission ran */
-    r = d->f.vkAcquireNextImageKHR(d->device, d->swapchain, ~0ULL, d->frames[d->cur].acquired, 0, &index);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR) {
-        d->sc_stale = 1;
+    /* A frame that cannot be shown is still drawn: what it recorded is submitted, so its
+     * commands and the memory it staged are the next frame's to use again. */
+    if ((d->sc_stale || !d->swapchain) && !gv_swapchain(d)) {
+        gv_submit(d, -1);
         return;
     }
-    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return;
+    gv_cmd(d); /* the frame's acquire semaphore is free once its last submission ran */
+    r = d->f.vkAcquireNextImageKHR(d->device, d->swapchain, ~0ULL, d->frames[d->cur].acquired, 0, &index);
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
+        if (r == VK_ERROR_OUT_OF_DATE_KHR) d->sc_stale = 1;
+        gv_submit(d, -1);
+        return;
+    }
     if (r == VK_SUBOPTIMAL_KHR) d->sc_stale = 1;
     gv_layout(d, d->back, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     gv_levels(d, d->sc_images[index], 0, 0, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -1965,6 +2003,10 @@ static void gv_t_capture(int64_t dev, int64_t target, uint32_t *out, int64_t n) 
     int was, y;
     if (!d) return;
     if (t && (t->res.gone || t->res.kind != GV_TARGET)) return;
+    /* The window at its size now: one that changed size since its last pass reads opaque
+     * black, as a window nothing was drawn in.  A pass into the window keeps its image. */
+    gv_pause(d);
+    if (!t && (!d->in_pass || d->target) && !gv_back(d)) return;
     im = t ? t->colour : d->back;
     if (!im || n != (int64_t) im->width * im->height || n <= 0) return;
     if (!gv_make_buffer(d, (VkDeviceSize) n * 4u, VK_BUFFER_USAGE_TRANSFER_DST_BIT,

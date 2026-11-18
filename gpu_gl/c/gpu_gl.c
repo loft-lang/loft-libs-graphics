@@ -55,6 +55,7 @@ typedef struct gq_dev {
     unsigned scratch;
     struct gq_pipe *bound;
     int in_pass, unit;
+    int64_t dropped; /* the pass's target, released inside the pass: it goes when that ends */
     int shown; /* the window's frame was presented and nothing was drawn in it since */
     unsigned unit_tex[GQ_MAX_SLOTS];
 #if defined(GQ_X11)
@@ -179,6 +180,7 @@ static void gq_t_close(int64_t dev) {
             }
 #endif
             *at = d->next;
+            if (d->dropped) gq_release(d->dropped);
             free(d);
             break;
         }
@@ -546,6 +548,14 @@ static void gq_t_release(int64_t h) {
         gq_res *r = gq_res_of(h);
         gq_dev *d;
         int i;
+        /* The target a pass draws into is released when that pass ends: deleting the bound
+         * framebuffer would turn the pass's remaining draws to the window. */
+        for (d = gq_devs; r && r->kind == GQ_FRAMEBUFFER && d; d = d->next) {
+            if (d->w == r->w && d->in_pass && !d->dropped && d->w->target == r->id) {
+                d->dropped = h;
+                return;
+            }
+        }
         for (d = gq_devs; r && r->kind == GQ_TEXTURE && d; d = d->next) {
             for (i = 0; i < GQ_MAX_SLOTS; i++) {
                 if (d->w == r->w && d->unit_tex[i] == r->id) d->unit_tex[i] = 0;
@@ -557,10 +567,22 @@ static void gq_t_release(int64_t h) {
 
 /* ── a frame ───────────────────────────────────────────────────────────────────────────────── */
 
+/* The pass no longer draws into its target: one released meanwhile is released now. */
+static void gq_pass_over(int64_t dev, gq_dev *d) {
+    int64_t h = d->dropped;
+    if (!h) return;
+    d->dropped = 0;
+    gq_render_to(dev, 0);
+    gq_release(h);
+}
+
 static void gq_t_begin(int64_t dev, int64_t target, int64_t load, int64_t colour) {
     gq_dev *d = gq_dev_of(dev);
-    gq_res *f = gq_res_of(target);
+    gq_res *f;
     if (!d || !gq_use(d->w, "gpu begin")) return;
+    if (target && target == d->dropped) return; /* released: nothing may name it again */
+    gq_pass_over(dev, d);             /* a pass begun inside another ends that one */
+    f = gq_res_of(target);
     d->bound = NULL;
     d->in_pass = 1;
     d->unit = 0;
@@ -686,6 +708,7 @@ static void gq_t_end(int64_t dev) {
     d->w->api.glColorMask(1, 1, 1, 1);
     d->bound = NULL;
     d->in_pass = 0;
+    gq_pass_over(dev, d);
 }
 
 static const gpu_backend gq_tab = {
