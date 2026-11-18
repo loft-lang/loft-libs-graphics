@@ -19,5 +19,5 @@ jobs:
       contents: read
       pull-requests: read
     with:
-      loft-ref: tuxedo-pr2438-post
+      loft-ref: main
       packages: '["gpu", "gpu_gl", "gpu_host", "gpu_metal", "gpu_paint", "gpu_record", "gpu_vulkan", "graphics", "scene3d", "stage"]'
