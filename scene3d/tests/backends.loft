@@ -104,6 +104,24 @@ fn edge_bound(a: text, b: text) -> integer {
   if (a == "gpu_gl" && b == "gpu_vulkan") || (a == "gpu_vulkan" && b == "gpu_gl") { 1100 } else { 15 }
 }
 
+// How far two channels of a pixel lie apart at most.
+fn apart(a: integer, b: integer) -> integer {
+  most = 0;
+  for shift in [0, 8, 16, 24] {
+    d = ((a >> shift) & 255) - ((b >> shift) & 255);
+    if d < 0 { d = -d; }
+    if d > most { most = d; }
+  }
+  most
+}
+
+// What a pixel off an edge may lie apart in a channel: nothing between two GPUs.  Apple's
+// software renderer, the OpenGL of a Mac with no GPU to give it (a CI runner), rounds a lit
+// colour its own way, by 1 or 2 of 255.
+fn rounding(first: text) -> integer {
+  if first == "gpu_gl" && gpu_gl::renderer() == "Apple Software Renderer" { 2 } else { 0 }
+}
+
 fn test_a_town_in_perspective_is_one_picture_but_for_pixels_on_an_edge() {
   if !display() { return; }
   tables = backends();
@@ -115,12 +133,13 @@ fn test_a_town_in_perspective_is_one_picture_but_for_pixels_on_an_edge() {
     if t#index == 0 { continue; }
     second = views(t);
     bound = edge_bound(first_name, gpu::backend_name());
+    allowed = rounding(first_name);
     assert(len(first) == 4 && len(second) == 4, "both backends drew four views: {len(first)} and {len(second)}");
     for i in 0..4 {
       differ = 0;
       colours = 0;
       for p in first[i] {
-        if p != (second[i][p#index] ?? 0) { differ += 1; }
+        if apart(p as integer, (second[i][p#index] ?? 0) as integer) > allowed { differ += 1; }
         if p != first[i][0] { colours += 1; }
       }
       assert(colours > 10000, "view {i} shows the town: {colours} pixels are not the first one's colour");
