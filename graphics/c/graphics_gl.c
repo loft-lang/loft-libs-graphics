@@ -120,7 +120,9 @@ void gg_instance_attrib(int64_t mesh, int64_t buf, int64_t location, int64_t com
 
 #if defined(GG_X11)
 #include <dlfcn.h>
+#include <errno.h>
 #include <pthread.h>
+#include <sys/select.h>
 
 /* ── Xlib, as much as this file uses (Xlib.h, X.h) ─────────────────────────────────────────── */
 typedef unsigned long gx_xid;
@@ -671,12 +673,29 @@ static int gg_bind_gl(gg_window *w) {
  * flag is that thread's; the handler itself is the process's, installed only while `gg_open`
  * makes the context. */
 static __thread int gg_x_failed;
-static int gg_why, gg_x_code, gg_x_req, gg_x_minor;
 static int gg_on_x_error(void *display, gx_error_event *e) {
     (void) display;
-    gg_x_code = e->error_code; gg_x_req = e->request_code; gg_x_minor = e->minor_code;
+    (void) e;
     gg_x_failed = 1;
     return 0;
+}
+
+/* Open the display.  A server that still counts the connections just closed resets a new one:
+ * under Xvfb one open in a thousand, more when several programs open at once.  It is asked
+ * again for up to half a second.  A display that is not there refuses, and is not asked twice. */
+static void *gg_open_display(gg_window *w) {
+    struct timeval wait;
+    int tries;
+    for (tries = 0; tries < 50; tries++) {
+        void *display;
+        errno = 0;
+        display = w->xa.XOpenDisplay(NULL);
+        if (display || (errno != ECONNRESET && errno != EAGAIN)) return display;
+        wait.tv_sec = 0;
+        wait.tv_usec = 10000;
+        select(0, NULL, NULL, NULL, &wait);
+    }
+    return NULL;
 }
 
 /* The frame-buffer config 0.9 chose through glutin: double-buffered true-colour RGB, an opaque
@@ -1342,20 +1361,20 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
     int screen;
     if (!w) return 0;
     w->thread = pthread_self();
-    if (!gg_bind(w)) { gg_why = __LINE__; goto fail; }
-    w->display = w->xa.XOpenDisplay(NULL);
-    if (!w->display) { gg_why = __LINE__; goto fail; }
+    if (!gg_bind(w)) goto fail;
+    w->display = gg_open_display(w);
+    if (!w->display) goto fail;
     screen = w->xa.XDefaultScreen(w->display);
     root = w->xa.XRootWindow(w->display, screen);
     if (fullscreen) {
         width = w->xa.XDisplayWidth(w->display, screen);
         height = w->xa.XDisplayHeight(w->display, screen);
     }
-    if (width <= 0 || height <= 0) { gg_why = __LINE__; goto fail; }
+    if (width <= 0 || height <= 0) goto fail;
     config = gg_pick_config(w, screen);
-    if (!config) { gg_why = __LINE__; goto fail; }
+    if (!config) goto fail;
     visual = w->xa.glXGetVisualFromFBConfig(w->display, config);
-    if (!visual) { gg_why = __LINE__; goto fail; }
+    if (!visual) goto fail;
     w->colormap = w->xa.XCreateColormap(w->display, root, visual->visual, GX_ALLOC_NONE);
     memset(&attrs, 0, sizeof attrs);
     attrs.colormap = w->colormap;
@@ -1367,7 +1386,7 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
                                      GX_CW_BORDER_PIXEL | GX_CW_COLORMAP | GX_CW_EVENT_MASK,
                                      &attrs);
     w->xa.XFree(visual);
-    if (!w->window) { gg_why = __LINE__; goto fail; }
+    if (!w->window) goto fail;
     w->xa.XStoreName(w->display, w->window, title);
     w->wm_delete = w->xa.XInternAtom(w->display, "WM_DELETE_WINDOW", 0);
     w->xa.XSetWMProtocols(w->display, w->window, &w->wm_delete, 1);
@@ -1387,13 +1406,13 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
 
     *(void **) (&w->xa.glXCreateContextAttribsARB) =
         w->xa.glXGetProcAddressARB((const unsigned char *) "glXCreateContextAttribsARB");
-    if (!w->xa.glXCreateContextAttribsARB) { gg_why = __LINE__; goto fail; }
+    if (!w->xa.glXCreateContextAttribsARB) goto fail;
     gg_x_failed = 0;
     previous = w->xa.XSetErrorHandler(gg_on_x_error);
     trapped = 1;
     w->context = w->xa.glXCreateContextAttribsARB(w->display, config, NULL, 1, context_attrs);
     w->xa.XSync(w->display, 0);
-    if (gg_x_failed || !w->context) { gg_why = __LINE__; goto fail; }
+    if (gg_x_failed || !w->context) goto fail;
 
     w->xa.XMapWindow(w->display, w->window);
     for (;;) { /* until the server says the window is mapped */
@@ -1405,13 +1424,13 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
             height = ev.configure.height;
         }
     }
-    if (!w->xa.glXMakeCurrent(w->display, w->window, w->context)) { gg_why = __LINE__; goto fail; }
+    if (!w->xa.glXMakeCurrent(w->display, w->window, w->context)) goto fail;
     w->xa.XSync(w->display, 0);
-    if (gg_x_failed) { gg_why = __LINE__; goto fail; }
+    if (gg_x_failed) goto fail;
     gg_current = w;
     w->xa.XSetErrorHandler(previous);
     trapped = 0;
-    if (!gg_bind_gl(w)) { gg_why = __LINE__; goto fail; }
+    if (!gg_bind_gl(w)) goto fail;
     if (w->xa.glXSwapIntervalEXT) w->xa.glXSwapIntervalEXT(w->display, w->window, 1);
     w->width = (int) width;
     w->height = (int) height;
@@ -1428,7 +1447,6 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
     gg_present(w);
     return (int64_t) (intptr_t) w;
 fail:
-    fprintf(stderr, "graphics TRIAL: open failed at line %d; x error %d of request %d.%d\n", gg_why, gg_x_code, gg_x_req, gg_x_minor);
     if (trapped) { /* tear the half-made context down while its errors are still recorded */
         if (w->context) {
             w->xa.glXMakeCurrent(w->display, 0, NULL);
