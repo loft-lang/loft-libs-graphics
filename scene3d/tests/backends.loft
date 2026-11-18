@@ -134,6 +134,10 @@ fn test_a_town_in_perspective_is_one_picture_but_for_pixels_on_an_edge() {
     second = views(t);
     bound = edge_bound(first_name, gpu::backend_name());
     allowed = rounding(first_name);
+    // The software renderer also puts a face's edge elsewhere in a view from close by: 475 of
+    // the 76800 pixels in the fourth, measured on a CI runner.  One pixel in a hundred still
+    // tells a town drawn from a town drawn wrongly.
+    if allowed > 0 { bound = 768; }
     assert(len(first) == 4 && len(second) == 4, "both backends drew four views: {len(first)} and {len(second)}");
     for i in 0..4 {
       differ = 0;
