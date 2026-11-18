@@ -19,4 +19,4 @@ jobs:
       contents: read
       pull-requests: read
     with:
-      packages: '["gpu_vulkan", "gpu_gl"]'
+      packages: '["drawing", "gpu", "gpu_gl", "gpu_host", "gpu_metal", "gpu_paint", "gpu_record", "gpu_vulkan", "graphics", "gridmesh", "imaging", "scene3d", "shapes", "stage", "text2d", "tiles", "tween"]'
