@@ -116,8 +116,14 @@ fn test_a_targets_pixels_are_what_the_window_shows_of_it() {
   assert((read[47 * 64] ?? 0) == 0xFF102030 && (read[63] ?? 0) == 0xFFA0B0C0, "the corners: {read[47 * 64] ?? 0:x} {read[63] ?? 0:x}");
 }
 
-// A target that is dropped inside the pass drawing into it (here a temporary, gone as `begin`
-// returns) is drawn into until that pass ends.  A second target made right after it takes the
+// Begin a pass into a target of `colour` that is gone as this returns.
+fn begin_into(dev: gpu::Device, colour: const gpu::Texture) {
+  gone = dev.colour_target(colour);
+  dev.begin(gone, gpu::CLEAR, 0xFF000000);
+}
+
+// A target that is dropped inside the pass drawing into it (one that leaves its scope before
+// `end`) is drawn into until that pass ends.  A second target made right after it takes the
 // room the first one's record had, were that freed: the draws must not land in `other`.
 fn test_a_target_dropped_inside_its_pass_is_drawn_into_until_the_pass_ends() {
   if !display() { return; }
@@ -131,7 +137,7 @@ fn test_a_target_dropped_inside_its_pass_is_drawn_into_until_the_pass_ends() {
   wipe = dev.colour_target(aside);
   dev.begin(wipe, gpu::CLEAR, 0xFF000000);
   dev.end();
-  dev.begin(dev.colour_target(held), gpu::CLEAR, 0xFF000000);
+  begin_into(dev, held);
   other = dev.colour_target(aside);
   dev.bind(into_colour);
   dev.sample(0, picture);

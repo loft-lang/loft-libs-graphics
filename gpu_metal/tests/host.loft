@@ -266,8 +266,14 @@ fn test_a_source_that_breaks_a_rule_builds_no_pipeline() {
   assert(dev.pipeline(blocked(RIGHT_V), gpu::State {}) != null, "and the same program with a matching shader builds");
 }
 
-// A target that is dropped inside the pass drawing into it (here a temporary, gone as `begin`
-// returns) is drawn into until that pass ends.  A second target made right after it takes the
+// Begin a pass into a target of `colour` that is gone as this returns.
+fn begin_into(dev: gpu::Device, colour: const gpu::Texture) {
+  gone = dev.colour_target(colour);
+  dev.begin(gone, gpu::CLEAR, 0xFF000000);
+}
+
+// A target that is dropped inside the pass drawing into it (one that leaves its scope before
+// `end`) is drawn into until that pass ends.  A second target made right after it takes the
 // room the first one's record had, were that freed: the draws must not land in `other`.
 fn test_a_target_dropped_inside_its_pass_is_drawn_into_until_the_pass_ends() {
   if !display() { return; }
@@ -281,7 +287,7 @@ fn test_a_target_dropped_inside_its_pass_is_drawn_into_until_the_pass_ends() {
   wipe = dev.colour_target(aside);
   dev.begin(wipe, gpu::CLEAR, 0xFF000000);
   dev.end();
-  dev.begin(dev.colour_target(held), gpu::CLEAR, 0xFF000000);
+  begin_into(dev, held);
   other = dev.colour_target(aside);
   dev.bind(into_colour);
   dev.sample(0, picture);
