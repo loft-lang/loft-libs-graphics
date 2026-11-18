@@ -731,8 +731,12 @@ static gx_fbconfig gq_pick_config(gq_window *w, int screen) {
     return pick;
 }
 
-/* Close the window: the context (and every GL object in it), the X window, the connection. */
+/* Close the window: the input context and method (they belong to the connection, so they go
+ * before it), the context (and every GL object in it), the X window, the connection. */
 static void gq_teardown(gq_window *w) {
+    if (w->ic) w->xa.XDestroyIC(w->ic);
+    if (w->im) w->xa.XCloseIM(w->im);
+    w->ic = w->im = NULL;
     if (w->display) {
         if (w->context) {
             w->xa.glXMakeCurrent(w->display, 0, NULL);
@@ -743,9 +747,6 @@ static void gq_teardown(gq_window *w) {
         w->xa.XCloseDisplay(w->display);
     }
     if (gq_current == w) gq_current = NULL;
-    if (w->ic) w->xa.XDestroyIC(w->ic);
-    if (w->im) w->xa.XCloseIM(w->im);
-    w->ic = w->im = NULL;
     if (w->libgl) dlclose(w->libgl);
     if (w->libx11) dlclose(w->libx11);
     w->closed = 1;
