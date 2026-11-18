@@ -11,9 +11,11 @@
 #ifndef GV_X11_HOST_H
 #define GV_X11_HOST_H
 #include <dlfcn.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 
 /* ── Xlib, as much as this file uses (Xlib.h, X.h) ─────────────────────────────────────────── */
 typedef unsigned long gx_xid;
@@ -318,6 +320,24 @@ static void gv_x_close(gv_x_window *x) {
     x->event_count = x->event_cap = x->text_len = x->text_cap = 0;
 }
 
+/* Open the display.  A server that still counts the connections just closed resets a new one:
+ * under Xvfb one open in a thousand, more when several programs open at once.  It is asked
+ * again for up to half a second.  A display that is not there refuses, and is not asked twice. */
+static void *gv_x_open_display(gv_x_window *x) {
+    struct timeval wait;
+    int tries;
+    for (tries = 0; tries < 50; tries++) {
+        void *display;
+        errno = 0;
+        display = x->xa.XOpenDisplay(NULL);
+        if (display || (errno != ECONNRESET && errno != EAGAIN)) return display;
+        wait.tv_sec = 0;
+        wait.tv_usec = 10000;
+        select(0, NULL, NULL, NULL, &wait);
+    }
+    return NULL;
+}
+
 /* Open a window of `width` x `height` (the screen's size when `fullscreen`), mapped, on the
  * server's default visual; 0 when there is no X server. */
 static int gv_x_open(gv_x_window *x, int64_t width, int64_t height, const char *title,
@@ -326,7 +346,7 @@ static int gv_x_open(gv_x_window *x, int64_t width, int64_t height, const char *
     gx_xid root;
     int screen;
     if (!gv_x_bind(x)) return 0;
-    x->display = x->xa.XOpenDisplay(NULL);
+    x->display = gv_x_open_display(x);
     if (!x->display) return 0;
     screen = x->xa.XDefaultScreen(x->display);
     root = x->xa.XRootWindow(x->display, screen);
