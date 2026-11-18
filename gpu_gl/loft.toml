@@ -1,6 +1,6 @@
 [package]
 name = "gpu_gl"
-version = "0.2.1"
+version = "0.2.2"
 # Its shim includes gpu's header by the dependency's name (`gpu/gpu_backend.h`), which loft
 # provides from the daily build that carries its decision C165 on.
 loft = ">=2026.11.20261116"
