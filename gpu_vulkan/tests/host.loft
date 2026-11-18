@@ -144,6 +144,39 @@ fn test_a_targets_pixels_are_what_the_window_shows_of_it() {
   assert((read[47 * 64] ?? 0) == 0xFF102030 && (read[63] ?? 0) == 0xFFA0B0C0, "the corners: {read[47 * 64] ?? 0:x} {read[63] ?? 0:x}");
 }
 
+// A target that is dropped inside the pass drawing into it (here a temporary, gone as `begin`
+// returns) is drawn into until that pass ends.  A second target made right after it takes the
+// room the first one's record had, were that freed: the draws must not land in `other`.
+fn test_a_target_dropped_inside_its_pass_is_drawn_into_until_the_pass_ends() {
+  if !display() { return; }
+  dev = gpu::open(gpu_vulkan::table(), 64, 48, "host-dropped") ?? return assert(false, "no device");
+  into_colour = dev.pipeline(show(), gpu::State { into: gpu::INTO_COLOUR }) ?? return assert(false, "pipeline");
+  quad = dev.buffer(frame());
+  picture = dev.texture_from([0xFF102030 as u32, 0xFF405060 as u32, 0xFF708090 as u32, 0xFFA0B0C0 as u32], 2, 2);
+  picture.nearest(true);
+  held = dev.texture(64, 48);
+  aside = dev.texture(64, 48);
+  wipe = dev.colour_target(aside);
+  dev.begin(wipe, gpu::CLEAR, 0xFF000000);
+  dev.end();
+  dev.begin(dev.colour_target(held), gpu::CLEAR, 0xFF000000);
+  other = dev.colour_target(aside);
+  dev.bind(into_colour);
+  dev.sample(0, picture);
+  dev.vertices(quad);
+  dev.draw(0, 6);
+  dev.end();
+  // the device draws on after it: a pass into the window, and the two textures read back
+  dev.begin_window(gpu::CLEAR, 0xFF00FF00);
+  dev.end();
+  read = dev.capture_of(dev.colour_target(held));
+  beside = dev.capture_of(other);
+  assert(len(read) == 64 * 48, "64 x 48: {len(read)}");
+  // by hand: the picture's first pixel is at the bottom left, so the capture's last row starts with it
+  assert((read[47 * 64] ?? 0) == 0xFF102030 && (read[63] ?? 0) == 0xFFA0B0C0, "the corners of the dropped target's texture: {read[47 * 64] ?? 0:x} {read[63] ?? 0:x}");
+  assert((beside[47 * 64] ?? 0) == 0xFF000000 && (beside[63] ?? 0) == 0xFF000000, "the other target's texture stays as it was cleared: {beside[47 * 64] ?? 0:x} {beside[63] ?? 0:x}");
+}
+
 fn test_a_window_nobody_touches_holds_no_key_and_no_text() {
   if !display() { return; }
   dev = gpu::open(gpu_vulkan::table(), 64, 48, "host-input") ?? return assert(false, "no device");
