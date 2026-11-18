@@ -1,0 +1,1 @@
+Its tests draw scenes through OpenGL and Vulkan into an X11 window and check the pixels; without a display they return at once.

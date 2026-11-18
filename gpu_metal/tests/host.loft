@@ -9,7 +9,14 @@ use gpu;
 use gpu_metal;
 
 fn display() -> boolean {
-  gpu_metal::table() != 0 && (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1"
+  gpu_metal::table() != 0 && must_draw((env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1")
+}
+
+// A run that says its tests must draw (`GRAPHICS_TEST_MUST_DRAW=1`: the library CI, on a runner
+// it gave a display) fails here, where a test would otherwise return having drawn nothing.
+fn must_draw(can: boolean) -> boolean {
+  assert(can || (env_variable("GRAPHICS_TEST_MUST_DRAW") ?? "") != "1", "this run's tests must draw (GRAPHICS_TEST_MUST_DRAW=1) and found no display to draw on");
+  can
 }
 
 const SHOW_V: text = `

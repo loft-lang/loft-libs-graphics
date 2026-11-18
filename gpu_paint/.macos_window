@@ -1,0 +1,1 @@
+Its tests paint through Metal and compare the pictures with OpenGL's; on Linux they find no Mac and return at once.

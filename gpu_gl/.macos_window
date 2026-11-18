@@ -1,1 +1,1 @@
-On a Mac its tests draw through OpenGL into an AppKit window; on Linux CI they return at once (no display).
+Its tests draw through OpenGL into an AppKit window and read the pixels back; without a window they return at once.
