@@ -1583,6 +1583,7 @@ static void gv_t_release(int64_t handle) {
     int i;
     if (!r) return;
     d = r->d;
+    fprintf(stderr, "TRIAL release %p kind=%d gone=%d pass=%d target=%p\n", (void *) r, r->kind, r->gone, d->in_pass, (void *) d->target);
     if (!r->gone) {
         memset(&x, 0, sizeof x);
         gv_unlink(r);
@@ -1893,6 +1894,7 @@ static void gv_t_end(int64_t dev) {
     gv_dev *d = gv_of(dev);
     if (!d || !d->in_pass) return;
     gv_pause(d);
+    fprintf(stderr, "TRIAL end target=%p colour=%p\n", (void *) d->target, d->target ? (void *) d->target->colour : NULL);
     if (d->target) { /* a target's images rest sampleable */
         if (d->target->colour) gv_layout(d, d->target->colour, gv_rest(d, d->target->colour));
         if (d->target->depth) gv_layout(d, d->target->depth, gv_rest(d, d->target->depth));
