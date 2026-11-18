@@ -1,0 +1,1 @@
+Its tests draw through Vulkan into an X11 window and compare the pictures with gpu_gl's OpenGL; without a display they return at once.

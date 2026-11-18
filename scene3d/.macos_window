@@ -1,0 +1,1 @@
+Its tests draw scenes through OpenGL and Metal into a window and check the pixels; on Linux the Metal half finds no Mac and is left out.

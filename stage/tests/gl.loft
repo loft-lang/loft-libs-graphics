@@ -20,7 +20,14 @@ fn count_of(cv: const graphics::Canvas, want: integer) -> integer {
 // Whether a window must open here: `DISPLAY` on X11, `GRAPHICS_TEST_WINDOW=1` where nothing in
 // the environment says (a Mac).  Elsewhere these tests have nothing to measure.
 fn display() -> boolean {
-  (env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1"
+  must_draw((env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1")
+}
+
+// A run that says its tests must draw (`GRAPHICS_TEST_MUST_DRAW=1`: the library CI, on a runner
+// it gave a display) fails here, where a test would otherwise return having drawn nothing.
+fn must_draw(can: boolean) -> boolean {
+  assert(can || (env_variable("GRAPHICS_TEST_MUST_DRAW") ?? "") != "1", "this run's tests must draw (GRAPHICS_TEST_MUST_DRAW=1) and found no display to draw on");
+  can
 }
 
 fn both_ways(st: stage::Stage, width: integer, height: integer) -> graphics::Canvas? {

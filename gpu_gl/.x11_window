@@ -1,0 +1,1 @@
+Its tests draw through OpenGL into an X11 window and read the pixels back; without a display they return at once.

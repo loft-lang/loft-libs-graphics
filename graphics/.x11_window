@@ -1,0 +1,1 @@
+Its window, shader, buffer, texture and painter tests draw through OpenGL into an X11 window; without a display they return at once.

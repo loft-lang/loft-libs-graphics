@@ -1,0 +1,1 @@
+Its tests paint through OpenGL and Vulkan into an X11 window and compare the pictures with graphics' painter; without a display they return at once.

@@ -12,27 +12,53 @@ use gpu_metal;
 use gpu_paint;
 
 fn display() -> boolean {
-  gpu_metal::table() != 0 && (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1"
+  gpu_metal::table() != 0 && must_draw((env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1")
+}
+
+// A run that says its tests must draw (`GRAPHICS_TEST_MUST_DRAW=1`: the library CI, on a runner
+// it gave a display) fails here, where a test would otherwise return having drawn nothing.
+fn must_draw(can: boolean) -> boolean {
+  assert(can || (env_variable("GRAPHICS_TEST_MUST_DRAW") ?? "") != "1", "this run's tests must draw (GRAPHICS_TEST_MUST_DRAW=1) and found no display to draw on");
+  can
 }
 
 const BLACK = 0xFF000000;
 const RED = 0xFFFF0000;
 const BLUE = 0xFF0000FF;
 
+// How far two channels of a pixel lie apart at most.
+fn apart(a: integer, b: integer) -> integer {
+  most = 0;
+  for shift in [0, 8, 16, 24] {
+    d = ((a >> shift) & 255) - ((b >> shift) & 255);
+    if d < 0 { d = -d; }
+    if d > most { most = d; }
+  }
+  most
+}
+
+// What two pictures may lie apart in a channel: nothing on a Mac's own GPU.  Apple's software
+// renderer, the OpenGL of a Mac with no GPU to give it (a CI runner), rounds a colour its own
+// way, by 1 or 2 of 255.
+fn rounding() -> integer {
+  if gpu_gl::renderer() == "Apple Software Renderer" { 2 } else { 0 }
+}
+
 fn same(gl: const vector<u32>, metal: const vector<u32>, what: text) {
   assert(len(gl) == len(metal) && len(gl) > 0, "{what}: {len(gl)} pixels through OpenGL, {len(metal)} through Metal");
+  allowed = rounding();
   differ = 0;
   first = -1;
   colours = 0;
   for p in gl {
-    if p != (metal[p#index] ?? 0) {
+    if apart(p as integer, (metal[p#index] ?? 0) as integer) > allowed {
       differ += 1;
       if first < 0 { first = p#index; }
     }
     if p != gl[0] { colours += 1; }
   }
   assert(colours > 0, "{what}: the scene shows one colour only");
-  assert(differ == 0, "{what}: {differ} pixels differ, the first at {first}: {gl[first] ?? 0:x} through OpenGL, {metal[first] ?? 0:x} through Metal");
+  assert(differ == 0, "{what}: {differ} pixels differ by more than {allowed}, the first at {first}: {gl[first] ?? 0:x} through OpenGL, {metal[first] ?? 0:x} through Metal");
 }
 
 // A 4 x 2 picture: two cells of 2 x 2, each pixel its own colour, one of them see-through.

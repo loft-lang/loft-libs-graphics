@@ -1,0 +1,1 @@
+Its test opens a window through OpenGL and Metal and shows frames in it; on Linux it finds no Mac window and returns at once.

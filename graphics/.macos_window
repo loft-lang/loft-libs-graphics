@@ -1,0 +1,1 @@
+Its window, shader, buffer, texture and painter tests draw through OpenGL into an AppKit window; without a window they return at once.

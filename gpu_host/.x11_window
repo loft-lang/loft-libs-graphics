@@ -1,0 +1,1 @@
+Its test opens a window through each backend the machine has and shows frames in it; without a display it returns at once.

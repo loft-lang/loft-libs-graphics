@@ -120,7 +120,9 @@ void gg_instance_attrib(int64_t mesh, int64_t buf, int64_t location, int64_t com
 
 #if defined(GG_X11)
 #include <dlfcn.h>
+#include <errno.h>
 #include <pthread.h>
+#include <sys/select.h>
 
 /* ── Xlib, as much as this file uses (Xlib.h, X.h) ─────────────────────────────────────────── */
 typedef unsigned long gx_xid;
@@ -676,6 +678,24 @@ static int gg_on_x_error(void *display, gx_error_event *e) {
     (void) e;
     gg_x_failed = 1;
     return 0;
+}
+
+/* Open the display.  A server that still counts the connections just closed resets a new one:
+ * under Xvfb one open in a thousand, more when several programs open at once.  It is asked
+ * again for up to half a second.  A display that is not there refuses, and is not asked twice. */
+static void *gg_open_display(gg_window *w) {
+    struct timeval wait;
+    int tries;
+    for (tries = 0; tries < 50; tries++) {
+        void *display;
+        errno = 0;
+        display = w->xa.XOpenDisplay(NULL);
+        if (display || (errno != ECONNRESET && errno != EAGAIN)) return display;
+        wait.tv_sec = 0;
+        wait.tv_usec = 10000;
+        select(0, NULL, NULL, NULL, &wait);
+    }
+    return NULL;
 }
 
 /* The frame-buffer config 0.9 chose through glutin: double-buffered true-colour RGB, an opaque
@@ -1342,7 +1362,7 @@ int64_t gg_open(int64_t width, int64_t height, const char *title, int64_t fullsc
     if (!w) return 0;
     w->thread = pthread_self();
     if (!gg_bind(w)) goto fail;
-    w->display = w->xa.XOpenDisplay(NULL);
+    w->display = gg_open_display(w);
     if (!w->display) goto fail;
     screen = w->xa.XDefaultScreen(w->display);
     root = w->xa.XRootWindow(w->display, screen);

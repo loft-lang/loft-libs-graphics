@@ -1,0 +1,1 @@
+Its OpenGL test draws a stage into an X11 window; without a display it returns at once.
