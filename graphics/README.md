@@ -123,15 +123,104 @@ The mask says the colour fits in 32 bits; `set_pixel` and every drawing call do 
 
 ## Moving from 0.9
 
-0.10 is a declared break (`api_compatible_with = "0.10.0"`): a program whose `loft.lock` holds
-a 0.9 release stays there through `loft update`, which names 0.10.0 as held back, until
-`loft.toml` asks for `>=0.10.0`.  A fresh install with no lock takes 0.10.  The calls map as: `gl_create_window` → `open_window`;
-`gl_poll_events` / `gl_next_event` → `poll` + `events()`; `gl_key_pressed` → `key_down`;
-`gl_create_shader` + `gl_set_uniform_*` → `shader` + `set_*`; `gl_upload_vertices` + `gl_draw`
-→ `upload` + `draw`; `gl_create_framebuffer` / `gl_create_color_texture` → `framebuffer` /
-`texture`; `create_painter_2d` / `draw_rect_at` / `draw_texture_at` → `painter` / `rect` /
-`image`; `create_text_texture` → `text_texture`; `gl_load_font` → `load_font`;
-`group_vbos_*` → `group_meshes`.  Audio left graphics: no consumer used it.
+Every release from 0.5.0 to 0.9.12 is deprecated: its native part is a Rust crate, which loft
+no longer builds.  A program whose `loft.toml` or `loft.lock` holds one of them does not
+install, and `loft install` says so.  It moves by asking for the current line and resolving
+again:
+
+```toml
+graphics = ">=0.13.3"     # loft.toml; then delete loft.lock and run `loft install`
+```
+
+That crosses two declared breaks: 0.10 (below) and 0.12 (the section above).
+
+**What changed in 0.10.**  0.9 kept one hidden window and gave out numbers: a shader, a mesh,
+a texture and a font were each an `integer`, and `gl_delete_*` freed them.  From 0.10 each is a
+value the program holds (`Window`, `Shader`, `GpuMesh`, `Texture`, `Framebuffer`, `Font`,
+`Painter`, `Sprites`, `GroupMeshes`), every call is a method on the value it acts on, and a
+value is freed when its owner lets it go.  A call that could fail answers null instead of 0 or
+false: `open_window(…) ?? return`.
+
+In the tables `w` is the `Window`, `s` a `Shader`, `m` a `GpuMesh`, `t` a `Texture`, `fb` a
+`Framebuffer`, `p` a `Painter`, `f` a `Font`, `cv` a `Canvas`.
+
+| 0.9, the window and its input | 0.13 |
+|---|---|
+| `gl_create_window(width, height, title)` → `boolean` | `open_window(width, height, title)` → `Window?` |
+| `gl_create_fullscreen_window(title)` | `open_fullscreen(title)` → `Window?` |
+| `gl_destroy_window()` | `w.close()`, or let `w` go |
+| `gl_poll_events()` | `w.poll()` |
+| `gl_next_event()` and `gl_event_key()`, `gl_event_x()` … | `for ev in w.events() { match ev { KeyDown { key, mods, repeat } => …, _ => {} } }` |
+| `gl_key_pressed(key)` | `w.key_down(key)` |
+| `gl_mouse_x()`, `gl_mouse_y()`, `gl_mouse_button()` | `w.mouse_x()`, `w.mouse_y()`, `w.mouse_buttons()` |
+| `gl_mouse_wheel()` | the `Wheel { delta, x, y }` event |
+| `gl_window_width()`, `gl_window_height()` | `w.width()`, `w.height()` |
+| `gl_clear(color)`, `gl_swap_buffers()`, `gl_finish()` | `w.clear(color)`, `w.swap()`, `w.finish()` |
+| `gl_screenshot(width, height, path)` | `w.capture().save_png(path)`, before `w.swap()` |
+| `gl_set_fullscreen(on)` | none: a window is opened windowed or over the whole screen |
+
+| 0.9, the render state | 0.13 |
+|---|---|
+| `gl_enable(cap)`, `gl_disable(cap)` | `w.enable(cap)`, `w.disable(cap)`; `w.enabled(cap)` reads it |
+| `gl_blend_func(src, dst)` | `w.blend(src, dst)` |
+| `gl_cull_face(face)`, `gl_depth_mask(write)` | `w.cull(face)`, `w.depth_write(write)` |
+| `gl_viewport(x, y, w, h)`, `gl_scissor(x, y, w, h)` | `w.viewport(x, y, width, height)`, `w.scissor(x, y, width, height)` |
+| `gl_line_width(width)`, `gl_point_size(size)` | `w.line_width(width)`, `w.point_size(size)` |
+
+| 0.9, shaders and meshes | 0.13 |
+|---|---|
+| `gl_create_shader(vertex, fragment)` → `integer` | `w.shader(vertex, fragment)` → `Shader?` |
+| `gl_use_shader(program)` | none: a draw names its shader, and `set_*` reaches the shader it is called on |
+| `gl_set_uniform_float(program, name, v)` and `_int`, `_vec2`, `_vec3`, `_vec4`, `_mat4` | `s.set_float(name, v)`, `s.set_int`, `s.set_vec2`, `s.set_vec3`, `s.set_vec4`, `s.set_mat4` |
+| `gl_upload_vertices(data, stride)` → `integer` | `w.upload(data, stride)` → `GpuMesh` |
+| `gl_draw(vao, count)` | `m.draw(s)`: every vertex of the mesh |
+| `gl_draw_mode(vao, count, mode)` | `m.draw_mode(s, mode)` |
+| `gl_upload_indices(vao, list)` + `gl_draw_elements(vao, count, mode)` | `m.indices(list)` + `m.draw_indexed(s, mode)` |
+| `gl_update_buffer(vbo, data)` | `m.update(data)` |
+| `gl_upload_instance_buffer(data)` | `w.instances(data)` → `InstanceBuffer`; `update(data)` on it |
+| `gl_instance_attrib(vao, ivbo, location, components, stride, offset)` | `m.instance_attrib(instances, location, components, stride, offset)` |
+| `gl_draw_instanced(vao, count, copies)` | `m.draw_instanced(s, copies)` |
+| `gl_draw_fullscreen_quad()` | `q = w.quad();` once, then `q.draw(s)` |
+| `gl_delete_shader`, `gl_delete_vao` | none: the value is freed when its owner lets it go |
+| `group_vbos_new(stride, mode)` | `group_meshes(stride, mode)` → `GroupMeshes` |
+| `group_vbos_upsert(set, key, verts, …)` | `set.upsert(w, key, verts, min_x, min_z, max_x, max_z)` |
+| `group_vbos_draw_all(set)`, `group_vbos_destroy(set)` | `set.draw_all(s)`; let `set` go |
+
+| 0.9, textures and framebuffers | 0.13 |
+|---|---|
+| `gl_upload_canvas(cv.data, cv.width, cv.height)` → `integer` | `w.texture_from(cv)` → `Texture` |
+| `gl_load_texture(path)` | `w.load_texture(path)` → `Texture?` |
+| `gl_create_color_texture(width, height)`, `gl_create_depth_texture(width, height)` | `w.texture(width, height)`, `w.depth_texture(width, height)` |
+| `gl_texture_subimage(tex, x, y, w, h, data)` | `t.put(x, y, cv)` |
+| `gl_texture_filter(tex, nearest)`, `gl_generate_mipmap(tex)` | `t.filter(nearest)`, `t.mipmaps()` |
+| `gl_bind_texture(tex, unit)` | `t.bind(unit)` |
+| `gl_create_framebuffer()` | `w.framebuffer()` → `Framebuffer` |
+| `gl_framebuffer_texture(fbo, attachment, tex)` | `fb.attach(t)`: a depth texture becomes the depth buffer, a colour texture the colour |
+| `gl_bind_framebuffer(fbo)`, `gl_bind_framebuffer(0)` | `w.render_to(fb)`, `w.render_to_window()` |
+| `gl_delete_texture`, `gl_delete_framebuffer` | none: the value is freed when its owner lets it go |
+
+| 0.9, the painter, sprites and text | 0.13 |
+|---|---|
+| `create_painter_2d(screen_w, screen_h)` → `Painter2D` | `w.painter()` → `Painter?`, sized to the window; `p.resize(width, height)` after a `Resize` |
+| `draw_rect_at(painter, x, y, w, h, r, g, b, a)` | `p.rect(x, y, w, h, r, g, b, a)` |
+| `draw_texture_at(painter, tex, x, y, w, h)` | `p.image(t, x, y, w, h)` |
+| `create_sprite_sheet(atlas, cols, rows, painter_vao(painter))` | `w.sprites(atlas, cols, rows)` → `Sprites?` |
+| `draw_sprite_at(sheet, painter, x, y, w, h, index)` | `p.sprite(sheet, x, y, w, h, index)` |
+| `draw_sprite(sheet, mvp, index)` | `sheet.draw(mvp, index)` |
+| `gl_load_font(path)` → `integer`, 0 when it fails | `load_font(path)` → `Font?` |
+| `gl_measure_text(font, content, size)` | `f.measure(content, size)` |
+| `gl_text_height(font, size)`, `gl_font_ascent(font, size)` | `f.line_height(size)`, `f.ascent(size)` |
+| `create_text_texture(font, content, size, color)` → `integer` | `w.text_texture(f, content, size, color)` → `Texture` |
+| `draw_text(cv, font, content, size, x, y, color)` | `cv.draw_text(f, content, size, x, y, color)` |
+
+**What left graphics.**  Sound (`audio_*`, `sfx_*`) is the `audio` package.  The scene renderer
+(`Renderer`, `create_renderer`, `upload_scene`, `render_frame`, `render_loop` and its PBR and
+shadow shaders) is gone with the `scene` module: meshes and scenes are
+[`mesh3d`](https://github.com/loft-lang/loft-libs-assets/tree/main/mesh3d), and a program
+draws them with its own shader.
+
+**A path is the program's.**  `load_font` and `load_texture` read a relative path against the
+directory of the program's main file (`source_dir()`), as 0.9 did.
 
 ## Worked examples
 
