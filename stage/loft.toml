@@ -1,6 +1,6 @@
 [package]
 name = "stage"
-version = "0.20.0"
+version = "0.20.1"
 
 # 0.19 is a declared break: the GL path draws on graphics 0.10's objects — `gl_stage(window)`
 # answers a `StageGl` in place of `painter_new()`'s `Painter`, and `gl_render` takes the window.
@@ -16,7 +16,7 @@ description = "A retained 2-D scene for loft: a node tree you mutate, with trans
 categories  = ["graphics", "game"]
 
 [dependencies]
-graphics = ">=0.10.0"
+graphics = ">=0.13.3"
 tween = ">=0.1.0"
 
 [library]
