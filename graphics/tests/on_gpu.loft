@@ -1,0 +1,125 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// This library's calls said in `gpu`'s terms: a mesh's stride as a program's inputs, and a
+// uniform set by name as a field of the block.  The block is a real one, of a pipeline on
+// `gpu_record`, the backend that draws nothing: no window is needed.
+use gpu;
+use gpu_record;
+use shader_rewrite::*;
+use on_gpu::*;
+
+fn test_a_stride_is_the_inputs_the_meshes_of_this_library_carry() {
+  assert(inputs_of(3) == [gpu::F3], "a position: {inputs_of(3)}");
+  assert(inputs_of(6) == [gpu::F3, gpu::F3], "and a normal: {inputs_of(6)}");
+  assert(inputs_of(8) == [gpu::F3, gpu::F3, gpu::F2], "and a texture coordinate: {inputs_of(8)}");
+  assert(inputs_of(10) == [gpu::F3, gpu::F3, gpu::F4], "a colour in its place: {inputs_of(10)}");
+  assert(inputs_of(14) == [gpu::F3, gpu::F3, gpu::F4, gpu::F3, gpu::F1], "an anchor and a birth time: {inputs_of(14)}");
+  assert(len(inputs_of(2)) == 0, "under three floats is no mesh");
+  // floats the rule gives no meaning still belong to the vertex
+  for stride in 3..40 {
+    sum = 0;
+    for n in inputs_of(stride) { sum += n; }
+    assert(sum == stride, "a stride of {stride} adds up: {inputs_of(stride)}");
+    assert(len(inputs_of(stride)) <= 16, "and fits a program's inputs: {len(inputs_of(stride))}");
+  }
+  assert(inputs_of(5) == [gpu::F3, gpu::F2], "two floats nobody reads: {inputs_of(5)}");
+  assert(inputs_of(9) == [gpu::F3, gpu::F3, gpu::F3], "three floats nobody reads, no texture coordinate: {inputs_of(9)}");
+}
+
+const V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+uniform mat4 uMVP;
+uniform float uTime;
+uniform vec2 uSize;
+void main() {{ gl_Position = uMVP * vec4(pos, 1.0); }}
+`;
+
+const F: text = `
+#version 330 core
+uniform sampler2D uScene;
+uniform vec3 uTone;
+uniform vec4 uTint;
+uniform int uCount;
+uniform vec4 uLights[4];
+uniform vec3 uLightCol[4];
+uniform sampler2D uMask;
+out vec4 frag;
+void main() {{ frag = uTint; }}
+`;
+
+fn block_for(unis: const vector<Uniform>) -> gpu::Block {
+  gpu_record::reset();
+  dev = gpu::open(gpu_record::table(), 64, 48, "names")!;
+  prog = gpu::Program {
+    vertex: [gpu::F3],
+    instance: [],
+    block: block_of(unis),
+    textures: samplers_of(unis),
+    sources: [gpu::source("record", "v", "f")],
+  };
+  pipe = dev.pipeline(prog, gpu::State {})!;
+  pipe.block()
+}
+
+// The floats of field `field` of the shader above, as the backend would be handed them.
+fn at(block: const gpu::Block, starts: const vector<integer>, field: integer, n: integer) -> text {
+  out = "";
+  data = block.floats();
+  first = starts[field] ?? 0;
+  for i in 0..n { out += "{(data[first + i] ?? 0.0f) as float:3.1} "; }
+  out.trim()
+}
+
+fn test_a_uniform_set_by_name_lands_in_its_field() {
+  r = rewrite_shader(V, F);
+  assert(r.fault == "", "rewritten: {r.fault}");
+  kinds = block_of(r.uniforms);
+  assert(kinds == [gpu::MAT4, gpu::F1, gpu::F2, gpu::F4, gpu::F4, gpu::F1, gpu::f4s(4), gpu::f4s(4)], "the block's fields: {kinds}");
+  assert(samplers_of(r.uniforms) == 2, "two textures");
+  starts = gpu::layout(kinds);
+  u = block_for(r.uniforms);
+  units: vector<integer> = [];
+
+  m: vector<float> = [for i in 0..16 { i as float + 1.0 }];
+  assert(put_floats(u, r.uniforms, "uMVP", m), "a matrix");
+  assert(put_floats(u, r.uniforms, "uTime", [7.5]), "a float");
+  assert(put_floats(u, r.uniforms, "uSize", [3.0, 4.0]), "two");
+  assert(put_floats(u, r.uniforms, "uTone", [0.1, 0.2, 0.3]), "three into the vec3");
+  assert(put_floats(u, r.uniforms, "uTint", [0.5, 0.6, 0.7, 0.8]), "four");
+  assert(put_int(u, r.uniforms, units, "uCount", 3), "a whole number");
+  assert(put_floats(u, r.uniforms, "uLights[2]", [1.0, 2.0, 3.0, 4.0]), "an element by its name");
+  assert(put_floats(u, r.uniforms, "uLightCol[3]", [0.9, 0.8, 0.7]), "an element of three");
+  assert(put_int(u, r.uniforms, units, "uMask", 5) && put_int(u, r.uniforms, units, "uScene", 2), "the samplers' units");
+
+  assert(at(u, starts, 0, 16) == "1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0 10.0 11.0 12.0 13.0 14.0 15.0 16.0", "the matrix: {at(u, starts, 0, 16)}");
+  assert(at(u, starts, 1, 1) == "7.5", "uTime: {at(u, starts, 1, 1)}");
+  assert(at(u, starts, 2, 2) == "3.0 4.0", "uSize: {at(u, starts, 2, 2)}");
+  assert(at(u, starts, 3, 4) == "0.1 0.2 0.3 0.0", "uTone, the fourth float nobody reads: {at(u, starts, 3, 4)}");
+  assert(at(u, starts, 4, 4) == "0.5 0.6 0.7 0.8", "uTint: {at(u, starts, 4, 4)}");
+  assert(at(u, starts, 5, 1) == "3.0", "uCount as a float: {at(u, starts, 5, 1)}");
+  assert(at(u, starts, 6, 16) == "0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 1.0 2.0 3.0 4.0 0.0 0.0 0.0 0.0", "uLights, element 2 only: {at(u, starts, 6, 16)}");
+  assert(at(u, starts, 7, 16) == "0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.9 0.8 0.7 0.0", "uLightCol, element 3 only: {at(u, starts, 7, 16)}");
+  assert(units == [2, 5], "uScene reads unit 2 and uMask unit 5, by slot: {units}");
+}
+
+// What OpenGL ignores is ignored: the block and the units are as they were.
+fn test_a_name_or_a_size_that_is_not_the_uniforms_changes_nothing() {
+  r = rewrite_shader(V, F);
+  u = block_for(r.uniforms);
+  units: vector<integer> = [];
+  before = "{u.floats()}";
+  assert(!put_floats(u, r.uniforms, "uNope", [1.0]), "a name the shader does not declare");
+  assert(!put_floats(u, r.uniforms, "uTint", [1.0, 2.0, 3.0]), "three values for a vec4");
+  assert(!put_floats(u, r.uniforms, "uTone", [1.0, 2.0, 3.0, 4.0]), "four values for a vec3");
+  assert(!put_floats(u, r.uniforms, "uTime", [1.0, 2.0]), "two values for a float");
+  assert(!put_floats(u, r.uniforms, "uLights", [1.0, 2.0, 3.0, 4.0]), "an array without an element");
+  assert(!put_floats(u, r.uniforms, "uLights[4]", [1.0, 2.0, 3.0, 4.0]), "an element past the array");
+  assert(!put_floats(u, r.uniforms, "uTint[0]", [1.0, 2.0, 3.0, 4.0]), "an element of what is no array");
+  assert(!put_floats(u, r.uniforms, "uCount", [1.0]), "a float for an int");
+  assert(!put_floats(u, r.uniforms, "uScene", [1.0]), "a float for a sampler");
+  assert(!put_int(u, r.uniforms, units, "uTime", 1), "a whole number for a float");
+  assert(!put_int(u, r.uniforms, units, "uNope", 1), "a whole number for no name");
+  assert("{u.floats()}" == before && len(units) == 0, "nothing was written");
+}

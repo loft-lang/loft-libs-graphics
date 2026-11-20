@@ -28,6 +28,7 @@ shim = "c/graphics_gl.c"
 mesh3d = ">=0.1.1"
 glb = ">=0.1.1"
 imaging = ">=0.5.1"
+gpu = ">=0.4.0"
 
 # What this package ships, compiles in or opens that it did not write (loft THIRDPARTY.md).
 [thirdparty.opengl]

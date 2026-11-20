@@ -1,0 +1,144 @@
+#package
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// This library's drawing calls, said in `gpu`'s terms.
+//
+// A program of this library sets a uniform by its name and uploads a mesh by its stride; `gpu`
+// sets a block's fields by position and reads a program's inputs from a list.  The pieces
+// here carry one to the other, and nothing in them touches a window: each is a plain
+// function over values, tested without a display.
+use gpu;
+use shader_rewrite::*;
+
+// ── a mesh's stride as a program's inputs ──
+
+// The inputs a mesh of `stride` floats a vertex gives a shader, in the order of their
+// locations: a position of three; from 6 floats a normal of three; at exactly 8 a texture
+// coordinate of two; from 10 a colour of four; from 14 an anchor of three and a birth time.
+// Floats the rule gives no meaning (a stride of 5, of 12) are still part of every vertex: they
+// follow as inputs no shader of this library reads, so the list always adds up to the stride.
+// Empty for a stride under 3, which is no mesh.
+fn inputs_of(stride: integer) -> vector<integer> {
+  if stride < 3 { return []; }
+  out = [gpu::F3];
+  used = 3;
+  if stride >= 6 {
+    out += [gpu::F3];
+    used = 6;
+  }
+  if stride == 8 {
+    out += [gpu::F2];
+    used = 8;
+  }
+  if stride >= 10 {
+    out += [gpu::F4];
+    used = 10;
+  }
+  if stride >= 14 {
+    out += [gpu::F3, gpu::F1];
+    used = 14;
+  }
+  rest = stride - used;
+  while rest > 0 {
+    take = if rest > 4 { 4 } else { rest };
+    out += [take];
+    rest -= take;
+  }
+  out
+}
+
+// ── a shader's uniforms as a block ──
+
+// The block of a rewritten shader as a `gpu::Program` declares it: one entry a field, in the
+// fields' order.
+fn block_of(unis: const vector<Uniform>) -> vector<integer> {
+  out: vector<integer> = [];
+  for u in unis {
+    if u.floats == 0 { continue; }
+    if u.count > 0 {
+      out += [gpu::f4s(u.count)];
+    } else {
+      out += [u.floats];
+    }
+  }
+  out
+}
+
+// How many textures a rewritten shader samples.
+fn samplers_of(unis: const vector<Uniform>) -> integer {
+  n = 0;
+  for u in unis { if u.floats == 0 { n += 1; } }
+  n
+}
+
+// Where a setter's name points: which uniform, and which element when the name ends in one
+// (`uLights[3]`).  `uniform` is -1 for a name the shader does not declare.
+struct Place {
+  uniform: integer,
+  element: integer,
+}
+
+fn place_of(unis: const vector<Uniform>, name: text) -> Place {
+  plain = name;
+  element = -1;
+  open = name.find("[");
+  if open != null && name.ends_with("]") {
+    plain = name[0..open];
+    element = name[open + 1..name.size() - 1] as integer ?? -2;
+  }
+  for u in unis {
+    if u.name == plain {
+      // an element of something that is no array, or none of an array: not this uniform
+      if (u.count > 0) != (element >= 0) || element == -2 || element >= u.count && u.count > 0 {
+        return Place { uniform: -1, element: -1 };
+      }
+      return Place { uniform: u#index, element: element };
+    }
+  }
+  Place { uniform: -1, element: -1 }
+}
+
+// Set the uniform `name` from `v`, as `set_float` (one value), `set_vec2`, `set_vec3`,
+// `set_vec4` and `set_mat4` (sixteen) do.  False, and the block as it was, for a name the
+// shader does not declare and for values that are not the uniform's own size: what OpenGL
+// ignores.
+fn put_floats(block: gpu::Block, unis: const vector<Uniform>, name: text, v: const vector<float>) -> boolean {
+  p = place_of(unis, name);
+  if p.uniform < 0 { return false; }
+  u = unis[p.uniform] ?? return false;
+  want = if u.kind == "vec3" { 3 } else { u.floats };
+  if u.floats == 0 || u.kind == "int" || len(v) != want { return false; }
+  x = v[0] ?? 0.0;
+  y = if len(v) > 1 { v[1] ?? 0.0 } else { 0.0 };
+  z = if len(v) > 2 { v[2] ?? 0.0 } else { 0.0 };
+  w = if len(v) > 3 { v[3] ?? 0.0 } else { 0.0 };
+  if p.element >= 0 {
+    block.f4_at(u.at, p.element, x, y, z, w);
+  } else if u.floats == 1 {
+    block.f1(u.at, x);
+  } else if u.floats == 2 {
+    block.f2(u.at, x, y);
+  } else if u.floats == 4 {
+    block.f4(u.at, x, y, z, w);
+  } else {
+    block.mat4(u.at, v);
+  }
+  true
+}
+
+// Set the uniform `name` from a whole number, as `set_int` does: an `int` of the shader, or the
+// texture unit a sampler reads, kept in `units` (one entry a slot).  False for any other name.
+fn put_int(block: gpu::Block, unis: const vector<Uniform>, units: vector<integer>, name: text, v: integer) -> boolean {
+  p = place_of(unis, name);
+  if p.uniform < 0 || p.element >= 0 { return false; }
+  u = unis[p.uniform] ?? return false;
+  if u.floats == 0 {
+    while len(units) <= u.at { units += [0]; }
+    units[u.at] = v;
+    return true;
+  }
+  if u.kind != "int" { return false; }
+  block.f1(u.at, v as float);
+  true
+}
