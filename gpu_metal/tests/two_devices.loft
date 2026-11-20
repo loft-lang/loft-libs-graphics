@@ -1,0 +1,98 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Two windows open at once.  Each device draws into its own window and reads its own frame
+// back, also when the draws of the two are interleaved and when one is closed while the other
+// goes on: nothing a draw depends on is shared between two devices.
+// Without a display every test returns at once (`DISPLAY`, or `GRAPHICS_TEST_WINDOW=1` on a
+// Mac).
+use gpu;
+use gpu_metal;
+
+fn display() -> boolean {
+  gpu_metal::table() != 0 && must_draw((env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1")
+}
+
+// A run that says its tests must draw (`GRAPHICS_TEST_MUST_DRAW=1`: the library CI, on a runner
+// it gave a display) fails here, where a test would otherwise return having drawn nothing.
+fn must_draw(can: boolean) -> boolean {
+  assert(can || (env_variable("GRAPHICS_TEST_MUST_DRAW") ?? "") != "1", "this run's tests must draw (GRAPHICS_TEST_MUST_DRAW=1) and found no display to draw on");
+  can
+}
+
+const FLAT_V: text = `
+struct Block {{ float4 color; float4 at; }};
+struct In {{ float3 pos [[attribute(0)]]; }};
+struct Out {{ float4 position [[position]]; }};
+vertex Out vertex_main(In in [[stage_in]], constant Block &u [[buffer(0)]]) {{
+  Out o;
+  o.position = gpu_position(float4(in.pos.xy * u.at.zw + u.at.xy, 0.0, 1.0));
+  return o;
+}}
+`;
+
+const FLAT_F: text = `
+struct Block {{ float4 color; float4 at; }};
+fragment float4 fragment_main(constant Block &u [[buffer(0)]]) {{ return u.color; }}
+`;
+
+fn flat() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3],
+    instance: [],
+    block: [gpu::F4, gpu::F4],
+    textures: 0,
+    sources: [gpu::source("msl", FLAT_V, FLAT_F)],
+  }
+}
+
+fn whole() -> vector<single> {
+  [-1.0f, -1.0f, 0.0f, 1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f, -1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f, -1.0f, 1.0f, 0.0f]
+}
+
+// The rectangle scaled by (sx, sy) about (cx, cy), in one colour.
+fn fill(dev: gpu::Device, pipe: const gpu::Pipeline, mesh: const gpu::Buffer, r: float, g: float, b: float, cx: float, sx: float) {
+  u = pipe.block();
+  u.f4(0, r, g, b, 1.0);
+  u.f4(1, cx, 0.0, sx, 1.0);
+  dev.bind(pipe);
+  dev.uniforms(u);
+  dev.vertices(mesh);
+  dev.draw(0, 6);
+}
+
+// Two devices, their passes interleaved call for call: one green on blue with a red left half,
+// the other yellow on black with a white right half, and of another size.
+fn test_two_devices_draw_and_read_back_their_own_frames() {
+  ao = gpu::open(gpu_metal::table(), 64, 48, "one");
+  if !display() { return; }
+  a = ao ?? return assert(false, "no device");
+  b = gpu::open(gpu_metal::table(), 32, 24, "two") ?? return assert(false, "no second device beside the first");
+  pa = a.pipeline(flat(), gpu::State { depth: gpu::DEPTH_OFF }) ?? return assert(false, "no pipeline on the first");
+  pb = b.pipeline(flat(), gpu::State { depth: gpu::DEPTH_OFF }) ?? return assert(false, "no pipeline on the second");
+  ma = a.buffer(whole());
+  mb = b.buffer(whole());
+  a.begin_window(gpu::CLEAR, 0xFF0000FF);
+  b.begin_window(gpu::CLEAR, 0xFF000000);
+  fill(a, pa, ma, 0.0, 1.0, 0.0, 0.0, 1.0);
+  fill(b, pb, mb, 1.0, 1.0, 0.0, 0.0, 1.0);
+  fill(a, pa, ma, 1.0, 0.0, 0.0, -0.5, 0.5);
+  fill(b, pb, mb, 1.0, 1.0, 1.0, 0.5, 0.5);
+  a.end();
+  b.end();
+  sa = a.capture();
+  sb = b.capture();
+  assert(len(a.refusals()) == 0 && len(b.refusals()) == 0, "nothing refused: {a.refusals()} {b.refusals()}");
+  assert(a.width() == 64 && a.height() == 48 && b.width() == 32 && b.height() == 24, "each keeps its size: {a.width()}x{a.height()} and {b.width()}x{b.height()}");
+  assert(len(sa) == 64 * 48 && len(sb) == 32 * 24, "each frame has its own size: {len(sa)} and {len(sb)}");
+  assert(sa[24 * 64 + 16] == 0xFFFF0000 && sa[24 * 64 + 48] == 0xFF00FF00, "the first shows red and green: {sa[24 * 64 + 16]:x} {sa[24 * 64 + 48]:x}");
+  assert(sb[12 * 32 + 8] == 0xFFFFFF00 && sb[12 * 32 + 24] == 0xFFFFFFFF, "the second shows yellow and white: {sb[12 * 32 + 8]:x} {sb[12 * 32 + 24]:x}");
+  // the second is closed; the first draws on and still reads its own
+  b.close();
+  a.begin_window(gpu::KEEP, 0);
+  fill(a, pa, ma, 0.0, 0.0, 1.0, 0.5, 0.5);
+  a.end();
+  sa = a.capture();
+  assert(len(a.refusals()) == 0, "nothing refused after the other closed: {a.refusals()}");
+  assert(sa[24 * 64 + 16] == 0xFFFF0000 && sa[24 * 64 + 48] == 0xFF0000FF, "the first drew on after the second closed: {sa[24 * 64 + 16]:x} {sa[24 * 64 + 48]:x}");
+}

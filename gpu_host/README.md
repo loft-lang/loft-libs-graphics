@@ -43,6 +43,21 @@ The environment variable `GPU_HOST` names the one backend `open` and `open_fulls
 A program's shaders carry a source for each backend it may meet; a device of a backend a
 program has no source for builds no pipeline (`dev.pipeline` answers null).
 
+## The same input on every backend
+
+A game reads its input from the device, whichever backend opened it, so each backend's window
+host must report the same input as the same events.  `parity/events.py` sends one sequence
+through the X server's test extension to a window of each backend (the pointer moved in, a key,
+a shifted key, a named key, a click, the wheel both ways, a resize, Escape) and compares what
+`parity/events.loft` prints of `dev.events()` and `dev.typed()`:
+
+```
+xvfb-run -a gpu_host/parity/events.py              # gpu_gl against gpu_vulkan
+```
+
+It exits 1 with both listings when they differ.  It measures the X11 hosts; a Mac's two hosts
+(AppKit under OpenGL and under Metal) have no such sender here.
+
 ## Verified
 
 `tests/host.loft`: the order, a backend nobody knows opening nothing, and one painter's picture

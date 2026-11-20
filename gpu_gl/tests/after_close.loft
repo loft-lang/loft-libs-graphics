@@ -1,0 +1,137 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// What a program may do with the objects of a window it closed: let them go late.  A buffer, a
+// texture, a target or a pipeline outlives its device whenever a program closes its window
+// before the values that hold them die, and each is released then, into a backend whose
+// device is gone, and perhaps beside a second device opened since.  That release frees
+// nothing twice and touches nothing of the second device.
+// Without a display every test returns at once (`DISPLAY`, or `GRAPHICS_TEST_WINDOW=1` on a
+// Mac).
+use gpu;
+use gpu_gl;
+
+fn display() -> boolean {
+  must_draw((env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1")
+}
+
+// A run that says its tests must draw (`GRAPHICS_TEST_MUST_DRAW=1`: the library CI, on a runner
+// it gave a display) fails here, where a test would otherwise return having drawn nothing.
+fn must_draw(can: boolean) -> boolean {
+  assert(can || (env_variable("GRAPHICS_TEST_MUST_DRAW") ?? "") != "1", "this run's tests must draw (GRAPHICS_TEST_MUST_DRAW=1) and found no display to draw on");
+  can
+}
+
+const FLAT_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(std140) uniform Block {{ vec4 color; vec4 at; }};
+void main() {{ gl_Position = vec4(pos.xy * at.zw + at.xy, 0.0, 1.0); }}
+`;
+
+const FLAT_F: text = `
+#version 330 core
+layout(std140) uniform Block {{ vec4 color; vec4 at; }};
+out vec4 frag;
+void main() {{ frag = color; }}
+`;
+
+fn flat() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3],
+    instance: [],
+    block: [gpu::F4, gpu::F4],
+    textures: 0,
+    sources: [gpu::source("glsl-330", FLAT_V, FLAT_F)],
+  }
+}
+
+fn whole() -> vector<single> {
+  [-1.0f, -1.0f, 0.0f, 1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f, -1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f, -1.0f, 1.0f, 0.0f]
+}
+
+// One of everything a device makes.
+struct Kit {
+  mesh: gpu::Buffer,
+  order: gpu::IndexBuffer,
+  colour: gpu::Texture,
+  depth: gpu::Texture,
+  into: gpu::Target,
+  pipe: gpu::Pipeline,
+}
+
+struct Held { kit: Kit? }
+
+fn kit_of(dev: const gpu::Device) -> Kit? {
+  colour = dev.texture(16, 16);
+  depth = dev.depth_texture(16, 16);
+  Kit {
+    mesh: dev.buffer(whole()),
+    order: dev.index_buffer([0, 1, 2, 3, 4, 5]),
+    into: dev.target(colour, depth),
+    colour: colour,
+    depth: depth,
+    pipe: dev.pipeline(flat(), gpu::State { depth: gpu::DEPTH_OFF }) ?? return null,
+  }
+}
+
+// The rectangle scaled by (sx, sy) about (cx, cy), in one colour.
+fn fill(dev: gpu::Device, pipe: const gpu::Pipeline, mesh: const gpu::Buffer, r: float, g: float, b: float, cx: float, sx: float) {
+  u = pipe.block();
+  u.f4(0, r, g, b, 1.0);
+  u.f4(1, cx, 0.0, sx, 1.0);
+  dev.bind(pipe);
+  dev.uniforms(u);
+  dev.vertices(mesh);
+  dev.draw(0, 6);
+}
+
+// A device's objects are let go after it closed, with nothing else open.
+fn test_objects_let_go_after_their_device_closed() {
+  devo = gpu::open(gpu_gl::table(), 64, 48, "closed-first");
+  if !display() { return; }
+  dev = devo ?? return assert(false, "no device");
+  held = Held { kit: kit_of(dev) };
+  assert(held.kit != null, "the kit was made");
+  dev.close();
+  held.kit = null;
+  again = gpu::open(gpu_gl::table(), 64, 48, "after") ?? return assert(false, "no second device");
+  mine = kit_of(again) ?? return assert(false, "no second kit");
+  again.begin_window(gpu::CLEAR, 0xFF0000FF);
+  fill(again, mine.pipe, mine.mesh, 0.0, 1.0, 0.0, 0.0, 1.0);
+  again.end();
+  shot = again.capture();
+  assert(len(again.refusals()) == 0, "nothing refused: {again.refusals()}");
+  assert(shot[24 * 64 + 32] == 0xFF00FF00, "a device opened after draws: {shot[24 * 64 + 32]:x}");
+}
+
+// A closed device's objects are let go while a SECOND device is open and holds objects of its
+// own, made after the close: the late release frees none of them.  The second device draws a
+// frame before and a frame after, and the second frame reads as drawn.
+fn test_objects_of_a_closed_device_let_go_beside_a_second_device() {
+  firsto = gpu::open(gpu_gl::table(), 64, 48, "first");
+  if !display() { return; }
+  first = firsto ?? return assert(false, "no device");
+  held = Held { kit: kit_of(first) };
+  assert(held.kit != null, "the first kit was made");
+  first.close();
+  second = gpu::open(gpu_gl::table(), 64, 48, "second") ?? return assert(false, "no second device");
+  mine = kit_of(second) ?? return assert(false, "no second kit");
+  second.begin_window(gpu::CLEAR, 0xFF0000FF);
+  fill(second, mine.pipe, mine.mesh, 0.0, 1.0, 0.0, 0.0, 1.0);
+  second.end();
+  before = second.capture();
+  held.kit = null;
+  // the left half red over the green frame, through the second device's own objects
+  second.begin_window(gpu::KEEP, 0);
+  fill(second, mine.pipe, mine.mesh, 1.0, 0.0, 0.0, -0.5, 0.5);
+  second.end();
+  // and into its own target, which the late release must not have taken either
+  second.begin(mine.into, gpu::CLEAR, 0xFF000000);
+  second.end();
+  after = second.capture();
+  assert(len(second.refusals()) == 0, "nothing refused: {second.refusals()}");
+  assert(before[24 * 64 + 16] == 0xFF00FF00, "before the release the frame is green: {before[24 * 64 + 16]:x}");
+  assert(after[24 * 64 + 16] == 0xFFFF0000, "after it the second device still draws, left: {after[24 * 64 + 16]:x}");
+  assert(after[24 * 64 + 48] == 0xFF00FF00, "and kept what it had drawn, right: {after[24 * 64 + 48]:x}");
+}

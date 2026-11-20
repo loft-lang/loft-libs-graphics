@@ -1,0 +1,35 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Prints what a window on one backend hears: every event's five numbers and the bytes typed,
+// one line each, until the Escape key or eight seconds.  `events.py` sends the same input to a
+// window of each backend and compares what the two print.
+//
+//   loft --interpret --lib .. parity/events.loft gpu_vulkan
+use gpu;
+use gpu_host;
+
+fn main() {
+  backend = arguments()[-1] ?? "";
+  dev = gpu_host::open_on(backend, 200, 150, "events-{backend}") ?? return println("no window on {backend}");
+  start = ticks();
+  done = false;
+  while !done && dev.poll() && ticks() - start < 8000000 {
+    typed = dev.typed();
+    if len(typed) > 0 {
+      line = "typed";
+      for b in typed { line += " {b}"; }
+      println(line);
+    }
+    ev = dev.events();
+    for i in 0..len(ev) / gpu::EVENT_WORDS {
+      at = i * gpu::EVENT_WORDS;
+      println("event {ev[at] ?? 0} {ev[at + 1] ?? 0} {ev[at + 2] ?? 0} {ev[at + 3] ?? 0} {ev[at + 4] ?? 0}");
+      if (ev[at] ?? 0) == 1 && (ev[at + 1] ?? 0) == 27 { done = true; }
+    }
+    dev.begin_window(gpu::CLEAR, 0xFF202020);
+    dev.end();
+    dev.present();
+  }
+  println("size {dev.width()}x{dev.height()} pointer {dev.pointer_x()} {dev.pointer_y()} buttons {dev.buttons()}");
+}

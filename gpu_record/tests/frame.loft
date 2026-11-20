@@ -250,6 +250,25 @@ fn test_an_object_outliving_its_device_dies_quietly() {
   assert(mesh.floats() == 1, "the buffer's own record stays readable");
 }
 
+struct Pair { mesh: gpu::Buffer, image: gpu::Texture }
+
+struct Kept { pair: Pair? }
+
+// Objects held in a record a program empties later are released when it is emptied, also when
+// that is after their device closed and a second one is open: the second keeps what it made.
+fn test_objects_of_a_closed_device_let_go_beside_a_second_device() {
+  first = open();
+  kept = Kept { pair: Pair { mesh: first.buffer([0.0f]), image: first.texture(4, 4) } };
+  first.close();
+  assert(gpu_record::live() == 0, "closing the first device freed what it made");
+  second = gpu::open(gpu_record::table(), 64, 48, "second")!;
+  mine = second.buffer([1.0f, 2.0f]);
+  held = gpu_record::live();
+  kept.pair = null;
+  assert(gpu_record::live() == held, "letting the first device's objects go frees none of the second's: {gpu_record::live()} of {held}");
+  assert(mine.floats() == 2, "the second device's buffer is whole");
+}
+
 fn test_a_depth_written_without_a_test_reaches_the_backend_as_its_own_state() {
   dev = open();
   assert(dev.pipeline(copies(), gpu::State { depth: gpu::DEPTH_WRITE }) != null, "this backend takes the state");
