@@ -1,0 +1,14 @@
+#!/bin/sh
+# Copyright (c) 2026 Jurjen Stellingwerff
+# SPDX-License-Identifier: LGPL-3.0-or-later
+#
+# The C compiler with AddressSanitizer on, for `asan/run.sh`: loft compiles a library's C with
+# `$CC` and flags of its own, and takes none from a package, so the sanitizer comes in here.
+# Its `--version` starts with a word of its own: loft keys a built library on that line, so a
+# sanitized build never stands in for the ordinary one, nor the other way round.
+real="${ASAN_REAL_CC:-cc}"
+if [ "${1:-}" = "--version" ]; then
+    printf 'asan-cc: %s\n' "$("$real" --version | head -1)"
+    exit 0
+fi
+exec "$real" -fsanitize=address -fno-omit-frame-pointer -g "$@"

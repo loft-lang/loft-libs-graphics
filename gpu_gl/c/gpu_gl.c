@@ -239,96 +239,15 @@ static void gq_after(void) {
     gq_now = "";
 }
 
-/* What the checked mode knows of every handle this backend gave out: which device made it, what
- * it is, and whether it was released or its device closed.  A released handle is a freed
- * pointer; used again it reads memory that may hold anything, and nothing says so.  Here the
- * call is refused and named instead.  An address the allocator gives out again is a new handle
- * and reads as live: what is caught is every use between a release and that. */
-typedef struct {
-    int64_t h, dev;
-    const char *kind;
-    const char *ended_in; /* the call that released it; NULL while live */
-    int closed;           /* its device closed: only its release is in order */
-} gq_known;
-static gq_known *gq_knowns = NULL;
-static int gq_known_n = 0, gq_known_room = 0;
-
-static gq_known *gq_known_of(int64_t h) {
-    int i;
-    for (i = 0; i < gq_known_n; i++) {
-        if (gq_knowns[i].h == h) return &gq_knowns[i];
-    }
-    return NULL;
-}
-
-static int64_t gq_born(int64_t h, int64_t dev, const char *kind) {
-    gq_known *k;
-    if (!h) return h;
-    k = gq_known_of(h);
-    if (!k) {
-        if (gq_known_n == gq_known_room) {
-            int room = gq_known_room ? gq_known_room * 2 : 64;
-            gq_known *more = (gq_known *) realloc(gq_knowns, (size_t) room * sizeof(gq_known));
-            if (!more) return h;
-            gq_knowns = more;
-            gq_known_room = room;
-        }
-        k = &gq_knowns[gq_known_n++];
-    }
-    k->h = h;
-    k->dev = dev;
-    k->kind = kind;
-    k->ended_in = NULL;
-    k->closed = 0;
-    return h;
-}
-
-/* Whether a call may use handle `h` (0 is "none" and always may). */
-static int gq_live(int64_t h) {
-    gq_known *k = h ? gq_known_of(h) : NULL;
-    char why[160];
-    if (!h) return 1;
-    if (!k) {
-        gq_fault("misuse", "a handle this backend never gave out");
-        return 0;
-    }
-    if (k->ended_in) {
-        snprintf(why, sizeof why, "a %s used after `%s` released it", k->kind, k->ended_in);
-        gq_fault("misuse", why);
-        return 0;
-    }
-    if (k->closed) {
-        snprintf(why, sizeof why, "a %s used after its device closed", k->kind);
-        gq_fault("misuse", why);
-        return 0;
-    }
-    return 1;
-}
-
-/* A release: once, and also in order after the device closed. */
-static int gq_may_release(int64_t h) {
-    gq_known *k = h ? gq_known_of(h) : NULL;
-    char why[160];
-    if (!h) return 0;
-    if (!k) {
-        gq_fault("misuse", "the release of a handle this backend never gave out");
-        return 0;
-    }
-    if (k->ended_in) {
-        snprintf(why, sizeof why, "a %s released twice (first in `%s`)", k->kind, k->ended_in);
-        gq_fault("misuse", why);
-        return 0;
-    }
-    k->ended_in = gq_now;
-    return 1;
-}
-
-static void gq_device_closed(int64_t dev) {
-    int i;
-    for (i = 0; i < gq_known_n; i++) {
-        if (gq_knowns[i].dev == dev) gq_knowns[i].closed = 1;
-    }
-}
+/* What the checked mode knows of every handle this backend gave out, and whether a call may
+ * use or release one: gpu's register, which every backend's checked build shares. */
+#define GPU_REGISTER_FAULT(detail) gq_fault("misuse", detail)
+#define GPU_REGISTER_NOW gq_now
+#include "gpu/gpu_register.h"
+#define gq_born gpu_register_born
+#define gq_live gpu_register_live
+#define gq_may_release gpu_register_may_release
+#define gq_device_closed gpu_register_device_closed
 #endif /* GPU_GL_CHECKED */
 
 /* ── the host part ─────────────────────────────────────────────────────────────────────────── */

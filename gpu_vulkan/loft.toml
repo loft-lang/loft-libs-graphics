@@ -13,7 +13,7 @@ api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
 data_compatible_with = "0.1.0"   # oldest own release whose stored data this reads
 
 [dependencies]
-gpu = ">=0.4.1"
+gpu = ">=0.4.2"
 
 [library]
 entry = "src/gpu_vulkan.loft"

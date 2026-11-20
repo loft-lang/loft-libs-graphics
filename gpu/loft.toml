@@ -1,6 +1,6 @@
 [package]
 name = "gpu"
-version = "0.4.1"
+version = "0.4.2"
 loft = ">=2026.10.0"
 repository = "loft-libs-graphics"
 description = "Drawing on a GPU through pipelines, passes and uniform blocks, with no graphics stack named: a backend library beneath it draws"

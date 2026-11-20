@@ -34,6 +34,7 @@
  * a pass reads it or draws into it has that pass handed over as far as it came (`gm_hand_over`);
  * the pass then goes on in a new encoder with all it was told (`gm_resume`). */
 #include "gpu/gpu_backend.h"
+#include "checked.h" /* GPU_METAL_CHECKED or nothing: c/checked.sh sets it for a checked test run */
 #include <stddef.h>
 
 #if defined(__APPLE__) && !defined(__wasm__)
@@ -2018,15 +2019,178 @@ static const gpu_backend gm_tab = {
     gm_indices, gm_viewport_call, gm_scissor, gm_draw, gm_end, gm_present, gm_capture,
 };
 
+/* ── the checked build ─────────────────────────────────────────────────────────────────────── */
+
+#if defined(GPU_METAL_CHECKED)
+/* Compiled in only when `c/checked.h` defines GPU_METAL_CHECKED (`c/checked.sh`): the library as
+ * it ships holds none of this and pays nothing for it.  Metal's own validation
+ * (`MTL_DEBUG_LAYER=1`) sees a wrong call of Metal; it cannot see a handle of THIS backend used
+ * after its release, released twice, or used after its device closed, because by then the
+ * handle is a freed pointer the call reads before Metal is reached.  In a checked build every handle a call uses is looked up first (gpu's register);
+ * each fault is counted and written to stderr with the call it came from, and the call is not
+ * made.  `GPU_METAL_DEBUG=0` turns the checks of a checked build off, `abort` stops the
+ * program at the first fault; `gm_check` does the first from the program. */
+static int gm_checking = -1; /* -1 not asked yet, 0 off, 1 report, 2 abort */
+static int64_t gm_fault_count = 0;
+static const char *gm_now = ""; /* the table call being made */
+static int64_t gm_last_dev = 0; /* the device opened last, for `gm_check_self` */
+
+static int gm_check_mode(void) {
+    if (gm_checking < 0) {
+        const char *e = getenv("GPU_METAL_DEBUG");
+        gm_checking = e && !strcmp(e, "0") ? 0 : e && !strcmp(e, "abort") ? 2 : 1;
+    }
+    return gm_checking;
+}
+
+void gm_check(int64_t on) {
+    if (on) { if (gm_check_mode() == 0) gm_checking = 1; } else gm_checking = 0;
+}
+
+int64_t gm_faults(void) {
+    return gm_fault_count;
+}
+
+static void gm_fault(const char *detail) {
+    gm_fault_count++;
+    fprintf(stderr, "gpu_metal: misuse in `%s`: %s\n", gm_now, detail);
+    if (gm_checking == 2) abort();
+}
+
+#define GPU_REGISTER_FAULT(detail) gm_fault(detail)
+#define GPU_REGISTER_NOW gm_now
+#include "gpu/gpu_register.h"
+
+/* The checked table: each call that takes a handle, with the handle looked up first; a dead one
+ * is a fault and the call is not made. */
+#define GM_G(name, params, guard, call)                                                           \
+    static void gm_c_##name params {                                                             \
+        gm_now = #name;                                                                          \
+        if (guard) { call; }                                                                     \
+        gm_now = "";                                                                             \
+    }
+#define GM_B(name, params, call, dev, kind)                                                       \
+    static int64_t gm_c_##name params {                                                          \
+        int64_t r;                                                                               \
+        gm_now = #name;                                                                          \
+        r = gpu_register_born(call, dev, kind);                                                  \
+        gm_now = "";                                                                             \
+        return r;                                                                                \
+    }
+static int64_t gm_c_open(int64_t w, int64_t h, const char *t, int64_t f) {
+    int64_t d = gm_open(w, h, t, f);
+    if (d) gm_last_dev = d;
+    return d;
+}
+static void gm_c_close(int64_t d) {
+    gpu_register_device_closed(d);
+    if (gm_last_dev == d) gm_last_dev = 0;
+    gm_close(d);
+}
+GM_B(buffer, (int64_t d, const float *p, int64_t n), gm_buffer(d, p, n), d, "buffer")
+GM_B(index_buffer, (int64_t d, const int64_t *p, int64_t n), gm_index_buffer(d, p, n), d, "index buffer")
+GM_G(buffer_update, (int64_t b, const float *p, int64_t n), gpu_register_live(b), gm_buffer_update(b, p, n))
+GM_B(texture, (int64_t d, int64_t w, int64_t h, int64_t z), gm_texture(d, w, h, z), d, "texture")
+GM_G(texture_put, (int64_t t, int64_t x, int64_t y, int64_t w, int64_t h, const uint32_t *p, int64_t n),
+     gpu_register_live(t), gm_texture_put(t, x, y, w, h, p, n))
+GM_G(texture_put565, (int64_t t, int64_t x, int64_t y, int64_t w, int64_t h, const int32_t *p, int64_t n),
+     gpu_register_live(t), gm_texture_put565(t, x, y, w, h, p, n))
+GM_G(texture_nearest, (int64_t t, int64_t on), gpu_register_live(t), gm_texture_nearest(t, on))
+GM_G(texture_mipmaps, (int64_t t), gpu_register_live(t), gm_texture_mipmaps(t))
+static int64_t gm_c_target(int64_t d, int64_t c, int64_t z) {
+    int64_t r = 0;
+    gm_now = "target";
+    if (gpu_register_live(c) && gpu_register_live(z)) {
+        r = gpu_register_born(gm_target(d, c, z), d, "target");
+    }
+    gm_now = "";
+    return r;
+}
+GM_B(pipeline, (int64_t d, const gpu_program *p, const gpu_state *s), gm_pipeline(d, p, s), d, "pipeline")
+GM_G(release, (int64_t h), gpu_register_may_release(h), gm_release(h))
+GM_G(begin, (int64_t d, int64_t t, int64_t l, int64_t c), gpu_register_live(t), gm_begin(d, t, l, c))
+GM_G(bind, (int64_t d, int64_t p), gpu_register_live(p), gm_bind(d, p))
+GM_G(sample, (int64_t d, int64_t sl, int64_t t), gpu_register_live(t), gm_sample(d, sl, t))
+GM_G(vertices, (int64_t d, int64_t b), gpu_register_live(b), gm_vertices(d, b))
+GM_G(instances, (int64_t d, int64_t b, int64_t f), gpu_register_live(b), gm_instances(d, b, f))
+GM_G(indices, (int64_t d, int64_t b), gpu_register_live(b), gm_indices(d, b))
+GM_G(capture, (int64_t d, int64_t t, uint32_t *o, int64_t n), gpu_register_live(t), gm_capture(d, t, o, n))
+
+/* For this library's own tests: one buffer of the device opened last released twice and then
+ * given to a draw, straight through the checked table, as no program can through `gpu`.  The
+ * faults it adds (two, with the checks on) show the register catches them. */
+int64_t gm_check_self(void) {
+    static const float one[3] = {0.0f, 0.0f, 0.0f};
+    int64_t before = gm_fault_count, b;
+    if (!gm_last_dev || gm_check_mode() == 0 || gm_checking == 2) return 0;
+    b = gm_c_buffer(gm_last_dev, one, 3);
+    gm_c_release(b);
+    gm_c_release(b);
+    gm_c_vertices(gm_last_dev, b);
+    return gm_fault_count - before;
+}
+
+static const gpu_backend gm_tab_checked = {
+    GPU_BACKEND_WRITES_DEPTH, "gpu_metal", "msl",
+    gm_c_open, gm_poll, gm_event_count, gm_events, gm_size_of, gm_c_close,
+    gm_key_down, gm_pointer, gm_text_size, gm_text_copy,
+    gm_c_buffer, gm_c_index_buffer, gm_c_buffer_update, gm_c_texture, gm_c_texture_put,
+    gm_c_texture_put565,
+    gm_c_texture_nearest, gm_c_texture_mipmaps, gm_c_target, gm_c_pipeline, gm_c_release,
+    gm_c_begin, gm_c_bind, gm_uniforms, gm_c_sample, gm_c_vertices, gm_c_instances,
+    gm_c_indices, gm_viewport_call, gm_scissor, gm_draw, gm_end, gm_present, gm_c_capture,
+};
+
+int64_t gm_checked(void) {
+    return gm_check_mode() != 0;
+}
+#else /* the library as it ships: no check, and nothing to pay for one */
+
+void gm_check(int64_t on) {
+    (void) on;
+}
+
+int64_t gm_faults(void) {
+    return 0;
+}
+
+int64_t gm_checked(void) {
+    return 0;
+}
+
+int64_t gm_check_self(void) {
+    return 0;
+}
+#endif /* GPU_METAL_CHECKED */
+
 /* This backend's table: Metal is looked for when a device opens, so the table is there on every
  * Mac, and `open` answers 0 on one with no Metal device. */
 int64_t gm_table(void) {
+#if defined(GPU_METAL_CHECKED)
+    if (gm_check_mode()) return (int64_t) (intptr_t) &gm_tab_checked;
+#endif
     return (int64_t) (intptr_t) &gm_tab;
 }
 
 #else /* not a Mac: no Metal */
 
 int64_t gm_table(void) {
+    return 0;
+}
+
+void gm_check(int64_t on) {
+    (void) on;
+}
+
+int64_t gm_faults(void) {
+    return 0;
+}
+
+int64_t gm_checked(void) {
+    return 0;
+}
+
+int64_t gm_check_self(void) {
     return 0;
 }
 
