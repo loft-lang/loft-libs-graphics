@@ -1,6 +1,6 @@
 [package]
 name = "stage"
-version = "0.20.1"
+version = "0.21.0"
 
 # 0.19 is a declared break: the GL path draws on graphics 0.10's objects — `gl_stage(window)`
 # answers a `StageGl` in place of `painter_new()`'s `Painter`, and `gl_render` takes the window.
@@ -8,7 +8,9 @@ version = "0.20.1"
 # until it moves; the software path is unchanged.
 # 0.20 is a declared break: `add_mask` takes the alpha as `vector<u8>`, one byte a cell (a
 # literal list still fits; a `vector<integer>` variable does not), and a stored mask is narrower.
-api_compatible_with  = "0.20.0"   # oldest own release this is a drop-in for
+# 0.21 is a declared break: the GL path draws on graphics 0.14, whose window holds its own
+# state — `gl_stage(w)` and `gl_render(g, w, …)` take a `Window`, not a `const Window`.
+api_compatible_with  = "0.21.0"   # oldest own release this is a drop-in for
 data_compatible_with = "0.20.0"   # oldest own release whose stored data this reads
 loft = ">=2026.11.20261113"
 repository = "loft-libs-graphics"
@@ -16,7 +18,7 @@ description = "A retained 2-D scene for loft: a node tree you mutate, with trans
 categories  = ["graphics", "game"]
 
 [dependencies]
-graphics = ">=0.13.3"
+graphics = ">=0.14.0"
 tween = ">=0.1.0"
 
 [library]

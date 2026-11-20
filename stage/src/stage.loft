@@ -895,15 +895,24 @@ pub struct StageGl {
 }
 
 // Compile the shaders and upload the unit quad on `w`; null when a shader does not compile.
-pub fn gl_stage(w: const Window) -> StageGl? {
+pub fn gl_stage(w: Window) -> StageGl? {
     quad: vector<single> = [
         0.0f, 0.0f, 0.0f,  1.0f, 0.0f, 0.0f,  1.0f, 1.0f, 0.0f,
         0.0f, 0.0f, 0.0f,  1.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f];
     none: vector<single> = [];
     sh = w.shader(VERT_2D, FRAG_2D) ?? return null;
     lt = w.shader(VERT_LIGHT, FRAG_LIGHT) ?? return null;
-    StageGl { shader: sh, unit: w.upload(quad, 3), inst: w.instances(none), uploaded: false,
-              light: lt, full: w.quad(), target: w.framebuffer(), scene: w.texture(1, 1),
+    // One record a node, read once per drawn copy: where each input of the shader starts in it.
+    unit = w.upload(quad, 3);
+    unit.instance_attrib(1, 4, OFF_AFFINE);
+    unit.instance_attrib(2, 2, OFF_AFFINE + 4);
+    unit.instance_attrib(3, 4, OFF_CELL);
+    unit.instance_attrib(4, 4, OFF_RGBA);
+    unit.instance_attrib(5, 2, OFF_SWAY);
+    scene = w.texture(1, 1);
+    target = w.framebuffer(scene);
+    StageGl { shader: sh, unit: unit, inst: w.instances(none), uploaded: false,
+              light: lt, full: w.quad(), target: target, scene: scene,
               fw: 0, fh: 0 }
 }
 
@@ -916,7 +925,7 @@ pub fn gl_stage(w: const Window) -> StageGl? {
 // overlapping nodes would win where the software path lets the last one paint.  So
 // the pass runs with it off, and the window's depth, blend and scissor switches are
 // handed back as they were (the blend FUNCTION is left premultiplied).
-pub fn gl_render(self: Stage, g: StageGl, w: const Window, screen_w: float,
+pub fn gl_render(self: Stage, g: StageGl, w: Window, screen_w: float,
                  screen_h: float) -> integer {
     depth = w.enabled(GL_DEPTH_TEST);
     blending = w.enabled(GL_BLEND);
@@ -929,7 +938,7 @@ pub fn gl_render(self: Stage, g: StageGl, w: const Window, screen_w: float,
     calls
 }
 
-fn gl_passes(self: Stage, g: StageGl, w: const Window, screen_w: float,
+fn gl_passes(self: Stage, g: StageGl, w: Window, screen_w: float,
              screen_h: float) -> integer {
     floats = pack_instances(self);
     if len(floats) == 0 { return 0; }
@@ -973,28 +982,20 @@ fn gl_passes(self: Stage, g: StageGl, w: const Window, screen_w: float,
 // sibling `gl_composite` uses both, so *(screen_w, screen_h)* is the shape this
 // family of helpers takes; dropping one of two symmetric floats would leave a
 // bare positional float at three call sites that could take either dimension.
-fn gl_draw_band(self: const Stage, g: const StageGl, w: const Window, _screen_w: float,
+fn gl_draw_band(self: const Stage, g: StageGl, w: Window, _screen_w: float,
                 screen_h: float, lo: integer, hi: integer) -> integer {
     calls = 0;
     for v in 0..len(self.st_views) {
         vp = view_at(self, v);
         for b in batches(self) {
             if b.b_layer < lo or b.b_layer >= hi { continue; }
-            // ⚠ A RUN STARTS PART-WAY INTO THE BUFFER, and there is no first-instance
-            // parameter to say so: `draw_instanced` takes a count and nothing else,
-            // and the base-instance form that would (glDrawArraysInstancedBaseInstance)
-            // is GL 4.2 and is NOT in WebGL 2.  So the offset moves into the ATTRIBUTE
-            // POINTERS — re-bound per run at `b_first * INSTANCE_STRIDE` — which is the
-            // portable way and costs four calls per run rather than a wider draw call.
-            // One uniform pair per run, rather than N rewritten positions.
+            // ⚠ A RUN STARTS PART-WAY INTO THE BUFFER: the draw is told the float its
+            // first record starts at, and reads `b_count` records from there by the layout
+            // `gl_stage` declared.  One uniform pair per run, rather than N rewritten
+            // positions.
             coff = view_offset(self, v, b.b_layer);
             g.shader.set_vec2("uCam", coff.p_x, coff.p_y);
             base = b.b_first * INSTANCE_STRIDE;
-            g.unit.instance_attrib(g.inst, 1, 4, INSTANCE_STRIDE, base + OFF_AFFINE);
-            g.unit.instance_attrib(g.inst, 2, 2, INSTANCE_STRIDE, base + OFF_AFFINE + 4);
-            g.unit.instance_attrib(g.inst, 3, 4, INSTANCE_STRIDE, base + OFF_CELL);
-            g.unit.instance_attrib(g.inst, 4, 4, INSTANCE_STRIDE, base + OFF_RGBA);
-            g.unit.instance_attrib(g.inst, 5, 2, INSTANCE_STRIDE, base + OFF_SWAY);
             // The scissor is the view's rect intersected with the batch's clip —
             // computed in one place so a view boundary and a clip boundary cannot
             // be enforced by two different rules.
@@ -1013,7 +1014,7 @@ fn gl_draw_band(self: const Stage, g: const StageGl, w: const Window, _screen_w:
                     w.disable(GL_SCISSOR_TEST);
                 }
             }
-            g.unit.draw_instanced(g.shader, b.b_count);
+            g.unit.draw_instanced(w, g.shader, g.inst, b.b_count, base);
             calls = calls + 1;
         }
     }
@@ -1024,10 +1025,10 @@ fn gl_draw_band(self: const Stage, g: const StageGl, w: const Window, _screen_w:
 //
 // ⚠ It takes no `Stage`: an offscreen target is the GL objects and a size, and
 // nothing about the scene changes it.
-fn ensure_light_target(g: StageGl, w: const Window, width: integer, height: integer) {
+fn ensure_light_target(g: StageGl, w: Window, width: integer, height: integer) {
     if g.fw == width and g.fh == height { return; }
     g.scene = w.texture(width, height);
-    g.target.attach(g.scene);
+    g.target = w.framebuffer(g.scene);
     g.fw = width;
     g.fh = height;
 }
@@ -1037,12 +1038,10 @@ fn ensure_light_target(g: StageGl, w: const Window, width: integer, height: inte
 // ⚠ THE CURVE AND THE FLOOR GO IN AS UNIFORMS, from the same `LIGHT_FALLOFF` and
 // ambient the software path and every gate read.  Nothing about the falloff is
 // written in the shader's text.
-fn gl_composite(self: const Stage, g: const StageGl, w: const Window, screen_w: float,
+fn gl_composite(self: const Stage, g: StageGl, w: Window, screen_w: float,
                 screen_h: float) {
     w.disable(GL_SCISSOR_TEST);
     w.disable(GL_BLEND);
-    g.scene.bind(0);
-    g.light.set_int("uScene", 0);
     g.light.set_vec2("uScreenL", screen_w, screen_h);
     off = view_offset(self, 0, 0);
     g.light.set_vec2("uCamL", 0.0 - off.p_x, 0.0 - off.p_y);
@@ -1058,7 +1057,7 @@ fn gl_composite(self: const Stage, g: const StageGl, w: const Window, screen_w: 
                          ((l.lt_colour >> 8) & 255) as float / 255.0,
                          (l.lt_colour & 255) as float / 255.0);
     }
-    g.full.draw(g.light);
+    g.full.draw(w, g.light, g.scene);
     w.enable(GL_BLEND);
 }
 
