@@ -18,7 +18,7 @@ description = "A retained 2-D scene for loft: a node tree you mutate, with trans
 categories  = ["graphics", "game"]
 
 [dependencies]
-graphics = ">=0.14.1"
+graphics = ">=0.14.3"
 gpu = ">=0.4.1"
 tween = ">=0.1.0"
 

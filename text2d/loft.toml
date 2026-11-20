@@ -13,7 +13,7 @@ description = "Text that always draws — a built-in face, a glyph atlas, measur
 categories  = ["text", "graphics"]
 
 [dependencies]
-graphics = ">=0.14.1"
+graphics = ">=0.14.3"
 
 [library]
 entry = "src/text2d.loft"
