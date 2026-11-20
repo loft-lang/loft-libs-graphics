@@ -1,0 +1,61 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The checked build (`c/checked.sh`): that it is off in the library as committed, and that a
+// checked build sees what it is for — an error OpenGL kept, and a handle used after its
+// release.  A check that never fired would read the same as a library without a fault.
+// Without a display every test returns at once (`DISPLAY`, or `GRAPHICS_TEST_WINDOW=1` on a
+// Mac).
+use gpu;
+use gpu_gl;
+
+fn display() -> boolean {
+  must_draw((env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1")
+}
+
+// A run that says its tests must draw (`GRAPHICS_TEST_MUST_DRAW=1`: the library CI, on a runner
+// it gave a display) fails here, where a test would otherwise return having drawn nothing.
+fn must_draw(can: boolean) -> boolean {
+  assert(can || (env_variable("GRAPHICS_TEST_MUST_DRAW") ?? "") != "1", "this run's tests must draw (GRAPHICS_TEST_MUST_DRAW=1) and found no display to draw on");
+  can
+}
+
+// A build that stops at the first fault cannot count two of them.
+fn counting() -> boolean {
+  gpu_gl::checked() && (env_variable("GPU_GL_DEBUG") ?? "") != "abort"
+}
+
+fn test_an_unchecked_build_counts_nothing_and_a_checked_one_starts_at_none() {
+  devo = gpu::open(gpu_gl::table(), 64, 48, "checked-none");
+  if !display() { return; }
+  dev = devo ?? return assert(false, "no device");
+  mesh = dev.buffer([0.0f, 0.0f, 0.0f]);
+  assert(mesh.floats() == 3, "a buffer was made");
+  if !gpu_gl::checked() {
+    assert(gpu_gl::faults() == 0 && gpu_gl::check_catches() == 0, "an unchecked build counts no fault: {gpu_gl::faults()}");
+  }
+}
+
+// A texture wider than any OpenGL takes: the call is an error OpenGL keeps to itself.
+fn test_a_checked_build_counts_an_error_opengl_kept() {
+  devo = gpu::open(gpu_gl::table(), 64, 48, "checked-error");
+  if !display() || !counting() { return; }
+  dev = devo ?? return assert(false, "no device");
+  before = gpu_gl::faults();
+  wide = dev.texture(4000000, 4);
+  assert(wide.width() == 4000000, "the texture's own record says what was asked");
+  assert(gpu_gl::faults() > before, "the error of a texture no OpenGL can hold was counted: {gpu_gl::faults()} after {before}");
+}
+
+// A buffer released twice and used after: two faults, and the program goes on.
+fn test_a_checked_build_refuses_a_handle_used_after_its_release() {
+  devo = gpu::open(gpu_gl::table(), 64, 48, "checked-handle");
+  if !display() || !counting() { return; }
+  dev = devo ?? return assert(false, "no device");
+  caught = gpu_gl::check_catches();
+  assert(caught == 2, "a second release and a use after it are each a fault: {caught}");
+  dev.begin_window(gpu::CLEAR, 0xFF00FF00);
+  dev.end();
+  shot = dev.capture();
+  assert(shot[0] == 0xFF00FF00, "the device draws on after the refused calls: {shot[0]:x}");
+}
