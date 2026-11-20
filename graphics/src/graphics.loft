@@ -1078,6 +1078,14 @@ pub fn open_window(width: integer, height: integer, title: text) -> Window? {
   Window { dev: dev, kept: Kept {}, pass: Pass {}, into: gpu::INTO_WINDOW, into_w: dev.width(), into_h: dev.height(), wipe_quad: [], wipes: [] }
 }
 
+// Open a window through the backend whose table is `table` (a backend library's `table()`).
+// For a program that picks its backend itself, and for a test on `gpu_record`, which needs no
+// display.  Null when the table is none or the window does not open.
+pub fn open_window_on(table: i64, width: integer, height: integer, title: text) -> Window? {
+  dev = gpu::open(table, width, height, title) ?? return null;
+  Window { dev: dev, kept: Kept {}, pass: Pass {}, into: gpu::INTO_WINDOW, into_w: dev.width(), into_h: dev.height(), wipe_quad: [], wipes: [] }
+}
+
 // A window on the backend `named` alone.
 fn on_named(named: text, width: integer, height: integer, title: text) -> Window? {
   dev = gpu_host::open_on(named, width, height, title) ?? return null;
@@ -1102,6 +1110,13 @@ pub fn open_fullscreen(title: text) -> Window? {
 pub fn open_fullscreen_native(title: text) -> Window? {
   dev = gpu_host::open_fullscreen(title) ?? return null;
   Window { dev: dev, kept: Kept {}, pass: Pass {}, into: gpu::INTO_WINDOW, into_w: dev.width(), into_h: dev.height(), wipe_quad: [], wipes: [] }
+}
+
+// What the backend was asked and refused since the window opened, oldest first: a draw with a
+// call missing or out of order.  Empty in a program that draws as this library's calls allow;
+// for a test, and for finding why nothing appears.
+pub fn refusals(self: const Window) -> vector<text> {
+  self.dev.refusals()
 }
 
 // The name of the backend this window draws through, for a message.
@@ -1219,7 +1234,7 @@ pub fn clear(self: Window, color: integer) {
   found = -1;
   for wipe in self.wipes { if wipe.into == self.into { found = wipe#index; } }
   if found < 0 {
-    prog = gpu::Program { vertex: [gpu::F3], instance: [], block: [gpu::F4], textures: 0, sources: [gpu::source("glsl-330", WIPE_VERT, WIPE_FRAG), gpu::source("spirv", WIPE_VERT_SPV, WIPE_FRAG_SPV)] };
+    prog = gpu::Program { vertex: [gpu::F3], instance: [], block: [gpu::F4], textures: 0, sources: [gpu::source("glsl-330", WIPE_VERT, WIPE_FRAG), gpu::source("spirv", WIPE_VERT_SPV, WIPE_FRAG_SPV), gpu::source("record", "", "")] };
     depth = if self.into == gpu::INTO_COLOUR { gpu::DEPTH_OFF } else { gpu::DEPTH_WRITE };
     made = self.dev.pipeline(prog, gpu::State { depth: depth, into: self.into }) ?? return;
     found = len(self.wipes);
@@ -1402,7 +1417,9 @@ pub fn shader_of(self: Window, vertex: text, fragment: text, sources: const vect
 
 // The GLSL of a shader with what the program gave for the other backends.
 fn sources_of(vertex: text, fragment: text, others: const vector<gpu::Source>) -> vector<gpu::Source> {
-  out = [gpu::source("glsl-330", vertex, fragment)];
+  // "record" is the backend that draws nothing and writes down each call (`gpu_record`): it
+  // reads no shader text, so every shader runs on it.
+  out = [gpu::source("glsl-330", vertex, fragment), gpu::source("record", "", "")];
   for o in others { out += [gpu::source(o.tag, o.vertex, o.fragment)]; }
   out
 }

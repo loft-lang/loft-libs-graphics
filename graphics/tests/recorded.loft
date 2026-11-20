@@ -1,0 +1,89 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// A whole frame of this library's calls, on the backend that draws nothing and writes each
+// call down (`gpu_record`): no display is needed, so this runs where no other window test can.
+// It holds what the calls ask of `gpu` — every pass closed, nothing refused, the draws counted —
+// and not a pixel.
+use graphics;
+use gpu;
+use gpu_record;
+
+const V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(location = 1) in float dx;
+uniform mat4 uMVP;
+uniform vec3 uTint;
+void main() {{ gl_Position = uMVP * vec4(pos.x + dx, pos.y, pos.z, 1.0); }}
+`;
+
+const F: text = `
+#version 330 core
+uniform vec3 uTint;
+uniform sampler2D uTex;
+out vec4 frag;
+void main() {{ frag = vec4(uTint, 1.0) * texture(uTex, vec2(0.5)); }}
+`;
+
+fn identity() -> vector<float> {
+  [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+}
+
+// How many lines of the log start with `word`.
+fn lines_with(log: text, word: text) -> integer {
+  n = 0;
+  for line in log.split('\n') { if line.trim().starts_with(word) { n += 1; } }
+  n
+}
+
+fn test_a_frame_is_passes_that_close_and_nothing_refused() {
+  gpu_record::reset();
+  w = graphics::open_window_on(gpu_record::table(), 64, 48, "recorded") ?? return assert(false, "the recorder opens with no display");
+  assert(w.backend() == "gpu_record", "on the recorder: {w.backend()}");
+  s = w.shader(V, F) ?? return assert(false, "a shader given as GLSL runs on the recorder");
+  s.set_mat4("uMVP", identity());
+  s.set_vec3("uTint", 1.0, 0.5, 0.25);
+  mesh = w.upload([-1.0f, -1.0f, 0.0f, 1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f], 3);
+  mesh.instance_attrib(1, 1, 0);
+  records = w.instances([0.0f, 0.5f, -0.5f]);
+  image = w.texture_from(graphics::canvas(4, 4, 0xFFFFFFFF));
+  colour = w.texture(32, 24);
+  depth = w.depth_texture(32, 24);
+  target = w.framebuffer_with_depth(colour, depth);
+  p = w.painter() ?? return assert(false, "the painter's shaders run on the recorder");
+  log_before = gpu_record::log();
+  // into a framebuffer: a clear, three copies with depth
+  w.render_to(target);
+  w.clear(0xFF000000);
+  w.enable(graphics::GL_DEPTH_TEST);
+  mesh.draw_instanced(w, s, records, 3, 0, image);
+  // onto the window: a clear, a clear inside a scissor, a blended rectangle, the framebuffer's image
+  w.render_to_window();
+  w.clear(0xFF202020);
+  w.enable(graphics::GL_SCISSOR_TEST);
+  w.scissor(8, 8, 16, 16);
+  w.clear(0xFFFF0000);
+  w.disable(graphics::GL_SCISSOR_TEST);
+  w.disable(graphics::GL_DEPTH_TEST);
+  w.enable(graphics::GL_BLEND);
+  w.blend(graphics::BLEND_SRC_ALPHA, graphics::BLEND_ONE_MINUS_SRC_ALPHA);
+  p.rect(w, 2.0, 2.0, 10.0, 10.0, 1.0, 1.0, 1.0, 0.5);
+  p.image(w, colour, 20.0, 2.0, 16.0, 12.0);
+  w.swap();
+  log = gpu_record::log();
+  frame = log[log_before.size()..];
+  assert(len(w.refusals()) == 0, "nothing is refused: {w.refusals()}");
+  // two passes, each closed, then one present
+  assert(lines_with(frame, "begin ") == 2 && lines_with(frame, "end") == 2, "two passes, both closed:\n{frame}");
+  assert(lines_with(frame, "present") == 1, "one present:\n{frame}");
+  assert(frame.find("begin 0 clear ff202020") != null, "the window's pass starts cleared to the colour asked:\n{frame}");
+  // five draws: the framebuffer's clear, the three copies, the clear inside the scissor, the
+  // rectangle and the image
+  assert(lines_with(frame, "draw ") == 5, "five draws:\n{frame}");
+  assert(frame.find("draw from 0 count 3 copies 3") != null, "three copies of the three vertices:\n{frame}");
+  assert(frame.find("scissor 8,8 16x16") != null && frame.find("scissor off") != null, "the scissor is set and let go:\n{frame}");
+  // the rectangle and the image blend (source alpha over), the 3-D draw does not
+  assert(lines_with(frame, "state shape 0 depth 0 blend 20") == 2, "the two painter draws blend, with no depth test:\n{frame}");
+  assert(frame.find("state shape 0 depth 2 blend 0 cull 0 into 2") != null, "the copies are drawn with a depth test into colour and depth:\n{frame}");
+}
