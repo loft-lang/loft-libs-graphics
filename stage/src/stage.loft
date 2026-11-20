@@ -2152,23 +2152,27 @@ pub fn frame_of(self: const Stage, idx: integer) -> integer {
     // the bounds test above is what decides that, not this line.
     q = self.st_seqs[n.nd_seq] ?? Sequence { q_first: 0, q_count: 1, q_fps: 0.0,
                                              q_mode: LOOP, q_name: "" };
-    raw = ((n.nd_elapsed as float) * q.q_fps / 1000000.0) as integer;
-    if raw < 0 { raw = 0; }
     if q.q_count <= 1 { return q.q_first; }
+    // The frame is counted in whole numbers: microseconds times thousandths of a frame a
+    // second, in 64 bits.  A `float` product gives the same frame on a machine whose float is
+    // a double and can give the one before it where it is a single, once the time is long.
+    rate = (q.q_fps * 1000.0 + 0.5) as integer ?? 0;
+    frames: i64 = (n.nd_elapsed * rate) / 1000000000l ?? 0l;
+    if frames < 0l { frames = 0l; }
     if q.q_mode == ONCE {
-        if raw > q.q_count - 1 { raw = q.q_count - 1; }
-        return q.q_first + raw;
+        if frames > q.q_count - 1 { return q.q_first + q.q_count - 1; }
+        return q.q_first + (frames as integer ?? 0);
     }
     if q.q_mode == PINGPONG {
         // ⚠ The period is 2n-2, NOT 2n: the two END frames are each shown once
         // per cycle, not twice.  A period of 2n stutters at both ends, which is
         // the classic off-by-one in a ping-pong and reads as a limp.
         period = q.q_count * 2 - 2;
-        pp = raw % period ?? 0;
+        pp = (frames % period ?? 0l) as integer ?? 0;
         if pp < q.q_count { return q.q_first + pp; }
         return q.q_first + period - pp;
     }
-    q.q_first + (raw % q.q_count ?? 0)
+    q.q_first + ((frames % q.q_count ?? 0l) as integer ?? 0)
 }
 
 // Reset a node to the start of its sequence.
@@ -2397,7 +2401,11 @@ fn seq_named(self: const Stage, name: text) -> integer {
 pub fn facing_name(angle: float) -> text {
     turn = PI * 2.0;
     norm = angle - floor(angle / turn ?? 0.0) * turn;
-    b = ((norm + PI / 4.0) / (PI / 2.0) ?? 0.0) as integer;
+    // The angle is taken to the nearest hundredth of a degree and the quarter decided in whole
+    // numbers.  Dividing the radians put exactly 315 degrees just under its boundary where a
+    // float is a single and on it where it is a double: two machines, two facings.
+    hundredths = floor((norm * 18000.0 / PI ?? 0.0) + 0.5) as integer;
+    b = (hundredths % 36000 + 4500) / 9000 ?? 0;
     q = b % 4 ?? 0;
     if q == 0 { return "e"; }
     if q == 1 { return "s"; }
