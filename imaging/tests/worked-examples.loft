@@ -82,7 +82,7 @@ fn test_every_colour_type_arrives_as_rgba() {
   // takes a THRESHOLD because antialiased art has a partly-transparent fringe.
   assert(rgba0.opaque() && rgba1.opaque() && !rgba2.opaque(), "default cutoff 128");
   assert(!rgba1.opaque(129), "the cutoff is a parameter, not a constant");
-  assert(rgba0.rgba() == 0xFF0A141E, "packed 0xAARRGGBB, the Canvas byte order");
+  assert(rgba0.rgba() == 0xFF0A141El, "packed 0xAARRGGBB, the Canvas byte order");
 
   // Greyscale — one sample becomes r == g == b, and NO alpha channel means opaque.
   grey = file("fixture-gray.png").png() ?? Image { };

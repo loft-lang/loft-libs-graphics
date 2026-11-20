@@ -51,6 +51,9 @@ fn main() {
   assert(tiles::rgb(0, 0, 255) == B && tiles::rgb(255, 255, 255) == W, "RGB565 blue and white");
 }
 
+// A size far past any surface, as wide as this build's integer holds.
+fn huge(n: i64) -> integer { n as integer ?? 2147483647 }
+
 fn test_sheet_counts() {
   s = fixture();
   assert(s > 0, "the sheet is made");
@@ -134,8 +137,8 @@ fn test_layer_scrolls_to_the_pixel() {
 // Tiled ids: bit 31 horizontal, 30 vertical, 29 diagonal; a cell is (tile + 1) | flags << 24.
 fn test_tiled_ids() {
   assert(tiles::from_tiled(2) == 2, "gid 2 is tile 1");
-  assert(tiles::from_tiled(2147483650) == 16777218, "0x80000002: tile 1 mirrored");
-  assert(tiles::from_tiled(2684354561) == 83886081, "0xA0000001: tile 0 mirrored and transposed");
+  assert(tiles::from_tiled(2147483650l) == 16777218, "0x80000002: tile 1 mirrored");
+  assert(tiles::from_tiled(2684354561l) == 83886081, "0xA0000001: tile 0 mirrored and transposed");
   assert(tiles::from_tiled(0) == 0, "an empty cell");
   assert(tiles::from_tiled(5, 10) == 0, "a tile of an earlier sheet");
   m = tiles::layer_from_tiled_csv("1,2,\n0,2147483650", 2, 2) ?? 0;
@@ -211,10 +214,11 @@ fn test_rect_clips() {
 // width would be 1 and fill one pixel of the two.
 fn test_rect_is_clipped_not_wrapped() {
   s = tiles::surface(2, 1) ?? 0;
-  tiles::rect(s, 0, 0, 4294967297, 1, W);
+  tiles::rect(s, 0, 0, huge(4294967297l), 1, W);
   assert(show(tiles::pixels(s, 2, 1)) == "{W},{W},", "got {show(tiles::pixels(s, 2, 1))}");
   t = tiles::surface(2, 1) ?? 0;
-  tiles::rect(t, -1000000000000, -5, 2000000000000, 10, R);
+  // its left edge a thousand million to the left, its width past the right edge at either width
+  tiles::rect(t, -1000000000, -5, huge(2000000000000l), 10, R);
   assert(show(tiles::pixels(t, 2, 1)) == "{R},{R},", "got {show(tiles::pixels(t, 2, 1))}");
 }
 

@@ -37,8 +37,9 @@ pub fn value(self: Pixel) -> integer {
 // Returns the pixel as a packed 32-bit integer (0xAARRGGBB) — the byte order
 // `graphics::Canvas` uses, so a decoded image can be handed to a canvas without a
 // per-channel loop at the call site.
-pub fn rgba(self: Pixel) -> integer {
-  self.a * 0x1000000 + self.r * 0x10000 + self.g * 0x100 + self.b
+pub fn rgba(self: Pixel) -> i64 {
+  // the alpha byte is placed as an `i64`: 32 signed bits have no room for an alpha of 128 or more
+  (self.a as i64) * 0x1000000 + self.r * 0x10000 + self.g * 0x100 + self.b
 }
 
 // Is this texel opaque enough to count as covered?
