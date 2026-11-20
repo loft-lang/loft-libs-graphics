@@ -7,8 +7,8 @@ description = "Drawing on a GPU through pipelines, passes and uniform blocks, wi
 categories  = ["graphics", "game"]
 
 # ⚠ FIRST release, so both floors are this release itself.
-api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
-data_compatible_with = "0.1.0"   # oldest own release whose stored data this reads
+api_compatible_with  = "0.4.1"   # oldest own release this is a drop-in for: 0.4.1 put the backend's table in every object
+data_compatible_with = "0.4.1"   # oldest own release whose stored data this reads
 
 [library]
 entry = "src/gpu.loft"

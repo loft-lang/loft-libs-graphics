@@ -1,17 +1,17 @@
 [package]
 name = "gpu_paint"
-version = "0.2.0"
+version = "0.2.1"
 loft = ">=2026.10.0"
 repository = "loft-libs-graphics"
 description = "Rectangles, images and sprites at pixel positions, drawn through gpu: a painter and sprite sheets for any backend"
 categories  = ["graphics", "game"]
 
 # ⚠ FIRST release, so both floors are this release itself.
-api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
-data_compatible_with = "0.1.0"   # oldest own release whose stored data this reads
+api_compatible_with  = "0.2.1"   # the API is unchanged; raised with the data floor, which the check cannot tell apart (loft#2598)
+data_compatible_with = "0.2.1"   # its records hold gpu's, which gpu 0.4.1 reshaped
 
 [dependencies]
-gpu = ">=0.1.0"
+gpu = ">=0.4.1"
 
 [library]
 entry = "src/gpu_paint.loft"

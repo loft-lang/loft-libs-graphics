@@ -1,6 +1,6 @@
 [package]
 name = "gpu_metal"
-version = "0.2.0"
+version = "0.2.1"
 # Its shim includes gpu's header by the dependency's name (`gpu/gpu_backend.h`), which loft
 # provides from the daily build that carries its decision C165 on.
 loft = ">=2026.11.20261116"
@@ -13,7 +13,7 @@ api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
 data_compatible_with = "0.1.0"   # oldest own release whose stored data this reads
 
 [dependencies]
-gpu = ">=0.4.0"
+gpu = ">=0.4.1"
 
 [library]
 entry = "src/gpu_metal.loft"
