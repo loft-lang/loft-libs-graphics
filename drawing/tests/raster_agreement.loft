@@ -28,7 +28,7 @@ fn mask_of(cv: const graphics::Canvas) -> text {
   m
 }
 
-fn ink() -> integer { graphics::rgba(200, 40, 30, 255) }
+fn ink() -> i64 { graphics::rgba(200, 40, 30, 255) }
 
 fn test_polygon_matches_pillow() {
   cv = graphics::canvas(N, N, 0);

@@ -62,9 +62,9 @@ pub struct LockStyle {
   pub seed: integer = 1,
   pub period: float = 48.0,
   /// The transverse colour ramp, packed: underside, crest, lit flank.
-  pub dark: integer = 0,
-  pub base: integer = 0,
-  pub lit: integer = 0,
+  pub dark: i64 = 0,
+  pub base: i64 = 0,
+  pub lit: i64 = 0,
   /// The light's direction; `lz` points out of the paper.
   pub lx: float = -0.5,
   pub ly: float = -0.8,
@@ -133,7 +133,7 @@ pub fn hair_brush(bw: integer, bh: integer, seed: integer, gap: float) -> vector
         }
         hb_g = (255.0 * hb_v + 0.5) as integer;
         hb_ai = (255.0 * hb_a + 0.5) as integer;
-        hb_img[y * bw + hb_xx] = ((hb_ai << 24) | (hb_g << 16) | (hb_g << 8) | hb_g) & 4294967295;
+        hb_img[y * bw + hb_xx] = (((hb_ai as i64) << 24) | (hb_g << 16) | (hb_g << 8) | hb_g) & 4294967295l;
       }
     }
     hb_x += hb_cw;
@@ -148,7 +148,7 @@ pub fn hair_brush(bw: integer, bh: integer, seed: integer, gap: float) -> vector
 pub fn load_brush(path: text, bname: text, period: float) -> Brush {
   lb_im = file(path).png();
   if lb_im == null { return Brush { bname: bname, bw: 0, bh: 0, period: 0.0, img: [] } }
-  lb_px: vector<u32> = [for i in 0..len(lb_im.data) { imaging::rgba(lb_im.data[i]?) & 4294967295 }];
+  lb_px: vector<u32> = [for i in 0..len(lb_im.data) { imaging::rgba(lb_im.data[i]?) & 4294967295l }];
   Brush { bname: bname, bw: lb_im.width, bh: lb_im.height,
           period: if period > 0.0 { period } else { lb_im.height as float }, img: lb_px }
 }
@@ -378,7 +378,7 @@ struct Smp {
   b: float = 0.0,
 }
 
-fn chan(c: integer, sh: integer) -> float { ((c >> sh) & 255) as float }
+fn chan(c: i64, sh: integer) -> float { (((c >> sh) & 255) as integer) as float }
 
 /// Bilinear: clamp across (`fu`), wrap along (`fv`, already non-negative).
 /// @FR-Brush-Image — the sampling half.
@@ -503,8 +503,8 @@ pub fn lock_layer(xs: const vector<float>, ys: const vector<float>, cw: integer,
     ll_r = ramp(graphics::color_r(ll_c0), graphics::color_r(ll_c1), ll_f, ll_smp.r);
     ll_g = ramp(graphics::color_g(ll_c0), graphics::color_g(ll_c1), ll_f, ll_smp.g);
     ll_b = ramp(graphics::color_b(ll_c0), graphics::color_b(ll_c1), ll_f, ll_smp.b);
-    ll_out[idx] = ((((ll_ia + 0.5) as integer) << 24) | (clampi(ll_r, 0, 255) << 16)
-                  | (clampi(ll_g, 0, 255) << 8) | clampi(ll_b, 0, 255)) & 4294967295;
+    ll_out[idx] = (((((ll_ia + 0.5) as integer) as i64) << 24) | (clampi(ll_r, 0, 255) << 16)
+                  | (clampi(ll_g, 0, 255) << 8) | clampi(ll_b, 0, 255)) & 4294967295l;
   }
   Layer { x0: ll_x0, y0: ll_y0, lw: ll_lw, lh: ll_lh, px: ll_out }
 }

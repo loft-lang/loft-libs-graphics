@@ -152,7 +152,7 @@ fn runs_down(cv: const graphics::Canvas, x: integer) -> integer {
   rd_n
 }
 
-fn lum(c: integer) -> float {
+fn lum(c: i64) -> float {
   0.299 * (graphics::color_r(c) as float) + 0.587 * (graphics::color_g(c) as float)
   + 0.114 * (graphics::color_b(c) as float)
 }
