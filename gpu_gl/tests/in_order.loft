@@ -3,7 +3,7 @@
 //
 // What `gpu` promises of every backend and OpenGL does not give by itself, against values
 // worked out by hand: a texture changed between two draws of a pass, a uniform block given again
-// between draws, and a window that has no alpha and reads back the frame it shows.
+// between draws, a depth written without a test, and a window that has no alpha and reads back the frame it shows.
 // Without a display every test returns at once (`DISPLAY`, or `GRAPHICS_TEST_WINDOW=1` on a
 // Mac).
 use gpu;
@@ -192,4 +192,59 @@ fn test_a_block_given_again_between_draws_leaves_the_earlier_draws_as_drawn() {
   assert(shot[36 * 64 + 48] == 0xFF00FF00, "the second draw kept its green: {shot[36 * 64 + 48]:x}");
   assert(shot[12 * 64 + 48] == 0xFF0000FF, "the third draw is blue: {shot[12 * 64 + 48]:x}");
   assert(shot[12 * 64 + 16] == 0xFF000000, "the quarter nothing drew is the clear colour: {shot[12 * 64 + 16]:x}");
+}
+
+const DEEP_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(std140) uniform Block {{ vec4 color; float z; }};
+void main() {{ gl_Position = vec4(pos.xy, z, 1.0); }}
+`;
+
+const DEEP_F: text = `
+#version 330 core
+layout(std140) uniform Block {{ vec4 color; float z; }};
+out vec4 frag;
+void main() {{ frag = color; }}
+`;
+
+// `DEPTH_WRITE` covers what is there and leaves its own depth behind, tested by nothing: a near
+// red frame everywhere, then a green one at the far end inside a scissor over the left half,
+// then a yellow one further than the red, tested.  The yellow shows on the left only.
+fn test_a_depth_written_without_a_test_lets_a_further_draw_through() {
+  devo = gpu::open(gpu_gl::table(), 64, 48, "depth-write");
+  if !display() { return; }
+  dev = devo ?? return assert(false, "no device");
+  prog = gpu::Program {
+    vertex: [gpu::F3],
+    instance: [],
+    block: [gpu::F4, gpu::F1],
+    textures: 0,
+    sources: [gpu::source("glsl-330", DEEP_V, DEEP_F)],
+  };
+  solid = dev.pipeline(prog, gpu::State { depth: gpu::DEPTH_TEST_WRITE }) ?? return assert(false, "no pipeline");
+  wipe = dev.pipeline(prog, gpu::State { depth: gpu::DEPTH_WRITE }) ?? return assert(false, "no pipeline that writes a depth untested");
+  whole: vector<single> = [-1.0f, -1.0f, 0.0f, 1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f, -1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f, -1.0f, 1.0f, 0.0f];
+  q = dev.buffer(whole);
+  u = solid.block();
+  dev.begin_window(gpu::CLEAR, 0xFF0000FF);
+  dev.bind(solid);
+  u.f4(0, 1.0, 0.0, 0.0, 1.0); u.f1(1, -0.5);
+  dev.uniforms(u); dev.vertices(q); dev.draw(0, 6);
+  dev.bind(wipe);
+  dev.scissor(0, 0, 32, 48);
+  u.f4(0, 0.0, 1.0, 0.0, 1.0); u.f1(1, 1.0);
+  dev.uniforms(u); dev.vertices(q); dev.draw(0, 6);
+  mid = dev.capture();
+  dev.no_scissor();
+  dev.bind(solid);
+  u.f4(0, 1.0, 1.0, 0.0, 1.0); u.f1(1, 0.5);
+  dev.uniforms(u); dev.vertices(q); dev.draw(0, 6);
+  dev.end();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  shot = dev.capture();
+  assert(mid[24 * 64 + 16] == 0xFF00FF00, "the untested frame covered the nearer one on the left: {mid[24 * 64 + 16]:x}");
+  assert(mid[24 * 64 + 48] == 0xFFFF0000, "and was cut by the scissor on the right: {mid[24 * 64 + 48]:x}");
+  assert(shot[24 * 64 + 16] == 0xFFFFFF00, "left: the further frame passed the depth it left: {shot[24 * 64 + 16]:x}");
+  assert(shot[24 * 64 + 48] == 0xFFFF0000, "right: the near frame kept its depth: {shot[24 * 64 + 48]:x}");
 }

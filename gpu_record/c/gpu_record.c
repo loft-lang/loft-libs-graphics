@@ -197,7 +197,7 @@ static void rec_capture(int64_t dev, int64_t target, uint32_t *out, int64_t n) {
 }
 
 static const gpu_backend rec_tab = {
-    GPU_BACKEND_VERSION, "gpu_record", "record",
+    GPU_BACKEND_WRITES_DEPTH, "gpu_record", "record",
     rec_open, rec_poll, rec_event_count, rec_events, rec_size, rec_close,
     rec_key_down, rec_pointer, rec_text_size, rec_text_copy,
     rec_buffer, rec_index_buffer, rec_buffer_update, rec_texture, rec_texture_put,

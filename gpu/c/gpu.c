@@ -7,10 +7,12 @@
 
 static const gpu_backend *gp_tab = NULL;
 
-/* Take a backend's table; 0 for a null table or one of another version. */
+/* Take a backend's table; 0 for a null table or one of a version this library does not know. */
 int64_t gp_use(int64_t table) {
     const gpu_backend *t = (const gpu_backend *) (intptr_t) table;
-    if (t == NULL || t->version != GPU_BACKEND_VERSION) { return 0; }
+    if (t == NULL || (t->version != GPU_BACKEND_VERSION && t->version != GPU_BACKEND_WRITES_DEPTH)) {
+        return 0;
+    }
     gp_tab = t;
     return 1;
 }
@@ -88,6 +90,8 @@ int64_t gp_pipeline(int64_t dev, const int64_t *d, int64_t n, const char *vertex
     s.blend = d[at++];
     s.cull = d[at++];
     s.into = d[at++];
+    /* A backend that does not say it writes a depth untested would test it: no pipeline. */
+    if (s.depth == 3 && gp_tab->version < GPU_BACKEND_WRITES_DEPTH) { return 0; }
     return gp_tab->pipeline(dev, &p, &s);
 }
 

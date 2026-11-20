@@ -137,6 +137,10 @@ pub const POINTS = 2;
 pub const DEPTH_OFF = 0;
 pub const DEPTH_TEST = 1;
 pub const DEPTH_TEST_WRITE = 2;
+// A draw that writes its depth and is not tested: it covers what is there and leaves its own
+// depth behind, as a clear of part of a target does.  A backend that cannot answers no pipeline
+// (`gpu_gl` in a browser page).
+pub const DEPTH_WRITE = 3;
 
 // A draw replaces what the target holds.
 pub const BLEND_OFF = 0;

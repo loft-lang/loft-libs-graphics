@@ -20,6 +20,10 @@
 #include <stdint.h>
 
 #define GPU_BACKEND_VERSION 2
+/* The version a backend states when it also takes depth state 3 (a draw that writes its depth
+ * without a test).  The table is laid out as version 2's; `gpu` asks a version 2 backend for no
+ * such pipeline. */
+#define GPU_BACKEND_WRITES_DEPTH 3
 #define GPU_MAX_INPUTS 16
 #define GPU_MAX_FIELDS 32
 
@@ -48,14 +52,14 @@ typedef struct {
 /* Render state, fixed for a pipeline's life.  The numbers are gpu.loft's constants. */
 typedef struct {
     int64_t shape;      /* 0 triangles, 1 lines, 2 points */
-    int64_t depth;      /* 0 off, 1 test, 2 test and write */
+    int64_t depth;      /* 0 off, 1 test, 2 test and write, 3 write without a test */
     int64_t blend;      /* 0 off, else 1 + 8 * source factor + destination factor */
     int64_t cull;       /* 0 none, 1 back, 2 front; counter-clockwise is the front */
     int64_t into;       /* 0 the window, 1 colour, 2 colour and depth, 3 depth */
 } gpu_state;
 
 typedef struct {
-    int64_t version;    /* GPU_BACKEND_VERSION */
+    int64_t version;    /* GPU_BACKEND_VERSION, or GPU_BACKEND_WRITES_DEPTH */
     const char *name;   /* for a diagnostic, never for a branch */
     const char *shading; /* the source tag this backend takes */
     /* the host part */

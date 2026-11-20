@@ -1528,8 +1528,8 @@ static int64_t gv_t_pipeline(int64_t dev, const gpu_program *p, const gpu_state 
     memset(&ds, 0, sizeof ds);
     ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     ds.depthTestEnable = has_depth && s->depth != 0;
-    ds.depthWriteEnable = has_depth && s->depth == 2;
-    ds.depthCompareOp = VK_COMPARE_OP_LESS;
+    ds.depthWriteEnable = has_depth && s->depth >= 2;
+    ds.depthCompareOp = s->depth == 3 ? VK_COMPARE_OP_ALWAYS : VK_COMPARE_OP_LESS;
     ds.maxDepthBounds = 1.0f;
 
     memset(&blend, 0, sizeof blend);
@@ -2037,7 +2037,7 @@ static void gv_t_capture(int64_t dev, int64_t target, uint32_t *out, int64_t n) 
 }
 
 static const gpu_backend gv_tab = {
-    GPU_BACKEND_VERSION, "gpu_vulkan", "spirv",
+    GPU_BACKEND_WRITES_DEPTH, "gpu_vulkan", "spirv",
     gv_t_open, gv_t_poll, gv_t_event_count, gv_t_events, gv_t_size, gv_t_close,
     gv_t_key_down, gv_t_pointer, gv_t_text_size, gv_t_text_copy,
     gv_t_buffer, gv_t_index_buffer, gv_t_buffer_update, gv_t_texture, gv_t_texture_put,

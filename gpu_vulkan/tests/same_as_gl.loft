@@ -478,6 +478,47 @@ fn test_depth_and_blend() {
   both("depth-blend", depth_and_blend, exact());
 }
 
+// A near red frame everywhere; then, inside a scissor over the left half, a green frame at the
+// far end that writes its depth untested, which is what a clear of part of a target does; then
+// a yellow frame further than the red one, tested.  It shows on the left only, where the depth
+// was written over.
+fn depth_written_untested(dev: gpu::Device) -> vector<u32> {
+  solid = dev.pipeline(flat(), gpu::State { depth: gpu::DEPTH_TEST_WRITE }) ?? return [];
+  wipe = dev.pipeline(flat(), gpu::State { depth: gpu::DEPTH_WRITE }) ?? return [];
+  b_whole = dev.buffer(rect(-1.0, -1.0, 1.0, 1.0, false));
+  u = solid.block();
+  dev.begin_window(gpu::CLEAR, BLUE);
+  dev.bind(solid);
+  u.f4(0, 1.0, 0.0, 0.0, 1.0);
+  u.f1(1, -0.5);
+  dev.uniforms(u);
+  dev.vertices(b_whole);
+  dev.draw(0, 6);
+  dev.bind(wipe);
+  dev.scissor(0, 0, 32, 48);
+  u.f4(0, 0.0, 1.0, 0.0, 1.0);
+  u.f1(1, 1.0);
+  dev.uniforms(u);
+  dev.vertices(b_whole);
+  dev.draw(0, 6);
+  dev.no_scissor();
+  dev.bind(solid);
+  u.f4(0, 1.0, 1.0, 0.0, 1.0);
+  u.f1(1, 0.5);
+  dev.uniforms(u);
+  dev.vertices(b_whole);
+  dev.draw(0, 6);
+  dev.end();
+  c = dev.capture();
+  assert(c[24 * 64 + 16] == 0xFFFFFF00, "left: the far frame shows where the depth was written over: {c[24 * 64 + 16]:x}");
+  assert(c[24 * 64 + 48] == 0xFFFF0000, "right: the near frame kept its depth: {c[24 * 64 + 48]:x}");
+  c
+}
+
+fn test_a_depth_written_without_a_test() {
+  both("depth-write", depth_written_untested, exact());
+}
+
 // A clockwise frame culled away; a green frame cut to a rectangle by the scissor; a red frame
 // squeezed into a corner by the viewport; a counter-clockwise strip culled as a front face.
 fn cull_scissor_viewport(dev: gpu::Device) -> vector<u32> {

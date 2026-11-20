@@ -47,6 +47,9 @@ layout(std140) uniform Block { vec4 color; float z; };   // the program's [F4, F
 void main() { gl_Position = vec4(pos.xy, z, 1.0); }
 ```
 
+In a browser page a `DEPTH_WRITE` pipeline is not built (`dev.pipeline` answers null): the page
+gives this library no way to change what a depth is compared by.
+
 When a pipeline is built the compiled program's block is compared with the program's
 declaration: its size in whole vectors, and where each field starts.  A source that lays the
 block out otherwise (a `vec3` field, a field too few) builds no pipeline, and stderr shows
