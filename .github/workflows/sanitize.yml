@@ -1,0 +1,88 @@
+# The GPU backends' C under AddressSanitizer (`asan/run.sh`), with their checked builds on.
+#
+# This repository's own job, beside the generated `library-ci.yml`: loft compiles a library's C
+# with flags of its own and takes none from a package, so no package can ask for a sanitized
+# build through the unified gate.  `asan/cc` is the compiler loft is handed here instead.
+#
+# It cannot pass for nothing: `asan/run.sh` first runs C that reads freed memory on purpose and
+# goes on only when the sanitizer reported it, and it fails a package whose tests passed
+# without a sanitized build of its C beside them.
+name: sanitize
+on:
+  push:
+    branches: [main]
+    paths: ['gpu/**', 'gpu_gl/**', 'gpu_vulkan/**', 'asan/**', '.github/workflows/sanitize.yml']
+  pull_request:
+    paths: ['gpu/**', 'gpu_gl/**', 'gpu_vulkan/**', 'asan/**', '.github/workflows/sanitize.yml']
+permissions:
+  contents: read
+jobs:
+  asan:
+    name: gpu_gl and gpu_vulkan under AddressSanitizer
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout the library
+        uses: actions/checkout@v4
+
+      - name: Install mold (loft's pinned linker), a display and the software renderers
+        run: |
+          timeout 300 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -y
+          timeout 600 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y \
+            mold xvfb libgl1-mesa-dri libglx-mesa0 libegl1 libgles2 mesa-vulkan-drivers libvulkan1 \
+            libx11-6 libxtst6
+
+      - name: Checkout loft
+        uses: actions/checkout@v4
+        with:
+          repository: loft-lang/loft
+          path: loft-src
+          # The release tags, so the loft built here answers `<last release>.<yyyymmdd>` and a
+          # library floored on a day passes.
+          fetch-tags: true
+
+      - name: Resolve the loft commit (for the cache key)
+        id: loftsha
+        run: echo "sha=$(git -C loft-src rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache cargo + loft build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            loft-src/target
+          key: library-ci-loft-${{ steps.loftsha.outputs.sha }}-${{ hashFiles('loft-src/Cargo.lock') }}
+          restore-keys: |
+            library-ci-loft-${{ steps.loftsha.outputs.sha }}-
+
+      - name: Build loft
+        working-directory: loft-src
+        run: |
+          cargo build --release --lib --bin loft --bin loft-components
+          target/release/loft-components
+          echo "$PWD/target/release" >> "$GITHUB_PATH"
+
+      - name: A display
+        run: |
+          Xvfb :99 -screen 0 1920x1200x24 -nolisten tcp -audit 1 > "$RUNNER_TEMP/xvfb.log" 2>&1 &
+          for _ in $(seq 50); do [ -S /tmp/.X11-unix/X99 ] && break; sleep 0.2; done
+          if [ ! -S /tmp/.X11-unix/X99 ]; then
+            echo "Xvfb did not start:"; cat "$RUNNER_TEMP/xvfb.log"; exit 1
+          fi
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      # The checked builds on: every handle a call uses is looked up, so the sanitizer sees
+      # the backends' own bookkeeping as well as what they hand the drivers.
+      - name: The backends' C under AddressSanitizer, checked
+        env:
+          GRAPHICS_TEST_MUST_DRAW: '1'
+          MESA_VK_WSI_DEBUG: sw
+        run: |
+          gpu_gl/c/checked.sh on
+          gpu_vulkan/c/checked.sh on
+          asan/run.sh gpu gpu_gl gpu_vulkan
+
+      - name: The X server's log, when the run failed
+        if: failure()
+        run: cat "$RUNNER_TEMP/xvfb.log" || true
