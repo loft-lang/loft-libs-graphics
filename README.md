@@ -45,7 +45,7 @@ backend (`graphics/README.md` § Other backends).
 | [`graphics`](graphics/) | 0.14.3 | A 2D canvas, windows, drawing on the GPU and text for loft (meshes and glTF are mesh3d and glb) |
 | [`stage`](stage/) | 0.21.2 | A retained 2-D scene for loft: a node tree you mutate, with transforms, clipping, batching, pointer routing and widget states |
 | **Pixels, images and text** | | |
-| [`imaging`](imaging/) | 0.5.5 | PNG load/save and pixel manipulation for loft: one C source on every target, no Rust crate |
+| [`imaging`](imaging/) | 0.5.6 | PNG load/save and pixel manipulation for loft: one C source on every target, no Rust crate |
 | [`drawing`](drawing/) | 0.5.3 | Render a .draw scene — a sprite authored as lines of text — pixel-identically to the Python renderer it replaces |
 | [`text2d`](text2d/) | 0.4.9 | Text that always draws — a built-in face, a glyph atlas, measured metrics, wrapping and alignment, with no font file and no GL context |
 | [`tiles`](tiles/) | 0.7.2 | Tile sheets, map layers and sprites drawn at a surface's own resolution through a camera |
