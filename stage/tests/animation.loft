@@ -72,6 +72,22 @@ fn test_thirty_and_sixty_hertz_agree() {
   }
 }
 
+// A sequence that has run for more than 2^31 microseconds — 36 minutes — still
+// counts: the elapsed time is 64 bits wide where an `integer` is 32.
+//
+// Hand-computed: 2 x 2000000000 + 300000 us at 10 fps is frame 40003, and
+// 40003 % 4 = 3.
+fn test_a_long_run_keeps_counting() {
+  st = stage::stage_new();
+  q = st.add_sequence(0, 4, 10.0, stage::LOOP);
+  n = walker(st, q);
+  st.compose();
+  st.advance(2000000000);
+  st.advance(2000000000);
+  st.advance(300000);
+  assert(st.frame_of(n) == 3, "4000.3 s in, on frame 3 — got {st.frame_of(n)}");
+}
+
 // ONCE stops on the last frame and stays there — it does not wrap, and it does not
 // run off the end of the atlas.
 fn test_once_stops_on_the_last_frame() {

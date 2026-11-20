@@ -20,6 +20,12 @@ fn wex_has(v: vector<integer>, target: integer) -> boolean {
   false
 }
 
+// The same for a list of chunk keys, which are wider than a 32-bit integer.
+fn wex_has_key(v: vector<i64>, target: i64) -> boolean {
+  for e in v { if e == target { return true; } }
+  false
+}
+
 // How many of the chunk inputs claim cell `ix` as OWNED (must be exactly one).
 fn wex_owner_count(inputs: vector<ChunkInput>, ix: integer) -> integer {
   n = 0;
@@ -130,8 +136,8 @@ fn test_dirty_group_lists_clean_members() {
   assert(len(groups) == 1, "one group to re-upload");
   for g in groups {
     assert(len(g.chunk_cks) == 2, "BOTH populated chunks are listed, not just the dirty one");
-    assert(wex_has(g.chunk_cks, enc_coord(0, 0)), "the dirty chunk — re-run the rule");
-    assert(wex_has(g.chunk_cks, enc_coord(1, 0)), "the clean chunk — copy its cached mesh");
+    assert(wex_has_key(g.chunk_cks, enc_coord(0, 0)), "the dirty chunk — re-run the rule");
+    assert(wex_has_key(g.chunk_cks, enc_coord(1, 0)), "the clean chunk — copy its cached mesh");
   }
 }
 

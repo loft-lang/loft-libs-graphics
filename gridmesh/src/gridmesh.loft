@@ -15,12 +15,13 @@
 
 // A coord→cell-index reference, stored in the spatial-index hash keyed on
 // the encoded coordinate `ck`.
-pub struct CellRef { pub ck: integer, pub ix: integer }
+pub struct CellRef { pub ck: i64, pub ix: integer }
 
 // Encode an offset coord into one integer key.  The hex world is small;
 // ±2^20 per axis covers it with room to spare and stays within i64.
-pub fn enc_coord(x: integer, y: integer) -> integer {
-  (x + 1048576) * 2097152 + (y + 1048576)
+pub fn enc_coord(x: integer, y: integer) -> i64 {
+  // the key is 42 bits: its first term is widened before it is multiplied
+  ((x + 1048576) as i64) * 2097152 + (y + 1048576)
 }
 
 // Build the coord→cell-index spatial index for a placement-ordered cell
@@ -151,7 +152,7 @@ pub fn seg_mesh_append(dst: SegMesh, src: const SegMesh) {
 
 // A chunk-space coordinate.  `ck = enc_coord(cx, cy)` is its identity for
 // dedup in the dirty index.
-pub struct ChunkKey { pub ck: integer, pub cx: integer, pub cy: integer }
+pub struct ChunkKey { pub ck: i64, pub cx: integer, pub cy: integer }
 
 // floor(v / cs) for cs > 0, correct for negative coords (truncating `/`
 // would map cells across the origin to the wrong chunk).  Mirrors moros's
@@ -182,7 +183,7 @@ pub fn chunk_of(x: integer, y: integer, shift: integer) -> ChunkKey {
 // Defined before ChunkField so the `buckets` keyed field type resolves
 // (a forward reference leaves its known_type unset → parse OOB).
 struct ChunkBucket {
-  pub ck:       integer,
+  pub ck:       i64,
   pub cx:       integer,
   pub cy:       integer,
   pub cell_ixs: vector<integer>,
@@ -343,7 +344,7 @@ struct SeenIx { ix: integer }
 // owned cells.  Walks the 6 hex axes up to halo_k steps (the axis-neighbour
 // pattern of `nbr_count_idx` / the crystal rule); deduped by cell index.
 // Cells reached only off-axis (a full k-ring) are not gathered.
-fn gather_halo(f: const ChunkField, cell_ixs: const vector<integer>, this_ck: integer,
+fn gather_halo(f: const ChunkField, cell_ixs: const vector<integer>, this_ck: i64,
                halo_k: integer) -> vector<integer> {
   halo: vector<integer> = [];
   seen: hash<SeenIx[ix]> = [];
@@ -413,14 +414,14 @@ pub fn collect_dirty_inputs(f: const ChunkField, halo_k: integer) -> vector<Chun
 
 // One render group: `(gx, gy)` its position in group coordinates (chunk coordinates
 // divided by `group_dim`), `gk` the two encoded as one key.  `group_of` answers it.
-pub struct GroupKey { pub gk: integer, pub gx: integer, gy: integer }
+pub struct GroupKey { pub gk: i64, pub gx: integer, gy: integer }
 
 // The chunk ck's a group contains that actually hold cells (the assemble
 // work-list).  No mesh here — gridmesh partitions; the consumer owns meshes.
-pub struct GroupInput { key: GroupKey, pub chunk_cks: vector<integer> }
+pub struct GroupInput { key: GroupKey, pub chunk_cks: vector<i64> }
 
 // Internal accumulator for all_groups (keyed so chunks dedup into their group).
-struct GroupAcc { gk: integer, gx: integer, gy: integer, chunk_cks: vector<integer> }
+struct GroupAcc { gk: i64, gx: integer, gy: integer, chunk_cks: vector<i64> }
 
 // The group owning CHUNK coord (cx, cy): chunk-space divided by group_dim.
 // Uses chunk_div so any group_dim works (not just powers of two) — a free dial.
@@ -465,7 +466,7 @@ pub fn collect_dirty_groups(f: const ChunkField, group_dim: integer) -> vector<G
   }
   out: vector<GroupInput> = [];
   for g in dirty_groups {
-    cks: vector<integer> = [];
+    cks: vector<i64> = [];
     base_cx = g.gx * group_dim;
     base_cy = g.gy * group_dim;
     for ix in 0..group_dim {

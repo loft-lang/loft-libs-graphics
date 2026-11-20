@@ -309,10 +309,11 @@ pub fn cell(tile: integer, flip_h: boolean = false, flip_v: boolean = false,
 /// A Tiled global tile id (with its flip bits: 31 horizontal, 30 vertical, 29 diagonal) as a
 /// cell of a sheet whose first id is `firstgid`; 0 for an empty one or a tile of another sheet
 /// (an id below `firstgid`).
-pub fn from_tiled(gid: integer, firstgid: integer = 1) -> integer {
-  id = gid % 536870912;
+pub fn from_tiled(gid: i64, firstgid: integer = 1) -> integer {
+  // a Tiled id is 32 unsigned bits with its flips at the top: wider than a 32-bit integer
+  id = (gid % 536870912) as integer ?? 0;
   if id < firstgid || id == 0 { return 0; }
-  bits = gid / 536870912;
+  bits = (gid / 536870912) as integer ?? 0;
   cell(id - firstgid, bits / 4 % 2 == 1, bits / 2 % 2 == 1, bits % 2 == 1)
 }
 

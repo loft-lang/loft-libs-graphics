@@ -10,7 +10,7 @@
 use text2d::*;
 use graphics::*;
 
-fn ink(cv: const graphics::Canvas, colour: integer) -> integer {
+fn ink(cv: const graphics::Canvas, colour: i64) -> integer {
   n = 0;
   for v in cv.data { if v == colour { n = n + 1; } }
   n
@@ -20,8 +20,8 @@ fn ink(cv: const graphics::Canvas, colour: integer) -> integer {
 // with nothing loaded.
 fn test_text_draws_with_nothing_loaded() {
   cv = graphics::canvas(64, 16, 0xff000000);
-  w = text2d::write_text(cv, "HELLO 123", 1, 1, 0xffffffff, 1);
-  assert(ink(cv, 0xffffffff) > 0, "the string put ink on the canvas");
+  w = text2d::write_text(cv, "HELLO 123", 1, 1, 0xffffffffl, 1);
+  assert(ink(cv, 0xffffffffl) > 0, "the string put ink on the canvas");
   expect = text2d::text_width("HELLO 123", 1);
   assert(w == expect, "the drawn width matches the measured one");
 }
@@ -29,8 +29,8 @@ fn test_text_draws_with_nothing_loaded() {
 // A blank string draws nothing and measures zero — the degenerate case proved.
 fn test_an_empty_string_is_zero() {
   cv = graphics::canvas(16, 16, 0xff000000);
-  _ = text2d::write_text(cv, "", 0, 0, 0xffffffff, 1);
-  assert(ink(cv, 0xffffffff) == 0, "nothing drawn");
+  _ = text2d::write_text(cv, "", 0, 0, 0xffffffffl, 1);
+  assert(ink(cv, 0xffffffffl) == 0, "nothing drawn");
   assert(text2d::text_width("", 1) == 0, "and nothing measured");
 }
 
@@ -48,11 +48,11 @@ fn test_width_is_exact() {
 // Scale 2 quadruples the ink: every lit pixel becomes a 2x2 block, exactly.
 fn test_scale_quadruples_the_ink() {
   a = graphics::canvas(64, 32, 0xff000000);
-  _ = text2d::write_text(a, "42", 0, 0, 0xffffffff, 1);
+  _ = text2d::write_text(a, "42", 0, 0, 0xffffffffl, 1);
   b = graphics::canvas(64, 32, 0xff000000);
-  _ = text2d::write_text(b, "42", 0, 0, 0xffffffff, 2);
-  assert(ink(b, 0xffffffff) == ink(a, 0xffffffff) * 4,
-         "scale 2 is exactly 4x the ink: {ink(a, 0xffffffff)} -> {ink(b, 0xffffffff)}");
+  _ = text2d::write_text(b, "42", 0, 0, 0xffffffffl, 2);
+  assert(ink(b, 0xffffffffl) == ink(a, 0xffffffffl) * 4,
+         "scale 2 is exactly 4x the ink: {ink(a, 0xffffffffl)} -> {ink(b, 0xffffffffl)}");
 }
 
 // ⚠ A DIGIT IS THE CASE dryopea COULD NOT DRAW.  Each of 0-9 must put ink down,
@@ -63,8 +63,8 @@ fn test_every_digit_is_drawn_and_distinct() {
   seen: vector<integer> = [];
   for d in digits {
     cv = graphics::canvas(8, 8, 0xff000000);
-    _ = text2d::write_text(cv, d, 0, 0, 0xffffffff, 1);
-    n = ink(cv, 0xffffffff);
+    _ = text2d::write_text(cv, d, 0, 0, 0xffffffffl, 1);
+    n = ink(cv, 0xffffffffl);
     assert(n > 0, "digit {d} drew nothing");
     seen += [n];
   }
@@ -76,18 +76,18 @@ fn test_every_digit_is_drawn_and_distinct() {
 // Lowercase folds to uppercase rather than vanishing — the documented compromise.
 fn test_lowercase_folds_rather_than_vanishing() {
   lower = graphics::canvas(16, 16, 0xff000000);
-  _ = text2d::write_text(lower, "a", 0, 0, 0xffffffff, 1);
+  _ = text2d::write_text(lower, "a", 0, 0, 0xffffffffl, 1);
   upper = graphics::canvas(16, 16, 0xff000000);
-  _ = text2d::write_text(upper, "A", 0, 0, 0xffffffff, 1);
-  assert(ink(lower, 0xffffffff) > 0, "lowercase draws something");
-  assert(ink(lower, 0xffffffff) == ink(upper, 0xffffffff), "and it is the uppercase form");
+  _ = text2d::write_text(upper, "A", 0, 0, 0xffffffffl, 1);
+  assert(ink(lower, 0xffffffffl) > 0, "lowercase draws something");
+  assert(ink(lower, 0xffffffffl) == ink(upper, 0xffffffffl), "and it is the uppercase form");
 }
 
 // An unknown character reserves its width instead of collapsing the run, so a
 // string never changes length because one glyph was missing.
 fn test_an_unknown_glyph_keeps_its_width() {
   cv = graphics::canvas(64, 16, 0xff000000);
-  w = text2d::write_text(cv, "A~B", 0, 0, 0xffffffff, 1);
+  w = text2d::write_text(cv, "A~B", 0, 0, 0xffffffffl, 1);
   expect2 = text2d::text_width("A~B", 1);
   assert(w == expect2, "the run is three glyphs wide either way");
 }
@@ -95,7 +95,7 @@ fn test_an_unknown_glyph_keeps_its_width() {
 // Centring puts the run's own width in the middle of the box.
 fn test_centred_text_is_centred() {
   cv = graphics::canvas(32, 16, 0xff000000);
-  _ = text2d::write_centred(cv, "A", 0, 0, 32, 16, 0xffffffff, 1);
+  _ = text2d::write_centred(cv, "A", 0, 0, 32, 16, 0xffffffffl, 1);
   // 5 wide in a 32 box -> starts at 13; 7 tall in 16 -> starts at 4.
   found = false;
   for y in 0..16 {

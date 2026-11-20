@@ -43,7 +43,7 @@ fn png_colour_type(path: text) -> integer {
 // instead of saturating.
 fn test_a_colour_carries_an_alpha_byte() {
   red = graphics::rgb(255, 0, 0);
-  assert(red == 0xFFFF0000, "rgb() fills the alpha byte: the layout is 0xAARRGGBB");
+  assert(red == 0xFFFF0000l, "rgb() fills the alpha byte: the layout is 0xAARRGGBB");
   assert(graphics::color_a(red) == 255, "so a constructed colour is opaque");
 
   // The literal names the same three channels...

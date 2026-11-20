@@ -94,8 +94,8 @@ AAAACgAAAAAAAAArAAQABgAAAAsAAAAAAIA/LAAHAAcAAAAMAAAACgAAAAsAAAAKAAAACwAAAB4A
 BAANAAAABgAAAAYAAAAgAAQADgAAAAIAAAANAAAAOwAEAA4AAAAPAAAAAgAAADYABQACAAAABAAA
 AAAAAAADAAAA+AACAAUAAAA+AAMACQAAAAwAAAD9AAEAOAABAA==`;
 
-const GREEN = 0xFF00FF00;
-const BLACK = 0xFF000000;
+const GREEN = 0xFF00FF00l;
+const BLACK = 0xFF000000l;
 
 fn points(xy: vector<float>) -> vector<single> {
   out: vector<single> = [];
@@ -104,7 +104,7 @@ fn points(xy: vector<float>) -> vector<single> {
 }
 
 fn at(c: const Canvas, x: integer, y: integer) -> integer {
-  (c.data[y * 64 + x] ?? -1) | 0xFF000000
+  (c.data[y * 64 + x] ?? -1) | 0xFF000000l
 }
 
 fn test_an_index_list_draws_what_it_names() {

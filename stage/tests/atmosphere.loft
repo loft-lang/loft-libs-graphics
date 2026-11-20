@@ -207,7 +207,7 @@ fn test_blur_region_of_radius_zero_is_the_identity() {
   cv = graphics::canvas(8, 4, 0xff000000);
   cv.set_pixel(1, 1, 0xffffffff);
   cv.set_pixel(6, 2, 0xff204060);
-  before: vector<integer> = [];
+  before: vector<i64> = [];
   for v in cv.data { before += [v]; }
   stage::blur_region(cv, 0, 0, 8, 4, 0);
   moved = 0;

@@ -38,7 +38,7 @@ fn glyph_at(code: integer) -> integer {
 // blitter and by the atlas, so the bit-walk has ONE home and the two can never
 // disagree about what a glyph looks like.
 pub fn blit_glyph(cv: graphics::Canvas, code: integer, x: integer, y: integer,
-                  colour: integer, scale: integer) {
+                  colour: i64, scale: integer) {
   at = glyph_at(code);
   if at < 0 { return; }
   rows = face::face_rows();
@@ -88,7 +88,7 @@ pub fn line_height(scale: integer) -> integer { face::GLYPH_H * drawn_scale(scal
 // same width rather than being skipped, so a string never changes length because
 // one character was missing.
 pub fn write_text(cv: graphics::Canvas, s: text, x: integer, y: integer,
-                 colour: integer, scale: integer) -> integer {
+                 colour: i64, scale: integer) -> integer {
   sc = drawn_scale(scale);
   pen = x;
   for ch in s {
@@ -101,7 +101,7 @@ pub fn write_text(cv: graphics::Canvas, s: text, x: integer, y: integer,
 // Draw `s` centred in the box (bx, by, bw, bh).  The commonest thing a HUD wants,
 // and the commonest place an off-by-one lands.
 pub fn write_centred(cv: graphics::Canvas, s: text, bx: integer, by: integer,
-                    bw: integer, bh: integer, colour: integer, scale: integer) -> integer {
+                    bw: integer, bh: integer, colour: i64, scale: integer) -> integer {
   w = text_width(s, scale);
   h = line_height(scale);
   write_text(cv, s, bx + (bw - w) / 2 ?? 0, by + (bh - h) / 2 ?? 0, colour, scale)
@@ -176,7 +176,7 @@ pub fn atlas_cell(self: Atlas, code: integer) -> integer {
   cell = self.a_next;
   cx = (cell % self.a_cols ?? 0) * face::GLYPH_W * self.a_scale;
   cy = (cell / self.a_cols ?? 0) * face::GLYPH_H * self.a_scale;
-  blit_glyph(self.a_cv, c, cx, cy, 0xffffffff, self.a_scale);
+  blit_glyph(self.a_cv, c, cx, cy, 0xffffffffl, self.a_scale);
   self.a_codes += [c];
   self.a_next = cell + 1;
   self.a_writes = self.a_writes + 1;
@@ -198,7 +198,7 @@ pub fn layout(self: Atlas, s: text, x: integer, y: integer) -> vector<Quad> {
 
 // Blit laid-out quads from the sheet onto a canvas.
 pub fn draw_quads(cv: graphics::Canvas, atlas: const Atlas, quads: const vector<Quad>,
-                  colour: integer) {
+                  colour: i64) {
   gw = face::GLYPH_W * atlas.a_scale;
   gh = face::GLYPH_H * atlas.a_scale;
   for q in quads {

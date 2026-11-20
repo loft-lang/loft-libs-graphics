@@ -22,7 +22,7 @@ fn test_a_convex_polygon_fills_its_own_area() {
   pts: vector<graphics::Coord> = [
     graphics::Coord{px: 2, py: 2},  graphics::Coord{px: 11, py: 2},
     graphics::Coord{px: 11, py: 7}, graphics::Coord{px: 2, py: 7}];
-  c.fill_polygon(pts, 0xFFFFFFFF);
+  c.fill_polygon(pts, 0xFFFFFFFFl);
   assert(filled(c) == 60, "10 wide x 6 tall = 60, not {filled(c)}");
   assert(c.get_pixel(2, 2) != 0 && c.get_pixel(11, 7) != 0, "both corners inclusive");
   assert(c.get_pixel(1, 2) == 0 && c.get_pixel(12, 7) == 0, "and nothing outside");
@@ -39,7 +39,7 @@ fn test_a_concave_polygon_leaves_its_notch_empty() {
     graphics::Coord{px: 12, py: 12}, graphics::Coord{px: 9, py: 12},
     graphics::Coord{px: 9, py: 5},   graphics::Coord{px: 4, py: 5},
     graphics::Coord{px: 4, py: 12},  graphics::Coord{px: 1, py: 12}];
-  c.fill_polygon(pts, 0xFFFFFFFF);
+  c.fill_polygon(pts, 0xFFFFFFFFl);
   assert(filled(c) == 112, "48 solid + 64 in the arms = 112, not {filled(c)}");
   assert(c.get_pixel(6, 9) == 0, "the notch is empty — a convex fill would cover it");
   assert(c.get_pixel(6, 3) != 0, "while the same column above the notch is solid");
@@ -53,7 +53,7 @@ fn test_a_self_intersecting_polygon_is_filled_even_odd() {
   pts: vector<graphics::Coord> = [
     graphics::Coord{px: 2, py: 2},  graphics::Coord{px: 11, py: 11},
     graphics::Coord{px: 11, py: 2}, graphics::Coord{px: 2, py: 11}];
-  c.fill_polygon(pts, 0xFFFFFFFF);
+  c.fill_polygon(pts, 0xFFFFFFFFl);
   assert(filled(c) == 60, "2+4+6+8+10+10+8+6+4+2 = 60, not {filled(c)}");
   assert(c.get_pixel(3, 2) == 0, "the widest row is the middle, not the top");
   assert(c.get_pixel(3, 6) != 0 && c.get_pixel(10, 6) != 0, "both lobes");
@@ -68,7 +68,7 @@ fn test_even_odd_leaves_a_stars_centre_hollow() {
     graphics::Coord{px: 10, py: 0}, graphics::Coord{px: 14, py: 19},
     graphics::Coord{px: 0, py: 7},  graphics::Coord{px: 20, py: 7},
     graphics::Coord{px: 6, py: 19}];
-  c.fill_polygon(pts, 0xFFFFFFFF);
+  c.fill_polygon(pts, 0xFFFFFFFFl);
   assert(c.get_pixel(10, 10) == 0, "the centre is crossed twice, so it is OUTSIDE");
   assert(c.get_pixel(10, 3) != 0, "while an arm is inside");
 }
@@ -90,11 +90,11 @@ fn test_a_triangle_through_the_polygon_path_is_the_triangle() {
         cx = (k % 5) * 5 + 1; cy = (k / 5) * 5 + 1;
         t = graphics::canvas(24, 24, 0);
         p = graphics::canvas(24, 24, 0);
-        t.fill_triangle(ax, ay, bx, by, cx, cy, 0xFFFFFFFF);
+        t.fill_triangle(ax, ay, bx, by, cx, cy, 0xFFFFFFFFl);
         pts: vector<graphics::Coord> = [graphics::Coord{px: ax, py: ay},
                                         graphics::Coord{px: bx, py: by},
                                         graphics::Coord{px: cx, py: cy}];
-        p.fill_polygon(pts, 0xFFFFFFFF);
+        p.fill_polygon(pts, 0xFFFFFFFFl);
         for n in 0..len(t.data) { if t.data[n]? != p.data[n]? { bad += 1; } }
       }
     }
@@ -109,7 +109,7 @@ fn test_a_degenerate_polygon_draws_nothing() {
   none: vector<graphics::Coord> = [];
   two: vector<graphics::Coord> = [graphics::Coord{px: 1, py: 1},
                                   graphics::Coord{px: 6, py: 6}];
-  c.fill_polygon(none, 0xFFFFFFFF);
-  c.fill_polygon(two, 0xFFFFFFFF);
+  c.fill_polygon(none, 0xFFFFFFFFl);
+  c.fill_polygon(two, 0xFFFFFFFFl);
   assert(filled(c) == 0, "nothing drawn, not {filled(c)}");
 }

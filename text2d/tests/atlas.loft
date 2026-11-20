@@ -12,7 +12,7 @@
 use text2d::*;
 use graphics::*;
 
-fn ink(cv: const graphics::Canvas, colour: integer) -> integer {
+fn ink(cv: const graphics::Canvas, colour: i64) -> integer {
   n = 0;
   for v in cv.data { if v == colour { n = n + 1; } }
   n
@@ -67,16 +67,16 @@ fn test_layout_places_one_quad_per_character() {
 fn test_the_sheet_reproduces_the_direct_blit() {
   s = "HELLO 42";
   direct = graphics::canvas(80, 16, 0xff000000);
-  _ = text2d::write_text(direct, s, 2, 3, 0xffffffff, 1);
+  _ = text2d::write_text(direct, s, 2, 3, 0xffffffffl, 1);
 
   at = text2d::atlas_new(1, 64);
   viaatlas = graphics::canvas(80, 16, 0xff000000);
-  text2d::draw_quads(viaatlas, at, at.layout(s, 2, 3), 0xffffffff);
+  text2d::draw_quads(viaatlas, at, at.layout(s, 2, 3), 0xffffffffl);
 
   same = true;
   for i in 0..len(direct.data) { if direct.data[i] != viaatlas.data[i] { same = false; } }
   assert(same, "the atlas path draws exactly what the direct path draws");
-  assert(ink(direct, 0xffffffff) > 0, "and it is not two blank canvases agreeing");
+  assert(ink(direct, 0xffffffffl) > 0, "and it is not two blank canvases agreeing");
 }
 
 // A full sheet refuses rather than corrupting: the quad carries -1 and draws
@@ -88,17 +88,17 @@ fn test_a_full_sheet_refuses() {
   q = qs[0] ?? text2d::Quad { q_x: 0, q_y: 0, q_cell: 0 };
   assert(q.q_cell == -1, "the third glyph has no cell");
   cv = graphics::canvas(16, 16, 0xff000000);
-  text2d::draw_quads(cv, at, qs, 0xffffffff);
-  assert(ink(cv, 0xffffffff) == 0, "and it draws nothing rather than the wrong glyph");
+  text2d::draw_quads(cv, at, qs, 0xffffffffl);
+  assert(ink(cv, 0xffffffffl) == 0, "and it draws nothing rather than the wrong glyph");
 }
 
 // Scale is a property of the sheet, so a scaled sheet reproduces the scaled blit.
 fn test_the_sheet_honours_its_scale() {
   at = text2d::atlas_new(2, 64);
   viaatlas = graphics::canvas(64, 32, 0xff000000);
-  text2d::draw_quads(viaatlas, at, at.layout("7", 1, 1), 0xffffffff);
+  text2d::draw_quads(viaatlas, at, at.layout("7", 1, 1), 0xffffffffl);
   direct = graphics::canvas(64, 32, 0xff000000);
-  _ = text2d::write_text(direct, "7", 1, 1, 0xffffffff, 2);
-  assert(ink(viaatlas, 0xffffffff) == ink(direct, 0xffffffff) and ink(direct, 0xffffffff) > 0,
+  _ = text2d::write_text(direct, "7", 1, 1, 0xffffffffl, 2);
+  assert(ink(viaatlas, 0xffffffffl) == ink(direct, 0xffffffffl) and ink(direct, 0xffffffffl) > 0,
          "same ink at scale 2");
 }

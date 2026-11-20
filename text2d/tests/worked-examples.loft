@@ -15,9 +15,9 @@ use text2d::*;
 fn test_measured_is_drawn() {
   cv = canvas(64, 32, 0);
   assert(text_width("HI", 1) == 11 && text_width("HI", 2) == 22, "5 + 1 + 5, then doubled");
-  assert(write_text(cv, "HI", 0, 0, 0xFFFFFFFF, 2) == text_width("HI", 2), "drawn = measured");
-  assert(write_text(cv, "", 0, 0, 0xFFFFFFFF, 1) == 0, "an empty string draws 0 wide");
-  assert(write_text(cv, "HI", 0, 0, 0xFFFFFFFF, 0) == text_width("HI", 0), "scale 0 draws and measures at 1");
+  assert(write_text(cv, "HI", 0, 0, 0xFFFFFFFFl, 2) == text_width("HI", 2), "drawn = measured");
+  assert(write_text(cv, "", 0, 0, 0xFFFFFFFFl, 1) == 0, "an empty string draws 0 wide");
+  assert(write_text(cv, "HI", 0, 0, 0xFFFFFFFFl, 0) == text_width("HI", 0), "scale 0 draws and measures at 1");
   assert(metrics_builtin(1).width("HI") == text_width("HI", 1) + 1, "the advance extent has the trailing gap");
 }
 

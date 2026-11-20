@@ -1,6 +1,6 @@
 [package]
 name = "drawing"
-version = "0.5.2"
+version = "0.5.3"
 loft    = ">=2026.11.20261113"
 repository = "loft-libs-graphics"
 description = "Render a .draw scene — a sprite authored as lines of text — pixel-identically to the Python renderer it replaces"
@@ -27,7 +27,7 @@ api_compatible_with  = "0.5.2"   # the API is unchanged; raised with the data fl
 data_compatible_with = "0.5.2"   # its surface names graphics' records, which graphics 0.14 reshaped
 
 [dependencies]
-graphics = ">=0.14.1"
+graphics = ">=0.14.3"
 imaging  = ">=0.5.3"   # `Brush … file=`: a PNG footprint decoded to pixels
 
 [library]

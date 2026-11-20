@@ -72,8 +72,8 @@ fn test_a_child_is_placed_through_its_parent() {
 //
 // Example: @GFX-001
 fn test_the_alpha_byte_is_added_at_the_boundary() {
-  assert(stage::opaque(0xc03030) == 0xffc03030, "0xRRGGBB gains an opaque alpha");
-  assert(stage::opaque(0x80112233) == 0x80112233, "an explicit alpha is left alone");
+  assert(stage::opaque(0xc03030) == 0xffc03030l, "0xRRGGBB gains an opaque alpha");
+  assert(stage::opaque(0x80112233l) == 0x80112233l, "an explicit alpha is left alone");
 
   st = stage::stage_new();
   _ = st.node_add(-1, stage::Place { pl_x: 0.0, pl_y: 0.0, pl_w: 4.0, pl_h: 4.0,

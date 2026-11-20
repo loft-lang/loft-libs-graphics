@@ -106,13 +106,13 @@ AAAAOwAEAAsAAAAMAAAAAgAAABUABAANAAAAIAAAAAEAAAArAAQADQAAAA4AAAAAAAAAIAAEAA8A
 AAACAAAABwAAADYABQACAAAABAAAAAAAAAADAAAA+AACAAUAAABBAAUADwAAABAAAAAMAAAADgAA
 AD0ABAAHAAAAEQAAABAAAAA+AAMACQAAABEAAAD9AAEAOAABAA==`;
 
-const RED = 0xFFFF0000;
-const GREEN = 0xFF00FF00;
-const BLUE = 0xFF0000FF;
-const WHITE = 0xFFFFFFFF;
+const RED = 0xFFFF0000l;
+const GREEN = 0xFF00FF00l;
+const BLUE = 0xFF0000FFl;
+const WHITE = 0xFFFFFFFFl;
 
 fn at(c: const Canvas, x: integer, y: integer) -> integer {
-  (c.data[y * c.width + x] ?? -1) | 0xFF000000
+  (c.data[y * c.width + x] ?? -1) | 0xFF000000l
 }
 
 // The left half of the target, as two triangles of positions.
@@ -136,7 +136,7 @@ fn test_a_canvas_becomes_a_texture() {
   t = w.texture_from(img);
   assert(t.width() == 2 && t.height() == 2, "size {t.width()}x{t.height()}");
   t.filter(true);
-  w.clear(0xFF000000);
+  w.clear(0xFF000000l);
   w.quad().draw(w, show, t);
   c = w.capture();
   assert(at(c, 16, 36) == RED, "canvas (0, 0) is the bottom left: {at(c, 16, 36):x}");
@@ -178,7 +178,7 @@ fn test_put_replaces_a_region() {
   t = w.texture_from(canvas(4, 1, RED));
   t.put(1, 0, canvas(2, 1, GREEN));
   t.filter(true);
-  w.clear(0xFF000000);
+  w.clear(0xFF000000l);
   w.quad().draw(w, show, t);
   c = w.capture();
   got = [at(c, 8, 24), at(c, 24, 24), at(c, 40, 24), at(c, 56, 24)];
@@ -215,13 +215,13 @@ fn test_a_png_becomes_a_texture() {
   t = w.load_texture("gold/gold-text-fixture.png") ?? return assert(false, "the PNG loads");
   assert(t.width() == 64 && t.height() == 32, "size {t.width()}x{t.height()}");
   gold = imaging::png(file("gold/gold-text-fixture.png")) ?? return assert(false, "gold decodes");
-  w.clear(0xFF000000);
+  w.clear(0xFF000000l);
   p.image(w, t, 0.0, 0.0, 64.0, 32.0);
   c = w.capture();
   differ = 0;
   for i in 0..64 * 32 {
     q = gold.data[i];
-    if ((c.data[i] ?? 0) | 0xFF000000) != rgba(q.r, q.g, q.b, 255) { differ += 1; }
+    if ((c.data[i] ?? 0) | 0xFF000000l) != rgba(q.r, q.g, q.b, 255) { differ += 1; }
   }
   assert(differ == 0, "{differ} pixels differ from the PNG");
   rgba_png = canvas(2, 1, rgba(10, 200, 30, 255));
@@ -230,10 +230,10 @@ fn test_a_png_becomes_a_texture() {
   assert(rgba_png.save_png(shot), "saved");
   t2 = w.load_texture(shot) ?? return assert(false, "the RGBA PNG loads");
   t2.filter(true);
-  w.clear(0xFF0000FF);
+  w.clear(0xFF0000FFl);
   p.image(w, t2, 0.0, 0.0, 64.0, 32.0);
   c = w.capture();
   assert(at(c, 16, 16) == rgba(10, 200, 30, 255), "the opaque texel: {at(c, 16, 16):x}");
-  assert(at(c, 48, 16) == 0xFF0000FF, "the transparent texel is not drawn: {at(c, 48, 16):x}");
+  assert(at(c, 48, 16) == 0xFF0000FFl, "the transparent texel is not drawn: {at(c, 48, 16):x}");
   assert(!w.load_texture("no-such.png"), "a missing file is null");
 }

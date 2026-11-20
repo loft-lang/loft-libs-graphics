@@ -97,8 +97,8 @@ pub struct FrondSpec {
 /// `c2` the second colour of a `Linear` or `Radial` gradient.
 pub struct Paint {
   pub pk: PaintKind = Stroked,
-  pub c1: integer = 0,
-  pub c2: integer = 0,
+  pub c1: i64 = 0,
+  pub c2: i64 = 0,
   /// `Linear`: `ax,ay,bx,by`.  `Radial`: `cx,cy,r`.  Empty means "derive it from
   /// the shape's own bounding box", which is what a fill with no `dir=` / `at=`
   /// asks for.
@@ -122,9 +122,9 @@ pub struct Op {
   pub widths: vector<float>,
   pub w: integer = 3,
   /// Stroke ink, or `Sky`'s top colour.
-  pub color: integer = 0,
+  pub color: i64 = 0,
   /// `Sky`'s bottom colour.
-  pub color2: integer = 0,
+  pub color2: i64 = 0,
   /// `Lock`: the stroke's style, and the index of its brush in `Sketch.brushes`
   /// (`-1` for every other kind).
   pub style: brush::LockStyle,
@@ -190,7 +190,7 @@ pub struct Sketch {
 /// Python's `round` is half-to-even and `draw.py` uses it here, so `fill=0.5`
 /// is 128 and not 127 — a difference of one level that no eye would find and a
 /// byte diff would.
-pub fn grey(gl: float) -> integer {
+pub fn grey(gl: float) -> i64 {
   gy = round_half_even(gl * 255.0) as integer;
   if gy < 0 { return graphics::rgba(0, 0, 0, 255) }
   if gy > 255 { return graphics::rgba(255, 255, 255, 255) }
@@ -205,7 +205,7 @@ fn round_half_even(rv: float) -> float {
   if ((rh_f as integer) % 2 ?? 0) == 0 { rh_f } else { rh_f + 1.0 }
 }
 
-fn default_ink() -> integer {
+fn default_ink() -> i64 {
   graphics::rgba(DEFAULT_INK_R, DEFAULT_INK_G, DEFAULT_INK_B, 255)
 }
 
@@ -247,17 +247,17 @@ fn read_rgb_at(s: text, i: integer) -> Scan3 {
 struct Scan3 {
   ok: boolean = false,
   at: integer = 0,
-  color: integer = 0,
+  color: i64 = 0,
 }
 
 fn scan3_fail() -> Scan3 { Scan3 { ok: false, at: 0, color: 0 } }
 
 /// `\bstroke\s*=\s*R,G,B` — a pen colour.  `rgb=` still means FILL; this lets a
 /// stroke carry colour without becoming one.
-fn read_stroke_colour(s: text) -> integer { read_colour_opt(s, "stroke", default_ink()) }
+fn read_stroke_colour(s: text) -> i64 { read_colour_opt(s, "stroke", default_ink()) }
 
 /// `\b<key>\s*=\s*R,G,B`, or `fallback` when the line does not say.
-fn read_colour_opt(s: text, key: text, fallback: integer) -> integer {
+fn read_colour_opt(s: text, key: text, fallback: i64) -> i64 {
   rc_o = scan::find_option(s, key);
   if !rc_o.ok { return fallback }
   rc_c = read_rgb_at(s, rc_o.at);
@@ -266,12 +266,12 @@ fn read_colour_opt(s: text, key: text, fallback: integer) -> integer {
 }
 
 /// `draw.py`'s default shadow for a `Lock`: each channel halved.
-fn half_colour(c: integer) -> integer {
+fn half_colour(c: i64) -> i64 {
   graphics::rgba(graphics::color_r(c) / 2, graphics::color_g(c) / 2, graphics::color_b(c) / 2, 255)
 }
 
 /// `draw.py`'s default highlight: each channel lifted 35 % of the way to white.
-fn lifted_colour(c: integer) -> integer {
+fn lifted_colour(c: i64) -> i64 {
   lc_r = graphics::color_r(c);
   lc_g = graphics::color_g(c);
   lc_b = graphics::color_b(c);
@@ -314,8 +314,8 @@ fn read_paint(s: text) -> Paint {
 /// Two colours either side of a `>`.
 struct ColourPair {
   ok: boolean = false,
-  c1: integer = 0,
-  c2: integer = 0,
+  c1: i64 = 0,
+  c2: i64 = 0,
 }
 
 fn read_colour_pair(s: text, i: integer) -> ColourPair {
@@ -1322,7 +1322,7 @@ fn to_pixels(pts: const vector<raster::Pt>, bw: integer, bh: integer) -> vector<
 /// The vertical background ramp, one Bresenham row at a time — which is what
 /// `draw.py` does, and the row-by-row truncation of the interpolated colour is
 /// visible in the result.
-fn draw_sky(cv: graphics::Canvas, top: integer, bot: integer, bw: integer, bh: integer) {
+fn draw_sky(cv: graphics::Canvas, top: i64, bot: i64, bw: integer, bh: integer) {
   dk_den = if bh - 1 < 1 { 1 } else { bh - 1 };
   dk_tr = graphics::color_r(top);
   dk_tg = graphics::color_g(top);
@@ -1477,7 +1477,7 @@ fn draw_stroke(cv: graphics::Canvas, op: const Op, bw: integer, bh: integer) {
 /// between the two sides is what lets a hair strand be thick at the root and
 /// thin at the tip — a pen cannot do that, and a polygon can.
 fn ribbon(cv: graphics::Canvas, pxs: const vector<raster::Pt>, widths: const vector<float>,
-          color: integer) {
+          color: i64) {
   rb_n = len(pxs);
   if rb_n < 2 { return }
   rb_left: vector<raster::Pt> = [];
@@ -1541,7 +1541,7 @@ pub fn render(sc: const Sketch) -> graphics::Canvas {
   rn_bw = sc.sw * SUPERSAMPLE;
   rn_bh = sc.sh * SUPERSAMPLE;
   rn_cv = graphics::canvas(rn_bw, rn_bh,
-                           if sc.transparent { 0 } else { graphics::rgba(255, 255, 255, 255) });
+                           if sc.transparent { 0 as i64 } else { graphics::rgba(255, 255, 255, 255) });
   for op in sc.ops {
     match op.kind {
       Sky => draw_sky(rn_cv, op.color, op.color2, rn_bw, rn_bh),

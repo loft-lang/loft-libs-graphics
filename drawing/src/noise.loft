@@ -28,9 +28,9 @@ pub const PI = 3.141592653589793;
 /// and would give a perfectly smooth, entirely wrong field.
 /// @FR-Seed-Hash
 pub fn seed_hash(hseed: integer, hidx: integer, hsalt: integer) -> float {
-  hx = ((hseed * 73856093) ^ (hidx * 19349663) ^ (hsalt * 83492791)) & 0xFFFFFFFF;
-  hx = (hx ^ (hx >> 13)) & 0xFFFFFFFF;
-  hx = (hx * 1274126177) & 0xFFFFFFFF;
+  hx = (((hseed as i64) * 73856093) ^ ((hidx as i64) * 19349663) ^ ((hsalt as i64) * 83492791)) & 0xFFFFFFFFl;
+  hx = (hx ^ (hx >> 13)) & 0xFFFFFFFFl;
+  hx = (hx * 1274126177) & 0xFFFFFFFFl;
   ((hx as float) / 4294967295.0 ?? 0.0) * 2.0 - 1.0
 }
 
