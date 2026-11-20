@@ -39,12 +39,19 @@ fn test_lerp_hits_the_end_the_other_form_misses() {
 // and `Back` / `Elastic` leave [0, 1] on purpose.  The raw `curve_in(Sine, 1.0)` is
 // 0.9999999999999999 — the hole `ease` closes — and clamping an overshooting curve's result
 // undoes the overshoot it was chosen for.
+// Whether a `float` of this build is a double: it can tell 1 from 1 and a million-millionth.
+// In a 32-bit program a float is a single and cannot.
+fn float_is_a_double() -> boolean {
+  1.0 + 0.000000000001 > 1.0
+}
+
 fn test_endpoints_are_exact_and_overshoot_is_meant() {
   for c in [Curve.Linear, Quad, Sine, Expo, Back, Elastic, Bounce] {
     for s in [Shape.In, Out, InOut] {
       assert(ease(c, s, 0.0) == 0.0 && ease(c, s, 1.0) == 1.0, "exact ends for every curve and shape");
     }
   }
-  assert(curve_in(Sine, 1.0) < 1.0, "the raw curve misses the end");
+  // the miss is one last bit of a double; a single (a 32-bit program) has no bit that small
+  if float_is_a_double() { assert(curve_in(Sine, 1.0) < 1.0, "the raw curve misses the end"); }
   assert(ease(Back, In, 0.3) < 0.0, "Back pulls back below 0 before it goes");
 }

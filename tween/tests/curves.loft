@@ -10,8 +10,15 @@
 // asserted to within 1e-15 and the test says so rather than pretending.
 use tween::*;
 
+// Whether a `float` of this build is a double: it can tell 1 from 1 and a million-millionth.
+// In a 32-bit program a float is a single and cannot.
+fn float_is_a_double() -> boolean {
+  1.0 + 0.000000000001 > 1.0
+}
+
+// To 1e-15 where a float is a double; to the six digits a single holds where it is not.
 fn close(a: float, b: float) -> boolean {
-    abs(a - b) < 0.000000000000001
+    abs(a - b) < if float_is_a_double() { 0.000000000000001 } else { 0.000001 }
 }
 
 // THE HAND-COMPUTED TABLE.  Every expected value here was derived on paper
@@ -91,8 +98,11 @@ fn test_every_curve_lands_exactly_on_both_endpoints() {
 fn test_the_raw_curves_miss_the_endpoints_that_ease_hits() {
   // 1 − cos(π/2), and cos(π/2) is 6.1e-17 in binary rather than zero.
   raw_sine = curve_in(Curve.Sine, 1.0);
-  assert(raw_sine != 1.0, "the raw sine curve is expected to MISS 1.0");
-  assert(raw_sine > 0.9999999999999, "…but only just — it is a last-bit miss");
+  // A single has no bit that small: there the raw sine lands, and elastic below is the miss.
+  if float_is_a_double() {
+    assert(raw_sine != 1.0, "the raw sine curve is expected to MISS 1.0");
+    assert(raw_sine > 0.9999999999999, "…but only just — it is a last-bit miss");
+  }
   assert(ease(Curve.Sine, Shape.In, 1.0) == 1.0, "while `ease` lands on it");
 
   // The textbook exponential answers 2^-10 at t = 0; the normalised one is 0.
