@@ -1225,8 +1225,10 @@ pub fn clear(self: Window, color: integer) {
     wiped(self.dev, self.pass, color);
     return;
   }
-  // In the middle of a pass, or inside a scissor: a quad over the whole target that writes its
-  // colour and the far depth without a test, which is what a clear does there.
+  // In the middle of a pass, inside a scissor, or in a framebuffer (whose pass began when
+  // `render_to` named it: the window does not hold a framebuffer): a quad over the whole
+  // target that writes its colour and the far depth without a test, which is what a clear
+  // does there.
   self.ready();
   if len(self.wipe_quad) == 0 {
     self.wipe_quad += [self.dev.buffer([-1.0f, -1.0f, 0.0f, 1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f, -1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f, -1.0f, 1.0f, 0.0f])];
