@@ -5,9 +5,9 @@
 // TWO HALVES, and which one you want decides everything else.  The `Canvas` half
 // is a flat vector of packed RGBA integers: it needs no window, no driver and no
 // GL context, so it runs under `loft test` and answers questions about pixels.
-// The `gl_*` half is the real window — shaders, VBOs, framebuffers — and every
-// one of those is a native call that answers *"native function not loaded"* where
-// there is no context.  Write the drawing against `Canvas` and it stays testable.
+// The window half is the real window — shaders, meshes, framebuffers — drawn on
+// the GPU through `gpu`, and it needs a display.  Write the drawing against
+// `Canvas` and it stays testable.
 //
 // ── Using it ─────────────────────────────────────────────────────────────────
 //
@@ -28,9 +28,10 @@
 //
 // The rest of the canvas surface is more primitives at the same level: lines,
 // rects, circles, ellipses, beziers, an anti-aliased line, triangles and
-// polygons, plus two resamplers (`resize_lanczos`, `resize_bicubic`).  The `gl_*`
-// surface below them mirrors the OpenGL calls it wraps, and `stage` is the
-// retained scene that drives either half.
+// polygons, plus two resamplers (`resize_lanczos`, `resize_bicubic`).  The window
+// surface below them keeps OpenGL's words (enable, blend, cull, viewport) over
+// `gpu`'s pipelines and passes, and `stage` is the retained scene that drives
+// either half.
 
 use mesh3d::*;
 use glb::*;

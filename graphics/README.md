@@ -3,7 +3,7 @@ Copyright (c) 2026 Jurjen Stellingwerff
 SPDX-License-Identifier: LGPL-3.0-or-later
 -->
 
-# graphics — a 2D canvas, windows, OpenGL and text for loft
+# graphics — a 2D canvas, windows, drawing on the GPU and text for loft
 
 ## Install
 
@@ -75,18 +75,17 @@ Fonts are read and rasterized in loft: a glyph's coverage is fontdue 0.9.3's, by
 
 ### Native code and targets
 
-No Rust crate: the native part is `c/graphics_gl.c`, a `[c] shim` loft compiles itself.
+No native part of its own.  The canvas, fonts and text are loft; a window and everything drawn
+in it go through [`gpu`](../gpu/README.md), on its OpenGL backend
+([`gpu_gl`](../gpu_gl/README.md): OpenGL 3.3 on Linux and macOS, OpenGL ES 3 on Android, WebGL2
+in a page).  Which machines open a window, and how each is tested, is that backend's to say.
+Without a window — `--native-wasm`, Windows, a machine with no display — `open_window` answers
+null, and the canvas, fonts and PNG output answer as everywhere.
 
-| Target | Window | Tested by |
-|---|---|---|
-| `--interpret`, `--native`, `--native-c` on Linux | X11 + GLX, `libX11.so.6` and `libGL.so.1` opened at run time (no development package) | the suite under Xvfb (`-noreset`); `desktop/input.sh` injects input through XTest |
-| `--html` (Rust and C pages) | the page's canvas and WebGL2, through loft's `loft_gl` page imports — a loft whose pages carry them (main after loft `d26929886`); an older loft refuses the page at build | `browser/check.sh` in headless Chrome |
-| `--interpret`, `--native`, `--native-c` on macOS | AppKit and an `NSOpenGLContext` (3.2 core, served as GL 4.1), through the Objective-C runtime opened at run time (no SDK) | the suite on a macOS runner with `GRAPHICS_TEST_WINDOW=1`; `desktop/input_mac.sh` posts the same input sequence into the app's own queue |
-| `--native-c --native-android` | the activity's window, through EGL and OpenGL ES 3 (`libEGL.so`, `libGLESv3.so` opened at run time); the shaders take the page's `#version 300 es` rewrite | by hand on an x86_64 emulator (API 34); no CI job runs it yet |
-| `--native-wasm` | none: `open_window` answers null | the suite's canvas, font and PNG half |
-| Windows | not yet: `open_window` answers null | — |
-
-Everything without a window — the canvas, fonts, PNG output — answers the same on every target.
+A shader is GLSL 3.30 with its uniforms declared one by one, each on a line of its own:
+`float`, `vec2`, `vec3`, `vec4`, `mat4`, `int`, `sampler2D`, and arrays of `vec3` and `vec4`.
+Anything else (a `mat3`, a struct, a uniform with a value of its own) is refused by name when
+the shader is made, and `w.shader(…)` answers null.
 
 **On macOS** a window lives on the main thread, as AppKit requires.  The interpreter and the C
 backend run the program there; a `--native` program runs on its own big-stack thread, and its
@@ -105,6 +104,47 @@ then answers false.  It needs a loft whose C backend builds Android apps.
 **The suite** opens a window wherever one is expected and fails when none opens: `DISPLAY` says
 so on X11 (`xvfb-run -a -s '-noreset -screen 0 800x600x24'`), and on a Mac, where nothing in the
 environment says whether a window server is reachable, `GRAPHICS_TEST_WINDOW=1` does.
+
+## Moving from 0.13
+
+0.14 is a declared break (`api_compatible_with = "0.14.0"`).  The window draws through `gpu`
+and holds its own state in loft — what `enable`, `blend`, `cull`, `viewport` and `scissor`
+said, and the frame being drawn — where 0.13 kept it out of sight in C.  So a call that reads or
+changes that state has the window in its hand, and nothing that changes is `const`:
+
+```toml
+graphics = ">=0.14.0"     # loft.toml; then delete loft.lock and run `loft install`
+```
+
+In the table `w` is the `Window`, `s` a `Shader`, `m` a `GpuMesh`, `t` a `Texture`, `p` a
+`Painter`.
+
+| 0.13 | 0.14 |
+|---|---|
+| `fn f(w: const Window, …)` that draws, clears or switches | `fn f(w: Window, …)` |
+| `fn f(s: const Shader, …)` that calls `s.set_*` | `fn f(s: Shader, …)`: a shader's uniform values are its own state |
+| `m.draw(s)`, `m.draw_mode(s, mode)`, `m.draw_indexed(s, mode)` | `m.draw(w, s)`, `m.draw_mode(w, s, mode)`, `m.draw_indexed(w, s, mode)` |
+| `t.bind(0);` `s.set_int("uTex", 0);` `m.draw(s)` | `m.draw(w, s, t)`; a second texture follows it.  A draw is given the textures its shader samples, in the order the shader declares its samplers |
+| `m.indices(list)` | `m.indices(w, list)` |
+| `m.instance_attrib(records, location, components, stride, offset)` | `m.instance_attrib(location, components, offset)`: the layout of a record, declared once |
+| `m.draw_instanced(s, copies)` | `m.draw_instanced(w, s, records, copies)`; a fifth argument is the float the first record starts at |
+| `set.draw_all(s)` | `set.draw_all(w, s)` |
+| `p.rect(x, …)`, `p.image(t, x, …)`, `p.sprite(sheet, x, …)` | `p.rect(w, x, …)`, `p.image(w, t, x, …)`, `p.sprite(w, sheet, x, …)` |
+| `sheet.draw(mvp, index)` | `sheet.draw(w, mvp, index)` |
+| `fb = w.framebuffer();` `fb.attach(colour);` `fb.attach(depth)` | `w.framebuffer(colour)`, `w.framebuffer_with_depth(colour, depth)`, `w.depth_framebuffer(depth)` |
+| A framebuffer that dies while drawn into: the window is drawn into again | Say so: `w.render_to_window()` |
+| `w.capture()` while drawing into a framebuffer | It reads the window and ends the drawing into the framebuffer: `w.render_to(fb)` again to go on |
+| `w.point_size(n)` | The vertex shader writes `gl_PointSize` |
+| `w.line_width(n)`, `w.finish()` | None |
+
+Unchanged: `open_window`, `poll`, `events`, `key_down`, the mouse, `clear`, `swap`, `enable`,
+`disable`, `blend`, `cull`, `depth_write`, `viewport`, `scissor`, `w.shader`, `w.upload`,
+`w.quad`, the textures' own calls, `render_to`, `w.painter`, `w.sprites`, and the whole canvas
+and text half.
+
+**Why a draw names its window.**  A mesh cannot find its window by itself: a window put into a
+record is copied, and anything that named the one it was made from would go on naming that.  So
+the state is passed in the open, as `gpu` passes its device.
 
 ## Moving from 0.11
 
@@ -129,10 +169,11 @@ install, and `loft install` says so.  It moves by asking for the current line an
 again:
 
 ```toml
-graphics = ">=0.13.3"     # loft.toml; then delete loft.lock and run `loft install`
+graphics = ">=0.14.0"     # loft.toml; then delete loft.lock and run `loft install`
 ```
 
-That crosses two declared breaks: 0.10 (below) and 0.12 (the section above).
+That crosses three declared breaks: 0.10 (below), 0.12 and 0.14 (the sections above).  The
+tables below give each 0.9 call its 0.13 form; § Moving from 0.13 then takes it to 0.14.
 
 **What changed in 0.10.**  0.9 kept one hidden window and gave out numbers: a shader, a mesh,
 a texture and a font were each an `integer`, and `gl_delete_*` freed them.  From 0.10 each is a

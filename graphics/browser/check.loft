@@ -100,7 +100,7 @@ fn main() {
   sq.set_float("k", 0.5);
   sq.set_int("mode", 2);
   w.clear(rgba(10, 20, 30, 255));
-  m.draw(sq);
+  m.draw(w, sq);
   c = w.capture();
   report("uniforms", at(c, 16, 24) == rgba(51, 102, 153, 255) && at(c, 48, 24) == rgba(10, 20, 30, 255), "{at(c, 16, 24):x} {at(c, 48, 24):x}");
   report("edges", at(c, 31, 24) == rgba(51, 102, 153, 255) && at(c, 32, 24) == rgba(10, 20, 30, 255)
@@ -112,7 +112,7 @@ fn main() {
   w.enable(GL_BLEND);
   w.blend(BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA);
   flat.set_vec4("color", 1.0, 0.0, 0.0, 0.6);
-  full.draw(flat);
+  full.draw(w, flat);
   w.disable(GL_BLEND);
   c = w.capture();
   report("blend", at(c, 16, 24) == rgba(153, 0, 102, 255), "{at(c, 16, 24):x}");
@@ -121,7 +121,7 @@ fn main() {
   w.enable(GL_SCISSOR_TEST);
   w.scissor(0, 0, 32, 48);
   flat.set_vec4("color", 0.0, 1.0, 0.0, 1.0);
-  full.draw(flat);
+  full.draw(w, flat);
   w.disable(GL_SCISSOR_TEST);
   c = w.capture();
   report("scissor", at(c, 31, 24) == GREEN && at(c, 32, 24) == BLUE, "");
@@ -134,54 +134,49 @@ fn main() {
   img.set_pixel(1, 1, WHITE);
   t = w.texture_from(img);
   t.filter(true);
-  t.bind(0);
-  show.set_int("image", 0);
   w.clear(BLACK);
   quad = w.quad();
-  quad.draw(show);
+  quad.draw(w, show, t);
   c = w.capture();
   report("texture", at(c, 16, 36) == RED && at(c, 48, 36) == GREEN && at(c, 16, 12) == BLUE && at(c, 48, 12) == WHITE,
     "{at(c, 16, 36):x} {at(c, 48, 36):x} {at(c, 16, 12):x} {at(c, 48, 12):x}");
 
   colour = w.texture(32, 32);
   depth = w.depth_texture(32, 32);
-  target = w.framebuffer();
-  target.attach(colour);
-  target.attach(depth);
+  target = w.framebuffer_with_depth(colour, depth);
   w.render_to(target);
   w.viewport(0, 0, 32, 32);
   w.clear(RED);
   half = w.upload(points([-1.0, -1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 0.0, 1.0, -1.0, 1.0]), 3);
-  half.draw(flat);
+  half.draw(w, flat);
   w.render_to_window();
   w.viewport(0, 0, 64, 48);
   w.clear(BLUE);
   colour.filter(true);
-  colour.bind(0);
-  quad.draw(show);
+  quad.draw(w, show, colour);
   c = w.capture();
   report("framebuffer", at(c, 31, 24) == GREEN && at(c, 32, 24) == RED, "{at(c, 31, 24):x} {at(c, 32, 24):x}");
 
   left = w.upload(points([-1.0, -1.0, 0.0, -1.0, 0.0, 1.0, -1.0, 1.0]), 3);
-  left.indices([0, 1, 2]);
+  left.indices(w, [0, 1, 2]);
   w.clear(BLACK);
-  left.draw_indexed(flat, DRAW_TRIANGLES);
+  left.draw_indexed(w, flat, DRAW_TRIANGLES);
   c = w.capture();
   report("indices", at(c, 28, 40) == GREEN && at(c, 4, 4) == BLACK, "");
 
   strip = w.upload(points([-1.0, -1.0, -0.5, -1.0, -0.5, 1.0, -1.0, -1.0, -0.5, 1.0, -1.0, 1.0]), 3);
   ib = w.instances([0.0 as single, 1.0 as single]);
-  strip.instance_attrib(ib, 5, 1, 1, 0);
+  strip.instance_attrib(5, 1, 0);
   flat.set_float("shifted", 1.0);
   w.clear(BLACK);
-  strip.draw_instanced(flat, 2);
+  strip.draw_instanced(w, flat, ib, 2);
   flat.set_float("shifted", 0.0);
   c = w.capture();
   report("instances", at(c, 8, 24) == GREEN && at(c, 24, 24) == BLACK && at(c, 40, 24) == GREEN && at(c, 56, 24) == BLACK, "");
 
   p = w.painter() ?? return report("painter", false, "does not compile");
   w.clear(BLACK);
-  p.rect(8.0, 4.0, 16.0, 10.0, 1.0, 0.0, 0.0, 1.0);
+  p.rect(w, 8.0, 4.0, 16.0, 10.0, 1.0, 0.0, 0.0, 1.0);
   c = w.capture();
   report("painter", at(c, 8, 4) == RED && at(c, 23, 13) == RED && at(c, 24, 4) == BLACK, "");
 
