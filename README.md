@@ -34,24 +34,24 @@ backend (`graphics/README.md` § Other backends).
 |---|---|---|
 | **Drawing on a GPU** | | |
 | [`gpu`](gpu/) | 0.4.3 | Drawing on a GPU through pipelines, passes and uniform blocks, with no graphics stack named: a backend library beneath it draws |
-| [`gpu_gl`](gpu_gl/) | 0.3.4 | The OpenGL backend of gpu: OpenGL 3.3 on Linux and macOS, OpenGL ES 3 on Android, WebGL2 in a page |
-| [`gpu_vulkan`](gpu_vulkan/) | 0.2.2 | The Vulkan backend of gpu: Vulkan 1.3 on Linux, in an X11 window |
-| [`gpu_metal`](gpu_metal/) | 0.2.2 | The Metal backend of gpu: a Mac's GPU through Metal, in a window of its own |
+| [`gpu_gl`](gpu_gl/) | 0.3.5 | The OpenGL backend of gpu: OpenGL 3.3 on Linux and macOS, OpenGL ES 3 on Android, WebGL2 in a page |
+| [`gpu_vulkan`](gpu_vulkan/) | 0.2.3 | The Vulkan backend of gpu: Vulkan 1.3 on Linux, in an X11 window |
+| [`gpu_metal`](gpu_metal/) | 0.2.3 | The Metal backend of gpu: a Mac's GPU through Metal, in a window of its own |
 | [`gpu_record`](gpu_record/) | 0.3.1 | A GPU backend that draws nothing and writes down every call it receives: for testing a program's drawing on a machine with no display |
 | [`gpu_host`](gpu_host/) | 0.1.1 | Opens a gpu device on the backend this machine has: Metal on a Mac, OpenGL elsewhere and where Metal is absent, Vulkan on Linux by name |
 | **Built on `gpu`** | | |
 | [`gpu_paint`](gpu_paint/) | 0.2.1 | Rectangles, images and sprites at pixel positions, drawn through gpu: a painter and sprite sheets for any backend |
 | [`scene3d`](scene3d/) | 0.6.2 | A 3D scene a game's view gives once — tiles of faces, the cells' light, actors — drawn through gpu |
-| [`graphics`](graphics/) | 0.14.2 | A 2D canvas, windows, drawing on the GPU and text for loft (meshes and glTF are mesh3d and glb) |
-| [`stage`](stage/) | 0.21.1 | A retained 2-D scene for loft: a node tree you mutate, with transforms, clipping, batching, pointer routing and widget states |
+| [`graphics`](graphics/) | 0.14.3 | A 2D canvas, windows, drawing on the GPU and text for loft (meshes and glTF are mesh3d and glb) |
+| [`stage`](stage/) | 0.21.2 | A retained 2-D scene for loft: a node tree you mutate, with transforms, clipping, batching, pointer routing and widget states |
 | **Pixels, images and text** | | |
-| [`imaging`](imaging/) | 0.5.4 | PNG load/save and pixel manipulation for loft: one C source on every target, no Rust crate |
-| [`drawing`](drawing/) | 0.5.2 | Render a .draw scene — a sprite authored as lines of text — pixel-identically to the Python renderer it replaces |
-| [`text2d`](text2d/) | 0.4.8 | Text that always draws — a built-in face, a glyph atlas, measured metrics, wrapping and alignment, with no font file and no GL context |
-| [`tiles`](tiles/) | 0.7.1 | Tile sheets, map layers and sprites drawn at a surface's own resolution through a camera |
+| [`imaging`](imaging/) | 0.5.5 | PNG load/save and pixel manipulation for loft: one C source on every target, no Rust crate |
+| [`drawing`](drawing/) | 0.5.3 | Render a .draw scene — a sprite authored as lines of text — pixel-identically to the Python renderer it replaces |
+| [`text2d`](text2d/) | 0.4.9 | Text that always draws — a built-in face, a glyph atlas, measured metrics, wrapping and alignment, with no font file and no GL context |
+| [`tiles`](tiles/) | 0.7.2 | Tile sheets, map layers and sprites drawn at a surface's own resolution through a camera |
 | **Geometry and motion** | | |
 | [`shapes`](shapes/) | 0.5.4 | 2D collision detection |
-| [`gridmesh`](gridmesh/) | 0.2.7 | Chunk-local mesh generation primitives |
+| [`gridmesh`](gridmesh/) | 0.2.8 | Chunk-local mesh generation primitives |
 | [`tween`](tween/) | 0.1.2 | Property tweens in exact integer time — eleven easing curves, chains and groups |
 <!-- packages:end -->
 

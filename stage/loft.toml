@@ -1,6 +1,6 @@
 [package]
 name = "stage"
-version = "0.21.1"
+version = "0.21.2"
 
 # 0.19 is a declared break: the GL path draws on graphics 0.10's objects — `gl_stage(window)`
 # answers a `StageGl` in place of `painter_new()`'s `Painter`, and `gl_render` takes the window.
