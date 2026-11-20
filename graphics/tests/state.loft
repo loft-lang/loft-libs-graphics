@@ -5,6 +5,7 @@
 // depth set by uniforms, answers each state call with pixels computed by hand.  Under Xvfb, start
 // the server with `-noreset` (see window.loft).
 use graphics::*;
+use gpu;
 
 fn display() -> boolean {
   must_draw((env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1")
@@ -30,6 +31,34 @@ uniform vec4 color;
 out vec4 frag;
 void main() {{ frag = color; }}
 `;
+
+// SPIR-V of VERTEX with FRAGMENT (vertex), as graphics hands them on, written by gpu_vulkan/spirv.py: do not edit.
+const VERTEX_SPV: text = `AwIjBwADAQALAAgAIgAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABwAAAAAABAAAAG1haW4AAAAADQAAABIAAABHAAMACwAAAAIAAABIAAUACwAAAAAA
+AAALAAAAAAAAAEgABQALAAAAAQAAAAsAAAABAAAASAAFAAsAAAACAAAACwAAAAMAAABIAAUACwAA
+AAMAAAALAAAABAAAAEcABAASAAAAHgAAAAAAAABHAAMAFgAAAAIAAABIAAUAFgAAAAAAAAAjAAAA
+AAAAAEgABQAWAAAAAQAAACMAAAAQAAAARwAEABgAAAAhAAAAAAAAAEcABAAYAAAAIgAAAAAAAAAT
+AAIAAgAAACEAAwADAAAAAgAAABYAAwAGAAAAIAAAABcABAAHAAAABgAAAAQAAAAVAAQACAAAACAA
+AAAAAAAAKwAEAAgAAAAJAAAAAQAAABwABAAKAAAABgAAAAkAAAAeAAYACwAAAAcAAAAGAAAACgAA
+AAoAAAAgAAQADAAAAAMAAAALAAAAOwAEAAwAAAANAAAAAwAAABUABAAOAAAAIAAAAAEAAAArAAQA
+DgAAAA8AAAAAAAAAFwAEABAAAAAGAAAAAwAAACAABAARAAAAAQAAABAAAAA7AAQAEQAAABIAAAAB
+AAAAFwAEABMAAAAGAAAAAgAAAB4ABAAWAAAABgAAAAcAAAAgAAQAFwAAAAIAAAAWAAAAOwAEABcA
+AAAYAAAAAgAAACAABAAZAAAAAgAAAAYAAAArAAQABgAAABwAAAAAAIA/IAAEACAAAAADAAAABwAA
+ADYABQACAAAABAAAAAAAAAADAAAA+AACAAUAAAA9AAQAEAAAABQAAAASAAAATwAHABMAAAAVAAAA
+FAAAABQAAAAAAAAAAQAAAEEABQAZAAAAGgAAABgAAAAPAAAAPQAEAAYAAAAbAAAAGgAAAFEABQAG
+AAAAHQAAABUAAAAAAAAAUQAFAAYAAAAeAAAAFQAAAAEAAABQAAcABwAAAB8AAAAdAAAAHgAAABsA
+AAAcAAAAQQAFACAAAAAhAAAADQAAAA8AAAA+AAMAIQAAAB8AAAD9AAEAOAABAA==`;
+
+// SPIR-V of VERTEX with FRAGMENT (fragment), as graphics hands them on, written by gpu_vulkan/spirv.py: do not edit.
+const FRAGMENT_SPV: text = `AwIjBwADAQALAAgAEgAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABgAEAAAABAAAAG1haW4AAAAACQAAABAAAwAEAAAABwAAAEcABAAJAAAAHgAAAAAA
+AABHAAMACgAAAAIAAABIAAUACgAAAAAAAAAjAAAAAAAAAEgABQAKAAAAAQAAACMAAAAQAAAARwAE
+AAwAAAAhAAAAAAAAAEcABAAMAAAAIgAAAAAAAAATAAIAAgAAACEAAwADAAAAAgAAABYAAwAGAAAA
+IAAAABcABAAHAAAABgAAAAQAAAAgAAQACAAAAAMAAAAHAAAAOwAEAAgAAAAJAAAAAwAAAB4ABAAK
+AAAABgAAAAcAAAAgAAQACwAAAAIAAAAKAAAAOwAEAAsAAAAMAAAAAgAAABUABAANAAAAIAAAAAEA
+AAArAAQADQAAAA4AAAABAAAAIAAEAA8AAAACAAAABwAAADYABQACAAAABAAAAAAAAAADAAAA+AAC
+AAUAAABBAAUADwAAABAAAAAMAAAADgAAAD0ABAAHAAAAEQAAABAAAAA+AAMACQAAABEAAAD9AAEA
+OAABAA==`;
 
 const BLUE = 0xFF0000FF;
 const GREEN = 0xFF00FF00;
@@ -57,7 +86,7 @@ fn test_blend() {
   wo = open_window(64, 48, "g5-blend");
   if !display() { return; }
   w = wo ?? return assert(false, "a display is set and no window opened");
-  s = w.shader(VERTEX, FRAGMENT) ?? return assert(false, "shader");
+  s = w.shader_of(VERTEX, FRAGMENT, [gpu::source("spirv", VERTEX_SPV, FRAGMENT_SPV)]) ?? return assert(false, "shader");
   q = w.upload(quad(false), 3);
   w.clear(BLUE);
   w.enable(GL_BLEND);
@@ -77,7 +106,7 @@ fn test_scissor_and_viewport() {
   wo = open_window(64, 48, "g5-rects");
   if !display() { return; }
   w = wo ?? return assert(false, "no window");
-  s = w.shader(VERTEX, FRAGMENT) ?? return assert(false, "shader");
+  s = w.shader_of(VERTEX, FRAGMENT, [gpu::source("spirv", VERTEX_SPV, FRAGMENT_SPV)]) ?? return assert(false, "shader");
   q = w.upload(quad(false), 3);
   s.set_vec4("color", 0.0, 1.0, 0.0, 1.0);
   w.clear(BLUE);
@@ -99,7 +128,7 @@ fn test_cull() {
   wo = open_window(64, 48, "g5-cull");
   if !display() { return; }
   w = wo ?? return assert(false, "no window");
-  s = w.shader(VERTEX, FRAGMENT) ?? return assert(false, "shader");
+  s = w.shader_of(VERTEX, FRAGMENT, [gpu::source("spirv", VERTEX_SPV, FRAGMENT_SPV)]) ?? return assert(false, "shader");
   back = w.upload(quad(true), 3);
   s.set_vec4("color", 0.0, 1.0, 0.0, 1.0);
   w.enable(GL_CULL_FACE);
@@ -116,7 +145,7 @@ fn test_depth_write() {
   wo = open_window(64, 48, "g5-depth");
   if !display() { return; }
   w = wo ?? return assert(false, "no window");
-  s = w.shader(VERTEX, FRAGMENT) ?? return assert(false, "shader");
+  s = w.shader_of(VERTEX, FRAGMENT, [gpu::source("spirv", VERTEX_SPV, FRAGMENT_SPV)]) ?? return assert(false, "shader");
   q = w.upload(quad(false), 3);
   w.clear(BLUE);
   w.depth_write(false);

@@ -1,6 +1,6 @@
 [package]
 name = "graphics"
-version = "0.14.0"
+version = "0.14.1"
 loft = ">=2026.11.20261113"
 # 0.10 is a declared break: the integer-handle API of 0.9 (`gl_*`, `audio_*`, `Painter2D`,
 # `SpriteSheet`, `group_vbos_*`, `gl_load_font`) is gone for objects the caller holds — `Window`,
@@ -28,6 +28,7 @@ glb = ">=0.1.1"
 imaging = ">=0.5.1"
 gpu = ">=0.4.1"
 gpu_gl = ">=0.3.0"
+gpu_host = ">=0.1.1"
 
 # Not part of the library: `desktop/` holds the programs that send a window real key and mouse
 # events to check what it reports.  They are built by `desktop/input.sh` and `input_mac.sh`.

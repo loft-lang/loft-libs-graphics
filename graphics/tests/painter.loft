@@ -5,6 +5,7 @@
 // computed by hand on a 64 x 48 window (origin top-left, as the painter draws and `capture`
 // reads).  Under Xvfb, start the server with `-noreset` (see window.loft).
 use graphics::*;
+use gpu;
 
 fn display() -> boolean {
   must_draw((env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1")
@@ -101,6 +102,28 @@ out vec4 frag;
 void main() {{ frag = vec4(1.0); }}
 `;
 
+// SPIR-V of FLAT_V with FLAT_F (vertex), as graphics hands them on, written by gpu_vulkan/spirv.py: do not edit.
+const FLAT_V_SPV: text = `AwIjBwADAQALAAgAGwAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABwAAAAAABAAAAG1haW4AAAAADQAAABIAAABHAAMACwAAAAIAAABIAAUACwAAAAAA
+AAALAAAAAAAAAEgABQALAAAAAQAAAAsAAAABAAAASAAFAAsAAAACAAAACwAAAAMAAABIAAUACwAA
+AAMAAAALAAAABAAAAEcABAASAAAAHgAAAAAAAAATAAIAAgAAACEAAwADAAAAAgAAABYAAwAGAAAA
+IAAAABcABAAHAAAABgAAAAQAAAAVAAQACAAAACAAAAAAAAAAKwAEAAgAAAAJAAAAAQAAABwABAAK
+AAAABgAAAAkAAAAeAAYACwAAAAcAAAAGAAAACgAAAAoAAAAgAAQADAAAAAMAAAALAAAAOwAEAAwA
+AAANAAAAAwAAABUABAAOAAAAIAAAAAEAAAArAAQADgAAAA8AAAAAAAAAFwAEABAAAAAGAAAAAwAA
+ACAABAARAAAAAQAAABAAAAA7AAQAEQAAABIAAAABAAAAKwAEAAYAAAAUAAAAAACAPyAABAAZAAAA
+AwAAAAcAAAA2AAUAAgAAAAQAAAAAAAAAAwAAAPgAAgAFAAAAPQAEABAAAAATAAAAEgAAAFEABQAG
+AAAAFQAAABMAAAAAAAAAUQAFAAYAAAAWAAAAEwAAAAEAAABRAAUABgAAABcAAAATAAAAAgAAAFAA
+BwAHAAAAGAAAABUAAAAWAAAAFwAAABQAAABBAAUAGQAAABoAAAANAAAADwAAAD4AAwAaAAAAGAAA
+AP0AAQA4AAEA`;
+
+// SPIR-V of FLAT_V with FLAT_F (fragment), as graphics hands them on, written by gpu_vulkan/spirv.py: do not edit.
+const FLAT_F_SPV: text = `AwIjBwADAQALAAgADAAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABgAEAAAABAAAAG1haW4AAAAACQAAABAAAwAEAAAABwAAAEcABAAJAAAAHgAAAAAA
+AAATAAIAAgAAACEAAwADAAAAAgAAABYAAwAGAAAAIAAAABcABAAHAAAABgAAAAQAAAAgAAQACAAA
+AAMAAAAHAAAAOwAEAAgAAAAJAAAAAwAAACsABAAGAAAACgAAAAAAgD8sAAcABwAAAAsAAAAKAAAA
+CgAAAAoAAAAKAAAANgAFAAIAAAAEAAAAAAAAAAMAAAD4AAIABQAAAD4AAwAJAAAACwAAAP0AAQA4
+AAEA`;
+
 // A full-height band x0..x1 as two triangles.
 fn band(x0: float, x1: float) -> vector<single> {
   xy = [x0, -1.0, x1, -1.0, x1, 1.0, x0, -1.0, x1, 1.0, x0, 1.0];
@@ -113,7 +136,7 @@ fn test_groups_reupload_on_their_own() {
   wo = open_window(64, 48, "g5-groups");
   if !display() { return; }
   w = wo ?? return assert(false, "no window");
-  s = w.shader(FLAT_V, FLAT_F) ?? return assert(false, "shader");
+  s = w.shader_of(FLAT_V, FLAT_F, [gpu::source("spirv", FLAT_V_SPV, FLAT_F_SPV)]) ?? return assert(false, "shader");
   set = group_meshes(3, DRAW_TRIANGLES);
   z = 0.0 as single;
   set.upsert(w, 1, band(-1.0, -0.5), z, z, z, z);
@@ -162,7 +185,7 @@ fn test_a_painter_draws_in_call_order_over_a_3d_frame() {
   if !display() { return; }
   w = wo ?? return assert(false, "no window");
   p = w.painter() ?? return assert(false, "painter");
-  near = w.shader(FLAT_V, FLAT_F) ?? return assert(false, "the near quad's shader compiles");
+  near = w.shader_of(FLAT_V, FLAT_F, [gpu::source("spirv", FLAT_V_SPV, FLAT_F_SPV)]) ?? return assert(false, "the near quad's shader compiles");
   full = w.upload(near_quad(), 3);
   atlas = canvas(4, 2, RED);
   for y in 0..2 {
