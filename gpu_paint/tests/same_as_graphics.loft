@@ -81,7 +81,7 @@ fn same(old: const vector<u32>, new: const vector<u32>, what: text, edges: integ
 }
 
 // The old painter blends where its window does: plain transparency, as the new one blends.
-fn blending(w: const graphics::Window, on: boolean) {
+fn blending(w: graphics::Window, on: boolean) {
   if on {
     w.enable(graphics::GL_BLEND);
     w.blend(graphics::BLEND_SRC_ALPHA, graphics::BLEND_ONE_MINUS_SRC_ALPHA);
@@ -108,20 +108,27 @@ fn placed(sx: float, sy: float, z: float) -> vector<float> {
 fn rectangles_opaque_blended_and_after_a_resize_on(table: i64) {
   wo = graphics::open_window(64, 48, "old-rect");
   if !display() { return; }
-  w = wo ?? return assert(false, "a display is set and no window opened");
-  dev = gpu::open(table, 64, 48, "new-rect") ?? return assert(false, "no device");
-  op = w.painter() ?? return assert(false, "the old painter");
-  np = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return assert(false, "the new painter");
+  // Everything the window made is let go before the device opens: a program has one backend
+  // at a time, and a release goes to the one that is there.
+  old_px: vector<u32> = [];
+  {
+    w = wo ?? return assert(false, "a display is set and no window opened");
+    op = w.painter() ?? return assert(false, "the old painter");
 
-  w.clear(BLACK);
-  blending(w, false);
-  op.rect(8.0, 4.0, 16.0, 10.0, 1.0, 0.0, 0.0, 0.3);
-  op.rect(20.5, 9.25, 30.0, 20.5, 0.0, 0.0, 1.0, 1.0);
-  blending(w, true);
-  op.rect(4.0, 8.0, 40.0, 30.0, 0.2, 1.0, 0.4, 0.35);
-  op.resize(32, 24);
-  op.rect(24.0, 18.0, 8.0, 6.0, 1.0, 1.0, 0.0, 0.5);
-  old = w.capture();
+    w.clear(BLACK);
+    blending(w, false);
+    op.rect(w, 8.0, 4.0, 16.0, 10.0, 1.0, 0.0, 0.0, 0.3);
+    op.rect(w, 20.5, 9.25, 30.0, 20.5, 0.0, 0.0, 1.0, 1.0);
+    blending(w, true);
+    op.rect(w, 4.0, 8.0, 40.0, 30.0, 0.2, 1.0, 0.4, 0.35);
+    op.resize(32, 24);
+    op.rect(w, 24.0, 18.0, 8.0, 6.0, 1.0, 1.0, 0.0, 0.5);
+    old = w.capture();
+    old_px += old.data;
+    w.close();
+  }
+  dev = gpu::open(table, 64, 48, "new-rect") ?? return assert(false, "no device");
+  np = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return assert(false, "the new painter");
 
   dev.begin_window(gpu::CLEAR, BLACK);
   np.blend = false;
@@ -132,7 +139,7 @@ fn rectangles_opaque_blended_and_after_a_resize_on(table: i64) {
   np.resize(32, 24);
   np.rect(dev, 24.0, 18.0, 8.0, 6.0, 1.0, 1.0, 0.0, 0.5);
   dev.end();
-  same(old.data, dev.capture(), "rectangles", 0);
+  same(old_px, dev.capture(), "rectangles", 0);
   assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()} [{gpu::backend_name()}]");
 }
 
@@ -143,29 +150,36 @@ fn test_rectangles_opaque_blended_and_after_a_resize() {
 fn an_image_keeps_its_rows_and_skips_the_transparent_on(table: i64) {
   wo = graphics::open_window(64, 48, "old-image");
   if !display() { return; }
-  w = wo ?? return assert(false, "a display is set and no window opened");
+  // Everything the window made is let go before the device opens: a program has one backend
+  // at a time, and a release goes to the one that is there.
+  old_px: vector<u32> = [];
+  {
+    w = wo ?? return assert(false, "a display is set and no window opened");
+    op = w.painter() ?? return assert(false, "the old painter");
+    px = sheet_pixels();
+
+    ot = w.texture_from(graphics::Canvas { width: 4, height: 2, data: px });
+    ot.filter(true);
+    ol = w.texture_from(graphics::Canvas { width: 4, height: 2, data: px });
+    w.clear(BLUE);
+    blending(w, true);
+    op.image(w, ot, 30.0, 2.0, 32.0, 40.0);
+    op.image(w, ol, 2.0, 20.0, 24.0, 24.0);
+    old = w.capture();
+    old_px += old.data;
+    w.close();
+  }
   dev = gpu::open(table, 64, 48, "new-image") ?? return assert(false, "no device");
-  op = w.painter() ?? return assert(false, "the old painter");
   np = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return assert(false, "the new painter");
-  px = sheet_pixels();
 
-  ot = w.texture_from(graphics::Canvas { width: 4, height: 2, data: px });
-  ot.filter(true);
-  ol = w.texture_from(graphics::Canvas { width: 4, height: 2, data: px });
-  w.clear(BLUE);
-  blending(w, true);
-  op.image(ot, 30.0, 2.0, 32.0, 40.0);
-  op.image(ol, 2.0, 20.0, 24.0, 24.0);
-  old = w.capture();
-
-  nt = dev.texture_from(px, 4, 2);
+  nt = dev.texture_from(sheet_pixels(), 4, 2);
   nt.nearest(true);
-  nl = dev.texture_from(px, 4, 2);
+  nl = dev.texture_from(sheet_pixels(), 4, 2);
   dev.begin_window(gpu::CLEAR, BLUE);
   np.image(dev, nt, 30.0, 2.0, 32.0, 40.0);
   np.image(dev, nl, 2.0, 20.0, 24.0, 24.0);
   dev.end();
-  same(old.data, dev.capture(), "images", 0);
+  same(old_px, dev.capture(), "images", 0);
   assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()} [{gpu::backend_name()}]");
 }
 
@@ -176,31 +190,38 @@ fn test_an_image_keeps_its_rows_and_skips_the_transparent() {
 fn sprites_at_pixel_positions_and_in_a_scene_with_depth_on(table: i64) {
   wo = graphics::open_window(64, 48, "old-sprites");
   if !display() { return; }
-  w = wo ?? return assert(false, "a display is set and no window opened");
+  // Everything the window made is let go before the device opens: a program has one backend
+  // at a time, and a release goes to the one that is there.
+  old_px: vector<u32> = [];
+  {
+    w = wo ?? return assert(false, "a display is set and no window opened");
+    op = w.painter() ?? return assert(false, "the old painter");
+    px = sheet_pixels();
+
+    // Two sprites in a scene: the near one drawn first, so the far one is hidden where they
+    // overlap only if depth is tested and written.  Then two by the painter, over them, in
+    // call order whatever the depth.
+    os = w.sprites(graphics::Canvas { width: 4, height: 2, data: px }, 2, 1) ?? return assert(false, "the old sheet");
+    os.texture.filter(true);
+    // In a page the two libraries draw in the page's one context, and graphics takes the state
+    // it finds: say what this scene relies on, which a painter before it turned off.
+    w.enable(graphics::GL_DEPTH_TEST);
+    w.depth_write(true);
+    w.clear(BLACK);
+    blending(w, false);
+    os.draw(w, placed(1.2, 1.4, -0.5), 1);
+    os.draw(w, placed(1.9, 0.8, 0.5), 0);
+    op.sprite(w, os, 2.0, 30.0, 20.0, 16.0, 0);
+    op.sprite(w, os, 12.0, 34.0, 20.0, 12.0, 1);
+    assert(w.enabled(graphics::GL_DEPTH_TEST), "the old painter handed depth testing back on [{gpu::backend_name()}]");
+    old = w.capture();
+    old_px += old.data;
+    w.close();
+  }
   dev = gpu::open(table, 64, 48, "new-sprites") ?? return assert(false, "no device");
-  op = w.painter() ?? return assert(false, "the old painter");
   np = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return assert(false, "the new painter");
-  px = sheet_pixels();
 
-  // Two sprites in a scene: the near one drawn first, so the far one is hidden where they
-  // overlap only if depth is tested and written.  Then two by the painter, over them, in
-  // call order whatever the depth.
-  os = w.sprites(graphics::Canvas { width: 4, height: 2, data: px }, 2, 1) ?? return assert(false, "the old sheet");
-  os.texture.filter(true);
-  // In a page the two libraries draw in the page's one context, and graphics takes the state
-  // it finds: say what this scene relies on, which a painter before it turned off.
-  w.enable(graphics::GL_DEPTH_TEST);
-  w.depth_write(true);
-  w.clear(BLACK);
-  blending(w, false);
-  os.draw(placed(1.2, 1.4, -0.5), 1);
-  os.draw(placed(1.9, 0.8, 0.5), 0);
-  op.sprite(os, 2.0, 30.0, 20.0, 16.0, 0);
-  op.sprite(os, 12.0, 34.0, 20.0, 12.0, 1);
-  assert(w.enabled(graphics::GL_DEPTH_TEST), "the old painter handed depth testing back on [{gpu::backend_name()}]");
-  old = w.capture();
-
-  ns = gpu_paint::sprites(dev, px, 4, 2, 2, 1, gpu::INTO_WINDOW) ?? return assert(false, "the new sheet");
+  ns = gpu_paint::sprites(dev, sheet_pixels(), 4, 2, 2, 1, gpu::INTO_WINDOW) ?? return assert(false, "the new sheet");
   ns.texture.nearest(true);
   np.blend = false;
   dev.begin_window(gpu::CLEAR, BLACK);
@@ -209,7 +230,7 @@ fn sprites_at_pixel_positions_and_in_a_scene_with_depth_on(table: i64) {
   np.sprite(dev, ns, 2.0, 30.0, 20.0, 16.0, 0);
   np.sprite(dev, ns, 12.0, 34.0, 20.0, 12.0, 1);
   dev.end();
-  same(old.data, dev.capture(), "sprites", 11);
+  same(old_px, dev.capture(), "sprites", 11);
   assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()} [{gpu::backend_name()}]");
 }
 
@@ -220,29 +241,35 @@ fn test_sprites_at_pixel_positions_and_in_a_scene_with_depth() {
 fn a_painter_draws_into_a_texture_that_another_shows_on(table: i64) {
   wo = graphics::open_window(64, 48, "old-into");
   if !display() { return; }
-  w = wo ?? return assert(false, "a display is set and no window opened");
+  // Everything the window made is let go before the device opens: a program has one backend
+  // at a time, and a release goes to the one that is there.
+  old_px: vector<u32> = [];
+  {
+    w = wo ?? return assert(false, "a display is set and no window opened");
+    op = w.painter() ?? return assert(false, "the old painter");
+
+    // A 32 x 24 picture painted first, then shown over part of the window.
+    oc = w.texture(32, 24);
+    oc.filter(true);
+    of = w.framebuffer(oc);
+    w.render_to(of);
+    w.viewport(0, 0, 32, 24);
+    w.clear(RED);
+    blending(w, false);
+    op.resize(32, 24);
+    op.rect(w, 4.0, 3.0, 12.0, 8.0, 0.0, 1.0, 0.0, 1.0);
+    w.render_to_window();
+    w.viewport(0, 0, 64, 48);
+    w.clear(BLACK);
+    op.resize(64, 48);
+    op.image(w, oc, 8.0, 6.0, 48.0, 36.0);
+    old = w.capture();
+    old_px += old.data;
+    w.close();
+  }
   dev = gpu::open(table, 64, 48, "new-into") ?? return assert(false, "no device");
-  op = w.painter() ?? return assert(false, "the old painter");
   inner = gpu_paint::painter(dev, gpu::INTO_COLOUR) ?? return assert(false, "a painter into a texture");
   outer = gpu_paint::painter(dev, gpu::INTO_WINDOW) ?? return assert(false, "a painter into the window");
-
-  // A 32 x 24 picture painted first, then shown over part of the window.
-  oc = w.texture(32, 24);
-  oc.filter(true);
-  of = w.framebuffer();
-  of.attach(oc);
-  w.render_to(of);
-  w.viewport(0, 0, 32, 24);
-  w.clear(RED);
-  blending(w, false);
-  op.resize(32, 24);
-  op.rect(4.0, 3.0, 12.0, 8.0, 0.0, 1.0, 0.0, 1.0);
-  w.render_to_window();
-  w.viewport(0, 0, 64, 48);
-  w.clear(BLACK);
-  op.resize(64, 48);
-  op.image(oc, 8.0, 6.0, 48.0, 36.0);
-  old = w.capture();
 
   nc = dev.texture(32, 24);
   nc.nearest(true);
@@ -256,7 +283,7 @@ fn a_painter_draws_into_a_texture_that_another_shows_on(table: i64) {
   dev.begin_window(gpu::CLEAR, BLACK);
   outer.image(dev, nc, 8.0, 6.0, 48.0, 36.0);
   dev.end();
-  same(old.data, dev.capture(), "a painted texture shown", 0);
+  same(old_px, dev.capture(), "a painted texture shown", 0);
   assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()} [{gpu::backend_name()}]");
 }
 

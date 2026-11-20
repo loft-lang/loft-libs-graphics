@@ -84,32 +84,25 @@ handle whose address the allocator has given out again reads as the new object.
 
 `c/checked.sh --check` fails when `c/checked.h` carries the define: it is never committed.
 
-## Where its window code comes from
+## Its window code
 
-`c/gl_base.h` is the graphics library's `c/graphics_gl.c` with its names under another prefix,
-so the two link into one program.  It is derived, never edited:
-
-```
-gpu_gl/c/derive_base.sh           # write gl_base.h again after graphics' file changed
-gpu_gl/c/derive_base.sh --check   # exit 1 when the two have drifted apart
-```
-
-graphics keeps its own copy until its `Window` is a `gpu` device; from then this is the only
-one.
+`c/gl_base.h` holds the window hosts (X11 and GLX, AppKit, the NDK's native activity, a page's
+canvas), the OpenGL function table and the texture and framebuffer code.  It was the graphics
+library's own C; since graphics 0.14 draws through `gpu` this is the only copy, and it is edited
+here.
 
 ## Verified
 
-`tests/same_as_graphics.loft` draws each scene through `gpu` + `gpu_gl` and through the
-graphics library's own calls, and compares the two captures byte for byte: depth and blending,
-culling, scissor and viewport, a texture updated in place and sampled nearest, a texture
-sampled between its pixels, copies read from an offset with an index list, lines, and a scene
-drawn into a colour and depth target first.
+`tests/in_order.loft`, `host.loft`, `after_close.loft` and `two_devices.loft` hold this backend
+to values worked out by hand; `gpu_vulkan`'s and `gpu_metal`'s `tests/same_as_gl.loft` draw each
+of their scenes through this backend too and compare the captures; and the graphics library's
+own tests draw through it since graphics 0.14.
 
 | Host | State |
 |---|---|
-| macOS (OpenGL 4.1 through AppKit) | The eight tests pass on the interpreter, the C backend, a shipped program and the Rust backend |
+| macOS (OpenGL 4.1 through AppKit) | The tests pass on the interpreter, the C backend, a shipped program and the Rust backend |
 | macOS, a GitHub runner (Apple Software Renderer) | The tests pass on the interpreter and the C backend, in the library CI (`.macos_window`) |
-| A browser page (WebGL2, headless Chrome) | The eight tests pass in both writers' pages |
+| A browser page (WebGL2, headless Chrome) | The tests pass in both writers' pages |
 | Linux (X11 and GLX, under Xvfb: llvmpipe) | The tests pass on the interpreter and the C backend |
 | Android (OpenGL ES 3) | Not run |
 

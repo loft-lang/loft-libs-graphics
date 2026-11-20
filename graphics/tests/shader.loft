@@ -53,7 +53,7 @@ fn test_a_square_takes_its_uniforms() {
   s.set_int("mode", 2);
   s.set_float("unused", 9.0);
   w.clear(rgba(10, 20, 30, 255));
-  m.draw(s);
+  m.draw(w, s);
   c = w.capture();
   inside = c.data[24 * 64 + 16] ?? -1;
   right = c.data[24 * 64 + 48] ?? -1;
@@ -85,7 +85,7 @@ fn test_resources_outliving_their_window() {
     w = open_window(16, 16, "g5-outlive") ?? return assert(false, "window {i}");
     s = w.shader(VERTEX, FRAGMENT) ?? return assert(false, "shader {i}");
     m = w.upload(square(), 6);
-    m.draw(s);
+    m.draw(w, s);
     w.close();
   }
 }

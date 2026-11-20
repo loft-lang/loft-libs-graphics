@@ -48,7 +48,7 @@ fn quad(clockwise: boolean) -> vector<single> {
   out
 }
 
-fn pixel(w: const Window, x: integer, y: integer) -> integer {
+fn pixel(w: Window, x: integer, y: integer) -> integer {
   c = w.capture();
   (c.data[y * 64 + x] ?? -1) | 0xFF000000
 }
@@ -63,12 +63,12 @@ fn test_blend() {
   w.enable(GL_BLEND);
   w.blend(BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA);
   s.set_vec4("color", 1.0, 0.0, 0.0, 0.6);
-  q.draw(s);
+  q.draw(w, s);
   got = pixel(w, 16, 24);
   assert(got == rgba(153, 0, 102, 255), "blended {got:x}");
   w.disable(GL_BLEND);
   w.clear(BLUE); // the depth test is on: a second quad at the same depth would not pass it
-  q.draw(s);
+  q.draw(w, s);
   got = pixel(w, 16, 24);
   assert(got == RED, "unblended {got:x}");
 }
@@ -83,13 +83,13 @@ fn test_scissor_and_viewport() {
   w.clear(BLUE);
   w.enable(GL_SCISSOR_TEST);
   w.scissor(0, 0, 32, 48);
-  q.draw(s);
+  q.draw(w, s);
   w.disable(GL_SCISSOR_TEST);
   assert(pixel(w, 31, 24) == GREEN, "scissored: column 31 drawn");
   assert(pixel(w, 32, 24) == BLUE, "scissored: column 32 not");
   w.clear(BLUE);
   w.viewport(32, 0, 32, 48);
-  q.draw(s);
+  q.draw(w, s);
   w.viewport(0, 0, 64, 48);
   assert(pixel(w, 31, 24) == BLUE, "viewport: column 31 not drawn");
   assert(pixel(w, 32, 24) == GREEN, "viewport: column 32 drawn");
@@ -105,10 +105,10 @@ fn test_cull() {
   w.enable(GL_CULL_FACE);
   w.cull(0);
   w.clear(BLUE);
-  back.draw(s);
+  back.draw(w, s);
   assert(pixel(w, 16, 24) == BLUE, "a clockwise quad is culled with the back faces");
   w.cull(1);
-  back.draw(s);
+  back.draw(w, s);
   assert(pixel(w, 16, 24) == GREEN, "and drawn when the front faces are culled");
 }
 
@@ -122,19 +122,19 @@ fn test_depth_write() {
   w.depth_write(false);
   s.set_float("z", 0.0);
   s.set_vec4("color", 0.0, 1.0, 0.0, 1.0);
-  q.draw(s);
+  q.draw(w, s);
   s.set_float("z", 0.5);
   s.set_vec4("color", 1.0, 0.0, 0.0, 1.0);
-  q.draw(s);
+  q.draw(w, s);
   assert(pixel(w, 16, 24) == RED, "the near quad wrote no depth: the far one shows");
   w.depth_write(true);
   w.clear(BLUE);
   s.set_float("z", 0.0);
   s.set_vec4("color", 0.0, 1.0, 0.0, 1.0);
-  q.draw(s);
+  q.draw(w, s);
   s.set_float("z", 0.5);
   s.set_vec4("color", 1.0, 0.0, 0.0, 1.0);
-  q.draw(s);
+  q.draw(w, s);
   assert(pixel(w, 16, 24) == GREEN, "with depth writes the near quad wins");
 }
 

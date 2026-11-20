@@ -204,7 +204,10 @@ static void gq_fault(const char *what, const char *detail) {
  * deprecated or not portable are faults; its notes on speed and its notices are not. */
 static void gq_driver_said(unsigned source, unsigned type, unsigned id, unsigned severity,
                            int length, const char *message, const void *user) {
-    (void) source; (void) id; (void) severity; (void) length; (void) user;
+    (void) id; (void) severity; (void) length; (void) user;
+    /* A shader that does not compile is no fault of a call: the pipeline answers none and says
+     * why itself.  (GL_DEBUG_SOURCE_SHADER_COMPILER) */
+    if (source == 0x8248) return;
     if (type == 0x824C) gq_fault("error", message);
     else if (type == 0x824E) gq_fault("undefined behaviour", message);
     else if (type == 0x824D) gq_fault("deprecated use", message);
@@ -342,6 +345,11 @@ static int64_t gq_t_open(int64_t width, int64_t height, const char *title, int64
     d->w = gq_of(h);
     d->more_ok = gq_bind_block_api(d);
     gq_note_renderer(d);
+#if defined(GQ_X11) || defined(GQ_COCOA)
+    /* A point has the size its vertex stage writes, as on every other stack: desktop OpenGL
+     * reads `gl_PointSize` only when told to (GL_PROGRAM_POINT_SIZE), OpenGL ES always. */
+    d->w->api.glEnable(0x8642);
+#endif
 #if defined(GPU_GL_CHECKED)
     if (gq_check_mode()) {
         gq_error_of = d->more.glGetError;

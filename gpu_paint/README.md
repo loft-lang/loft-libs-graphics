@@ -64,8 +64,8 @@ tested with no display.  Each further backend adds a source here.
 
 ## Verified
 
-`tests/same_as_graphics.loft` draws each scene through this library on `gpu_gl` and through
-graphics' own `Painter` and `Sprites`, and compares the two captures byte for byte: opaque
+`tests/same_as_graphics.loft` draws each scene through this library and through graphics'
+`Painter` and `Sprites` (which draw through `gpu_gl` since graphics 0.14), and compares the two captures byte for byte: opaque
 and blended rectangles at whole and fractional positions, after a resize; images sampled
 nearest and between their pixels with a transparent one; sprites by the painter and in a
 scene with depth; a painter into a texture that another shows.  They pass on a Mac on the

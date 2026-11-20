@@ -35,6 +35,10 @@
 use mesh3d::*;
 use glb::*;
 use imaging;
+use gpu;
+use gpu_gl;
+use shader_rewrite::*;
+use on_gpu::*;
 
 // RGBA color packed as a single integer: 0xAARRGGBB.
 // Alpha: 255 = fully opaque, 0 = fully transparent.
@@ -977,7 +981,7 @@ pub enum Event {
   Resize { pub width: integer, pub height: integer }
 }
 
-// --- Windows as values: the OS window and its GL context, closed when it dies ---
+// --- Windows as values: the OS window and its GPU, closed when it dies ---
 //
 //   w = open_window(800, 600, "game") ?? return;
 //   while w.poll() {
@@ -986,85 +990,86 @@ pub enum Event {
 //     w.swap();
 //   }                              // the window closes here, when `w` dies
 //
-// A window answers null where none can open: no display, no GL 3.3, or a host without a window
-// yet (Linux, macOS and a browser page have one).  It is used from the thread that opened it; a call from another is
-// refused with a message.  It cannot be copied — move it, or pass it as an argument.
-
-// The C part (c/graphics_gl.c): X11 and GLX on Linux, AppKit on macOS, WebGL2 in a page, opened at run time.  A window is a handle, 0 for none.
-fn gg_open(width: integer, height: integer, title: text, fullscreen: integer) -> integer;
-#c "gg_open" "int64_t(int64_t, int64_t, const char*, int64_t)"
-fn gg_poll(h: integer) -> integer;
-#c "gg_poll" "int64_t(int64_t)"
-fn gg_swap(h: integer);
-#c "gg_swap" "void(int64_t)"
-fn gg_clear(h: integer, color: integer);
-#c "gg_clear" "void(int64_t, int64_t)"
-fn gg_close(h: integer);
-#c "gg_close" "void(int64_t)"
-fn gg_width(h: integer) -> integer;
-#c "gg_width" "int64_t(int64_t)"
-fn gg_height(h: integer) -> integer;
-#c "gg_height" "int64_t(int64_t)"
-fn gg_event_count(h: integer) -> integer;
-#c "gg_event_count" "int64_t(int64_t)"
-fn gg_events(h: integer, out: vector<integer>);
-#c "gg_events" "void(int64_t, loft_int*, int64_t)"
-fn gg_read_pixels(h: integer, out: vector<u32>);
-#c "gg_read_pixels" "void(int64_t, uint32_t*, int64_t)"
-fn gg_text_size(h: integer) -> integer;
-#c "gg_text_size" "int64_t(int64_t)"
-fn gg_text_copy(h: integer, out: vector<u8>);
-#c "gg_text_copy" "void(int64_t, uint8_t*, int64_t)"
-fn gg_key_down(h: integer, key: integer) -> integer;
-#c "gg_key_down" "int64_t(int64_t, int64_t)"
-fn gg_mouse(h: integer, which: integer) -> integer;
-#c "gg_mouse" "int64_t(int64_t, int64_t)"
+// A window answers null where none can open: no display, or no GPU this library draws on.  It
+// is used from the thread that opened it.  It cannot be copied — move it, or pass it as an
+// argument.
+//
+// A window HOLDS STATE, and every call that reads or changes it has the window in its hand:
+// what `enable`, `blend`, `cull`, `viewport` and `scissor` said, and the frame being drawn.  So
+// a draw names its window (`mesh.draw(w, shader)`), and a function that draws takes a `Window`,
+// not a `const Window`.  Nothing here draws through OpenGL itself: the window is a `gpu` device,
+// and the calls below say this library's in `gpu`'s terms (src/on_gpu.loft).
 
 // An open window.  `close` ends it early; otherwise it closes when its owner dies.
 pub struct Window {
-  handle: integer,
+  dev: gpu::Device,
+  // What the window was told and keeps between draws.
+  kept: Kept,
+  // The frame so far, as `gpu` passes.
+  pass: Pass,
+  // What the open pass draws into, and its size: `gpu::INTO_WINDOW`, or the framebuffer
+  // `render_to` named.
+  into: integer,
+  into_w: integer,
+  into_h: integer,
+  // For a `clear` in the middle of a pass: a frame-filling quad, and a pipeline for each kind
+  // of target it was needed in.
+  wipe_quad: vector<gpu::Buffer>,
+  wipes: vector<Wipe>,
 }
 
-fn OpDrop(self: Window) {
-  if self.handle != 0 { gg_close(self.handle); }
+struct Wipe {
+  into: integer,
+  pipe: gpu::Pipeline,
 }
 
-// Open a window of `width` x `height` pixels titled `title`, with an OpenGL 3.3 core context
-// current on this thread.  Null when no window can open here.
+const WIPE_VERT: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(std140) uniform Block {{ vec4 color; }};
+void main() {{ gl_Position = vec4(pos.xy, 1.0, 1.0); }}
+`;
+
+const WIPE_FRAG: text = `
+#version 330 core
+layout(std140) uniform Block {{ vec4 color; }};
+out vec4 frag;
+void main() {{ frag = color; }}
+`;
+
+// Open a window of `width` x `height` pixels titled `title`.  Null when no window can open here.
 pub fn open_window(width: integer, height: integer, title: text) -> Window? {
-  h = gg_open(width, height, title, 0);
-  if h == 0 { return null; }
-  Window { handle: h }
+  dev = gpu::open(gpu_gl::table(), width, height, title) ?? return null;
+  wide = dev.width();
+  high = dev.height();
+  Window { dev: dev, kept: Kept {}, pass: Pass {}, into: gpu::INTO_WINDOW, into_w: wide, into_h: high, wipe_quad: [], wipes: [] }
 }
 
 // Open a borderless window covering the screen; read its size with `width()` and `height()`.
 pub fn open_fullscreen(title: text) -> Window? {
-  h = gg_open(0, 0, title, 1);
-  if h == 0 { return null; }
-  Window { handle: h }
+  dev = gpu::open_fullscreen(gpu_gl::table(), title) ?? return null;
+  wide = dev.width();
+  high = dev.height();
+  Window { dev: dev, kept: Kept {}, pass: Pass {}, into: gpu::INTO_WINDOW, into_w: wide, into_h: high, wipe_quad: [], wipes: [] }
 }
 
 // Take the window's pending input and apply a resize; false once the window was asked to close
 // (or was closed).  Call once per frame, then read `events()`.
-pub fn poll(self: const Window) -> boolean {
-  self.handle != 0 && gg_poll(self.handle) != 0
+pub fn poll(self: Window) -> boolean {
+  self.dev.poll()
 }
 
-// What arrived since the previous `events()`, oldest first.
-pub fn events(self: const Window) -> vector<Event> {
+// What arrived since the previous `events()`, oldest first.  A resize puts the viewport back
+// to the whole window.
+pub fn events(self: Window) -> vector<Event> {
   out: vector<Event> = [];
-  n = gg_event_count(self.handle);
-  if n == 0 { return out; }
-  nbytes = gg_text_size(self.handle);
-  typed: vector<u8> = [0 as u8; nbytes];
-  gg_text_copy(self.handle, typed);
-  words: vector<integer> = [0; 5 * n];
-  gg_events(self.handle, words);
-  for i in 0..n {
-    tag = words[5 * i] ?? 0;
-    a = words[5 * i + 1] ?? 0;
-    b = words[5 * i + 2] ?? 0;
-    c = words[5 * i + 3] ?? 0;
+  typed = self.dev.typed();
+  words = self.dev.events();
+  for i in 0..len(words) / gpu::EVENT_WORDS {
+    tag = words[gpu::EVENT_WORDS * i] ?? 0;
+    a = words[gpu::EVENT_WORDS * i + 1] ?? 0;
+    b = words[gpu::EVENT_WORDS * i + 2] ?? 0;
+    c = words[gpu::EVENT_WORDS * i + 3] ?? 0;
     if tag == EV_KEY_DOWN {
       out += [KeyDown { key: a, mods: b, repeat: c != 0 }];
     } else if tag == EV_KEY_UP {
@@ -1087,459 +1092,531 @@ pub fn events(self: const Window) -> vector<Event> {
       out += [TouchEnd { id: a, x: b as float, y: c as float }];
     } else if tag == EV_RESIZE {
       out += [Resize { width: a, height: b }];
+      self.kept.framed = false;
     }
   }
   out
 }
 
-
 // Whether key `key` (a KEY_* code) is held down, as of the last `poll`.
 pub fn key_down(self: const Window, key: integer) -> boolean {
-  gg_key_down(self.handle, key) != 0
+  self.dev.key_down(key)
 }
 
 // The pointer's position in pixels from the window's top-left corner, as of the last `poll`.
 pub fn mouse_x(self: const Window) -> float {
-  gg_mouse(self.handle, 0) as float
+  self.dev.pointer_x() as float
 }
 
-// And its vertical position.
 pub fn mouse_y(self: const Window) -> float {
-  gg_mouse(self.handle, 1) as float
+  self.dev.pointer_y() as float
 }
 
-// The mouse buttons held down: 1 left, 2 right, 4 middle, or'ed together.
+// The buttons held down: 1 the left, 2 the right, 4 the middle, added up.
 pub fn mouse_buttons(self: const Window) -> integer {
-  gg_mouse(self.handle, 2)
+  self.dev.buttons()
 }
 
-// Clear the frame to `color` (packed 0xAARRGGBB, as `rgba` packs it) and the depth buffer.
-pub fn clear(self: const Window, color: integer) {
-  gg_clear(self.handle, color);
-}
-
-// Present the frame.  Its alpha is forced opaque first, so a compositor never shows through it.
-pub fn swap(self: const Window) {
-  gg_swap(self.handle);
-}
-
-// The drawable's size in pixels; it follows a resize at `poll`.
+// The window's size in pixels.
 pub fn width(self: const Window) -> integer {
-  gg_width(self.handle)
+  self.dev.width()
 }
 
-// And its height.
 pub fn height(self: const Window) -> integer {
-  gg_height(self.handle)
+  self.dev.height()
 }
 
-// The frame drawn so far, as a canvas — read it after the draws and before `swap`.
-pub fn capture(self: const Window) -> Canvas {
-  cw = gg_width(self.handle);
-  ch = gg_height(self.handle);
-  px = filled(cw * ch, 0);
-  gg_read_pixels(self.handle, px);
-  Canvas { width: cw, height: ch, data: px }
-}
-
-// Close the window now.  Its death later does nothing more.
-pub fn close(self: Window) {
-  if self.handle != 0 {
-    gg_close(self.handle);
-    self.handle = 0;
+// The area and the pass a draw into what the window draws into now needs; a pass into a
+// framebuffer was opened by `render_to` and stays open until the window is drawn into again.
+fn ready(self: Window) {
+  if self.into == gpu::INTO_WINDOW {
+    enter(self.dev, self.pass, self.kept, null, self.dev.width(), self.dev.height());
   }
 }
 
-// --- Shaders and GPU meshes: a window's GL objects, deleted when they die ---
-//
-//   s = w.shader(VERTEX, FRAGMENT) ?? return;
-//   m = w.upload(triangle, 6);                   // position + normal per vertex
-//   s.set_mat4("mvp", camera);
-//   m.draw(s);
-//
-// Each belongs to the window that made it.  Dying after that window closed does nothing — closing
-// the window freed it — so the order in which they and the window die never matters.
+// Every draw so far is done and a waiting `clear` has cleared; what follows draws into the
+// window.
+fn settled(self: Window) {
+  if self.into == gpu::INTO_WINDOW {
+    settle(self.dev, self.pass, self.kept, null, self.dev.width(), self.dev.height());
+  } else {
+    leave(self.dev, self.pass);
+    self.into = gpu::INTO_WINDOW;
+    self.into_w = self.dev.width();
+    self.into_h = self.dev.height();
+  }
+}
 
-fn gg_shader(win: integer, vertex: text, fragment: text) -> integer;
-#c "gg_shader" "int64_t(int64_t, const char*, const char*)"
-fn gg_uniform_f(sh: integer, name: text, v: const vector<float>);
-#c "gg_uniform_f" "void(int64_t, const char*, const loft_float*, int64_t)"
-fn gg_uniform_i(sh: integer, name: text, v: integer);
-#c "gg_uniform_i" "void(int64_t, const char*, int64_t)"
-fn gg_mesh(win: integer, data: const vector<single>, stride: integer) -> integer;
-#c "gg_mesh" "int64_t(int64_t, const float*, int64_t, int64_t)"
-fn gg_draw(mesh: integer, shader: integer);
-#c "gg_draw" "void(int64_t, int64_t)"
-fn gg_draw_over(mesh: integer, shader: integer);
-#c "gg_draw_over" "void(int64_t, int64_t)"
-fn gg_release(res: integer);
-#c "gg_release" "void(int64_t)"
+// Clear what the window draws into to `color` (0xAARRGGBB), and its depth to the far end.
+// While `GL_SCISSOR_TEST` is on, only inside the scissor.
+pub fn clear(self: Window, color: integer) {
+  if !self.pass.open && !self.kept.scissoring && self.into == gpu::INTO_WINDOW {
+    wiped(self.dev, self.pass, color);
+    return;
+  }
+  // In the middle of a pass, or inside a scissor: a quad over the whole target that writes its
+  // colour and the far depth without a test, which is what a clear does there.
+  self.ready();
+  if len(self.wipe_quad) == 0 {
+    self.wipe_quad += [self.dev.buffer([-1.0f, -1.0f, 0.0f, 1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f, -1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f, -1.0f, 1.0f, 0.0f])];
+  }
+  found = -1;
+  for wipe in self.wipes { if wipe.into == self.into { found = wipe#index; } }
+  if found < 0 {
+    prog = gpu::Program { vertex: [gpu::F3], instance: [], block: [gpu::F4], textures: 0, sources: [gpu::source("glsl-330", WIPE_VERT, WIPE_FRAG)] };
+    depth = if self.into == gpu::INTO_COLOUR { gpu::DEPTH_OFF } else { gpu::DEPTH_WRITE };
+    made = self.dev.pipeline(prog, gpu::State { depth: depth, into: self.into }) ?? return;
+    found = len(self.wipes);
+    self.wipes += [Wipe { into: self.into, pipe: made }];
+  }
+  wipe = self.wipes[found] ?? return;
+  quad = self.wipe_quad[0] ?? return;
+  u = wipe.pipe.block();
+  u.f4(0, color_r(color) as float / 255.0, color_g(color) as float / 255.0, color_b(color) as float / 255.0, ((color >> 24) & 255) as float / 255.0);
+  // a clear covers the target whatever the viewport says
+  self.dev.viewport(0, 0, self.into_w, self.into_h);
+  self.dev.bind(wipe.pipe);
+  self.dev.uniforms(u);
+  self.dev.vertices(quad);
+  self.dev.draw(0, 6);
+  if self.kept.framed {
+    self.dev.viewport(self.kept.frame_x, self.kept.frame_y, self.kept.frame_w, self.kept.frame_h);
+  } else {
+    self.dev.viewport(0, 0, self.dev.width(), self.dev.height());
+  }
+}
 
-// A linked GLSL program.
+// Show the frame drawn.
+pub fn swap(self: Window) {
+  self.settled();
+  self.dev.present();
+}
+
+// The window's frame as it is drawn so far, the top row first.  Read it before `swap`.  A read
+// ends drawing into a framebuffer: name it again with `render_to` to go on.
+pub fn capture(self: Window) -> Canvas {
+  self.settled();
+  Canvas { width: self.dev.width(), height: self.dev.height(), data: self.dev.capture() }
+}
+
+// Close the window now.
+pub fn close(self: Window) {
+  leave(self.dev, self.pass);
+  self.wipes = [];
+  self.wipe_quad = [];
+  self.kept = Kept { depth_test: false, depth_write: false };
+  self.dev.close();
+}
+
+// --- Render state: what the next draws do with depth, blending, faces and the frame's area ---
+//
+// `GL_DEPTH_TEST`, `GL_BLEND`, `GL_CULL_FACE`, `GL_SCISSOR_TEST` for `enable`/`disable`, the
+// `BLEND_*` factors for `blend`.  A window opens with the depth test on.  The window keeps what
+// it is told until it is told otherwise.
+
+// Turn a capability on: `GL_DEPTH_TEST`, `GL_BLEND`, `GL_CULL_FACE` or `GL_SCISSOR_TEST`.
+pub fn enable(self: Window, cap: integer) {
+  switch(self.kept, cap, true);
+  if cap == GL_SCISSOR_TEST && self.pass.open {
+    self.dev.scissor(self.kept.cut_x, self.kept.cut_y, self.kept.cut_w, self.kept.cut_h);
+  }
+}
+
+// And off.
+pub fn disable(self: Window, cap: integer) {
+  switch(self.kept, cap, false);
+  if cap == GL_SCISSOR_TEST && self.pass.open { self.dev.no_scissor(); }
+}
+
+// Whether a capability is on — for code that changes one and hands the window back as it
+// found it.
+pub fn enabled(self: const Window, cap: integer) -> boolean {
+  switched(self.kept, cap)
+}
+
+// How a blended draw combines with the frame: `w.blend(BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA)`.
+pub fn blend(self: Window, src: integer, dst: integer) {
+  self.kept.blend_source = src;
+  self.kept.blend_destination = dst;
+}
+
+// Which faces `GL_CULL_FACE` drops: 0 the back (counter-clockwise is the front), 1 the front.
+pub fn cull(self: Window, face: integer) {
+  self.kept.cull_front = face == 1;
+}
+
+// Whether draws write the depth buffer (they still test it while `GL_DEPTH_TEST` is on).
+pub fn depth_write(self: Window, on: boolean) {
+  self.kept.depth_write = on;
+}
+
+// The rectangle draws map onto, origin bottom-left.  A resize puts it back to the whole window.
+pub fn viewport(self: Window, x: integer, y: integer, width: integer, height: integer) {
+  self.kept.framed = true;
+  self.kept.frame_x = x;
+  self.kept.frame_y = y;
+  self.kept.frame_w = width;
+  self.kept.frame_h = height;
+  if self.pass.open { self.dev.viewport(x, y, width, height); }
+}
+
+// The rectangle `GL_SCISSOR_TEST` clips to, origin bottom-left.
+pub fn scissor(self: Window, x: integer, y: integer, width: integer, height: integer) {
+  self.kept.cut_x = x;
+  self.kept.cut_y = y;
+  self.kept.cut_w = width;
+  self.kept.cut_h = height;
+  if self.pass.open && self.kept.scissoring { self.dev.scissor(x, y, width, height); }
+}
+
+// --- Shaders and GPU meshes ---
+//
+//   s = w.shader(VERTEX, FRAGMENT) ?? return;     // GLSL 3.30
+//   m = w.upload(vertices, 6);                    // 6 floats a vertex: a position and a normal
+//   s.set_mat4("uMVP", mvp);
+//   m.draw(w, s);
+//
+// A shader's uniforms are declared one by one in its source and set by name; the values are
+// the shader's own, kept until set again.  A shader, a mesh and a texture are freed when their
+// owner lets them go.
+
+// A GLSL program, and the values its uniforms hold.
 pub struct Shader {
-  handle: integer,
+  vertex: text,
+  fragment: text,
+  uniforms: vector<Uniform>,
+  block: gpu::Block,
+  units: vector<integer>,
+  // The pipelines made of it so far: one for each render state, mesh layout and kind of target
+  // it was drawn with.
+  made: vector<Made>,
 }
 
-fn OpDrop(self: Shader) {
-  if self.handle != 0 { gg_release(self.handle); }
+struct Made {
+  key: text,
+  pipe: gpu::Pipeline,
 }
 
-// Compile and link a GLSL 3.30 program for this window.  Null when either stage does not compile
-// or the program does not link; the driver's log says why, on stderr.
-pub fn shader(self: const Window, vertex: text, fragment: text) -> Shader? {
-  h = gg_shader(self.handle, vertex, fragment);
-  if h == 0 { return null; }
-  Shader { handle: h }
+// Compile and link a GLSL 3.30 program for this window.  Null when a stage does not compile or
+// the program does not link (the driver's log says why, on stderr), and for a uniform this
+// library cannot carry (a message names its line).
+pub fn shader(self: Window, vertex: text, fragment: text) -> Shader? {
+  r = rewrite_shader(vertex, fragment);
+  if r.fault != "" {
+    eprintln("graphics: {r.fault}");
+    return null;
+  }
+  // One pipeline now, for a mesh of positions alone: it says whether the shader compiles, and
+  // its block is where the uniforms' values are kept.
+  prog = gpu::Program {
+    vertex: [gpu::F3],
+    instance: [],
+    block: block_of(r.uniforms),
+    textures: samplers_of(r.uniforms),
+    sources: [gpu::source("glsl-330", r.vertex, r.fragment)],
+  };
+  state = gpu::State {};
+  first = self.dev.pipeline(prog, state) ?? return null;
+  Shader {
+    block: first.block(),
+    made: [Made { key: "{key_of(state)}/{[gpu::F3]}/", pipe: first }],
+    vertex: r.vertex,
+    fragment: r.fragment,
+    uniforms: r.uniforms,
+    units: [],
+  }
 }
 
-// Set uniform `name` of this shader; a name the program does not use is ignored.
-pub fn set_float(self: const Shader, name: text, v: float) {
-  gg_uniform_f(self.handle, name, [v]);
+// Set uniform `name` of this shader; a name the program does not declare is ignored, and so is
+// a value that is not the uniform's size.
+pub fn set_float(self: Shader, name: text, v: float) {
+  put_floats(self.block, self.uniforms, name, [v]);
 }
 
-// A `vec2` uniform.
-pub fn set_vec2(self: const Shader, name: text, x: float, y: float) {
-  gg_uniform_f(self.handle, name, [x, y]);
+pub fn set_vec2(self: Shader, name: text, x: float, y: float) {
+  put_floats(self.block, self.uniforms, name, [x, y]);
 }
 
-// A `vec3` uniform.
-pub fn set_vec3(self: const Shader, name: text, x: float, y: float, z: float) {
-  gg_uniform_f(self.handle, name, [x, y, z]);
+pub fn set_vec3(self: Shader, name: text, x: float, y: float, z: float) {
+  put_floats(self.block, self.uniforms, name, [x, y, z]);
 }
 
-// A `vec4` uniform.
-pub fn set_vec4(self: const Shader, name: text, x: float, y: float, z: float, w: float) {
-  gg_uniform_f(self.handle, name, [x, y, z, w]);
+pub fn set_vec4(self: Shader, name: text, x: float, y: float, z: float, w: float) {
+  put_floats(self.block, self.uniforms, name, [x, y, z, w]);
 }
 
-// A `mat4` uniform from 16 floats, column-major; fewer than 16 is ignored.
-pub fn set_mat4(self: const Shader, name: text, m: const vector<float>) {
-  if len(m) >= 16 { gg_uniform_f(self.handle, name, m); }
+pub fn set_mat4(self: Shader, name: text, m: const vector<float>) {
+  if len(m) >= 16 { put_floats(self.block, self.uniforms, name, m[0..16]); }
 }
 
-// An `int` (or sampler) uniform.
-pub fn set_int(self: const Shader, name: text, v: integer) {
-  gg_uniform_i(self.handle, name, v);
+// Set an `int` uniform.  A sampler takes none: a draw is given its textures.
+pub fn set_int(self: Shader, name: text, v: integer) {
+  put_int(self.block, self.uniforms, self.units, name, v);
 }
 
 // Vertices on the GPU, `stride` floats each: position (location 0); from 6 floats a normal (1);
 // at exactly 8 a texture coordinate (2); from 10 a colour, RGBA (2); from 14 an anchor (3) and a
 // birth time (4).
 pub struct GpuMesh {
-  handle: integer,
-}
-
-fn OpDrop(self: GpuMesh) {
-  if self.handle != 0 { gg_release(self.handle); }
+  buffer: gpu::Buffer,
+  order: vector<gpu::IndexBuffer>,
+  inputs: vector<integer>,
+  vertices: integer,
+  // What `instance_attrib` declared: location, components and offset, three numbers each.
+  per_copy: vector<integer>,
 }
 
 // Upload `data` as a mesh of `len(data) / stride` vertices.
-pub fn upload(self: const Window, data: const vector<single>, stride: integer) -> GpuMesh {
-  GpuMesh { handle: gg_mesh(self.handle, data, stride) }
+pub fn upload(self: Window, data: const vector<single>, stride: integer) -> GpuMesh {
+  GpuMesh {
+    buffer: self.dev.buffer(data),
+    order: [],
+    inputs: inputs_of(stride),
+    vertices: if stride > 0 { (len(data) / stride) ?? 0 } else { 0 },
+    per_copy: [],
+  }
 }
 
-// Draw every vertex of this mesh as triangles with `shader`.
-pub fn draw(self: const GpuMesh, shader: const Shader) {
-  gg_draw(self.handle, shader.handle);
+// Two triangles covering the whole target: a `vec2` position at location 0 and a `vec2` texture
+// coordinate at location 1 — for a post-processing pass, or to show a texture.
+pub fn quad(self: Window) -> GpuMesh {
+  GpuMesh {
+    buffer: self.dev.buffer([-1.0f, -1.0f, 0.0f, 0.0f, 1.0f, -1.0f, 1.0f, 0.0f, -1.0f, 1.0f, 0.0f, 1.0f, 1.0f, -1.0f, 1.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 0.0f, 1.0f]),
+    order: [],
+    inputs: [gpu::F2, gpu::F2],
+    vertices: 6,
+    per_copy: [],
+  }
 }
 
-fn gg_mesh_update(mesh: integer, data: const vector<single>);
-#c "gg_mesh_update" "void(int64_t, const float*, int64_t)"
-fn gg_mesh_indices(mesh: integer, idx: const vector<integer>);
-#c "gg_mesh_indices" "void(int64_t, const loft_int*, int64_t)"
-fn gg_draw_as(mesh: integer, shader: integer, mode: integer, indexed: integer, instances: integer);
-#c "gg_draw_as" "void(int64_t, int64_t, int64_t, int64_t, int64_t)"
-fn gg_instances(win: integer, data: const vector<single>) -> integer;
-#c "gg_instances" "int64_t(int64_t, const float*, int64_t)"
-fn gg_buffer_update(buf: integer, data: const vector<single>);
-#c "gg_buffer_update" "void(int64_t, const float*, int64_t)"
-fn gg_instance_attrib(
-  mesh: integer,
-  buf: integer,
-  location: integer,
-  components: integer,
-  stride: integer,
-  offset: integer
-);
-#c "gg_instance_attrib" "void(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)"
-
-// Draw every vertex of this mesh as `mode`: `DRAW_TRIANGLES`, `DRAW_LINES` or `DRAW_POINTS`.
-pub fn draw_mode(self: const GpuMesh, shader: const Shader, mode: integer) {
-  gg_draw_as(self.handle, shader.handle, mode, 0, 0);
+// Replace the mesh's vertices with `data`, of the stride it was uploaded with.
+pub fn update(self: GpuMesh, data: const vector<single>) {
+  self.buffer.update(data);
+  stride = 0;
+  for n in self.inputs { stride += n; }
+  self.vertices = if stride > 0 { (len(data) / stride) ?? 0 } else { 0 };
 }
 
-// Replace the vertices, in the same layout; the count follows `len(data) / stride`.  For data that
-// changes every frame.
-pub fn update(self: const GpuMesh, data: const vector<single>) {
-  gg_mesh_update(self.handle, data);
+// Give the mesh a list of vertex numbers, for `draw_indexed`.
+pub fn indices(self: GpuMesh, w: Window, list: const vector<integer>) {
+  self.order = [w.dev.index_buffer(list)];
 }
 
-// Give the mesh an index list (a second call replaces the first); `draw_indexed` then draws the
-// vertices it names, in its order.
-pub fn indices(self: const GpuMesh, list: const vector<integer>) {
-  gg_mesh_indices(self.handle, list);
+// Say which per-copy input of a shader reads which floats of an instance record: the input at
+// `location` takes `components` floats, `offset` floats into the record.  Declare every input of
+// the record, then draw with `draw_instanced`.
+pub fn instance_attrib(self: GpuMesh, location: integer, components: integer, offset: integer) {
+  self.per_copy += [location, components, offset];
 }
 
-// Draw the vertices the index list names, as `mode`.
-pub fn draw_indexed(self: const GpuMesh, shader: const Shader, mode: integer) {
-  gg_draw_as(self.handle, shader.handle, mode, 1, 0);
-}
-
-// Draw the mesh's triangles `count` times; attributes fed by `instance_attrib` advance once per
-// copy.
-pub fn draw_instanced(self: const GpuMesh, shader: const Shader, count: integer) {
-  gg_draw_as(self.handle, shader.handle, 0, 0, count);
-}
-
-// Feed attribute `location` (use 5 and up: the vertex layout takes 0-4) from `instances`, once per
-// copy: `components` floats at `offset` floats into each record of `stride` floats.
-pub fn instance_attrib(
-  self: const GpuMesh,
-  instances: const InstanceBuffer,
-  location: integer,
-  components: integer,
-  stride: integer,
-  offset: integer
-) {
-  gg_instance_attrib(self.handle, instances.handle, location, components, stride, offset);
-}
-
-// Floats read once per drawn copy of a mesh — a position, a colour — through `instance_attrib`.
+// Floats read once per drawn copy.
 pub struct InstanceBuffer {
-  handle: integer,
+  buffer: gpu::Buffer,
 }
 
-fn OpDrop(self: InstanceBuffer) {
-  if self.handle != 0 { gg_release(self.handle); }
+// Upload `data` as per-copy records.
+pub fn instances(self: Window, data: const vector<single>) -> InstanceBuffer {
+  InstanceBuffer { buffer: self.dev.buffer(data) }
 }
 
-// Upload per-copy data, for a mesh to read through `instance_attrib`.
-pub fn instances(self: const Window, data: const vector<single>) -> InstanceBuffer {
-  InstanceBuffer { handle: gg_instances(self.handle, data) }
+// Replace the records with `data`.
+pub fn update(self: InstanceBuffer, data: const vector<single>) {
+  self.buffer.update(data);
 }
 
-// Replace the data; meshes reading it see the new values at their next draw.
-pub fn update(self: const InstanceBuffer, data: const vector<single>) {
-  gg_buffer_update(self.handle, data);
+// Draw every vertex of this mesh as triangles with `shader`, into what `w` draws into, with
+// the render state `w` was told.  `t0` and `t1` are the textures the shader's first and second
+// sampler read.
+pub fn draw(self: const GpuMesh, w: Window, shader: Shader, t0: const Texture? = null, t1: const Texture? = null) {
+  drawn(self, w, shader, DRAW_TRIANGLES, false, false, null, 0, 0, t0, t1);
 }
 
-// --- Render state: what the next draws do with depth, blending, faces and the frame's area ---
-//
-// The codes are 0.9's: `GL_DEPTH_TEST`, `GL_BLEND`, `GL_CULL_FACE`, `GL_SCISSOR_TEST` for
-// `enable`/`disable`, the `BLEND_*` factors for `blend`.  A window opens with the depth test on.
-
-fn gg_capability(win: integer, cap: integer, on: integer);
-#c "gg_capability" "void(int64_t, int64_t, int64_t)"
-fn gg_capability_on(win: integer, cap: integer) -> integer;
-#c "gg_capability_on" "int64_t(int64_t, int64_t)"
-fn gg_blend(win: integer, src: integer, dst: integer);
-#c "gg_blend" "void(int64_t, int64_t, int64_t)"
-fn gg_cull(win: integer, face: integer);
-#c "gg_cull" "void(int64_t, int64_t)"
-fn gg_depth_write(win: integer, on: integer);
-#c "gg_depth_write" "void(int64_t, int64_t)"
-fn gg_viewport(win: integer, x: integer, y: integer, width: integer, height: integer);
-#c "gg_viewport" "void(int64_t, int64_t, int64_t, int64_t, int64_t)"
-fn gg_scissor(win: integer, x: integer, y: integer, width: integer, height: integer);
-#c "gg_scissor" "void(int64_t, int64_t, int64_t, int64_t, int64_t)"
-fn gg_finish(win: integer);
-#c "gg_finish" "void(int64_t)"
-fn gg_line_width(win: integer, width: const vector<float>);
-#c "gg_line_width" "void(int64_t, const loft_float*, int64_t)"
-fn gg_point_size(win: integer, size: const vector<float>);
-#c "gg_point_size" "void(int64_t, const loft_float*, int64_t)"
-
-// Turn a capability on: `GL_DEPTH_TEST`, `GL_BLEND`, `GL_CULL_FACE` or `GL_SCISSOR_TEST`.
-pub fn enable(self: const Window, cap: integer) {
-  gg_capability(self.handle, cap, 1);
+// The same as `mode`: `DRAW_TRIANGLES`, `DRAW_LINES` or `DRAW_POINTS`.
+pub fn draw_mode(self: const GpuMesh, w: Window, shader: Shader, mode: integer, t0: const Texture? = null, t1: const Texture? = null) {
+  drawn(self, w, shader, mode, false, false, null, 0, 0, t0, t1);
 }
 
-// And off.
-pub fn disable(self: const Window, cap: integer) {
-  gg_capability(self.handle, cap, 0);
+// Draw through the list `indices` gave.
+pub fn draw_indexed(self: const GpuMesh, w: Window, shader: Shader, mode: integer, t0: const Texture? = null, t1: const Texture? = null) {
+  drawn(self, w, shader, mode, false, true, null, 0, 0, t0, t1);
 }
 
-// Whether `GL_DEPTH_TEST`, `GL_BLEND`, `GL_CULL_FACE` or `GL_SCISSOR_TEST` is on — for a pass that
-// changes one and hands the window back as it found it.  A window opens with depth testing on.
-pub fn enabled(self: const Window, cap: integer) -> boolean {
-  gg_capability_on(self.handle, cap) != 0
+// Draw the mesh `copies` times, each copy reading its record of `records` from float `first` on,
+// by the inputs `instance_attrib` declared.
+pub fn draw_instanced(
+  self: const GpuMesh,
+  w: Window,
+  shader: Shader,
+  records: const InstanceBuffer,
+  copies: integer,
+  first: integer = 0,
+  t0: const Texture? = null,
+  t1: const Texture? = null
+) {
+  drawn(self, w, shader, DRAW_TRIANGLES, false, false, records, first, copies, t0, t1);
 }
 
-// How a blended draw combines with the frame: `w.blend(BLEND_SRC_ALPHA, BLEND_ONE_MINUS_SRC_ALPHA)`.
-pub fn blend(self: const Window, src: integer, dst: integer) {
-  gg_blend(self.handle, src, dst);
+// The per-copy inputs of a mesh as a program lists them (in the order of their offsets), and
+// the moves that put the shader's own locations where `gpu` numbers them: after the per-vertex
+// inputs.
+fn copies_of(self: const GpuMesh, kinds: vector<integer>, moves: vector<integer>) {
+  taken: vector<boolean> = [for _ in 0..len(self.per_copy) / 3 { false }];
+  for _ in 0..len(self.per_copy) / 3 {
+    best = -1;
+    for at in 0..len(self.per_copy) / 3 {
+      if taken[at] ?? true { continue; }
+      if best < 0 || (self.per_copy[3 * at + 2] ?? 0) < (self.per_copy[3 * best + 2] ?? 0) { best = at; }
+    }
+    if best < 0 { break; }
+    taken[best] = true;
+    moves += [self.per_copy[3 * best] ?? 0, len(self.inputs) + len(kinds)];
+    kinds += [self.per_copy[3 * best + 1] ?? 1];
+  }
 }
 
-// Which faces `GL_CULL_FACE` drops: 0 the back (counter-clockwise is the front), 1 the front.
-pub fn cull(self: const Window, face: integer) {
-  gg_cull(self.handle, face);
-}
-
-// Whether draws write the depth buffer (they still test it while `GL_DEPTH_TEST` is on).
-pub fn depth_write(self: const Window, on: boolean) {
-  gg_depth_write(self.handle, if on { 1 } else { 0 });
-}
-
-// The rectangle draws map onto, origin bottom-left.  `poll` resets it to the whole window on a
-// resize.
-pub fn viewport(self: const Window, x: integer, y: integer, width: integer, height: integer) {
-  gg_viewport(self.handle, x, y, width, height);
-}
-
-// The rectangle `GL_SCISSOR_TEST` clips to, origin bottom-left.
-pub fn scissor(self: const Window, x: integer, y: integer, width: integer, height: integer) {
-  gg_scissor(self.handle, x, y, width, height);
-}
-
-// Wait until every draw so far has finished.  A stall: for a test or a screenshot, not a frame.
-pub fn finish(self: const Window) {
-  gg_finish(self.handle);
-}
-
-// The width of lines drawn with `DRAW_LINES`.
-pub fn line_width(self: const Window, width: float) {
-  gg_line_width(self.handle, [width]);
-}
-
-// The size of points drawn with `DRAW_POINTS`.
-pub fn point_size(self: const Window, size: float) {
-  gg_point_size(self.handle, [size]);
+// One draw, as `gpu` has it: the pipeline for this shader with the window's render state, this
+// mesh's layout and the target's kind (made the first time it is needed); a pass that is open;
+// and everything the draw reads named inside it.
+fn drawn(
+  mesh: const GpuMesh,
+  w: Window,
+  shader: Shader,
+  mode: integer,
+  over: boolean,
+  indexed: boolean,
+  records: const InstanceBuffer?,
+  first: integer,
+  copies: integer,
+  t0: const Texture?,
+  t1: const Texture?
+) {
+  state = state_of(w.kept, mode, w.into, over);
+  kinds: vector<integer> = [];
+  moves: vector<integer> = [];
+  if records != null { copies_of(mesh, kinds, moves); }
+  key = "{key_of(state)}/{mesh.inputs}/{kinds}{moves}";
+  found = -1;
+  for m in shader.made { if m.key == key { found = m#index; } }
+  if found < 0 {
+    prog = gpu::Program {
+      vertex: mesh.inputs,
+      instance: kinds,
+      block: block_of(shader.uniforms),
+      textures: samplers_of(shader.uniforms),
+      sources: [gpu::source("glsl-330", with_locations(shader.vertex, moves), shader.fragment)],
+    };
+    pipe = w.dev.pipeline(prog, state) ?? return;
+    found = len(shader.made);
+    shader.made += [Made { key: key, pipe: pipe }];
+  }
+  made = shader.made[found] ?? return;
+  w.ready();
+  w.dev.bind(made.pipe);
+  if len(block_of(shader.uniforms)) > 0 { w.dev.uniforms(shader.block); }
+  if t0 != null { w.dev.sample(0, t0.t); }
+  if t1 != null { w.dev.sample(1, t1.t); }
+  w.dev.vertices(mesh.buffer);
+  if records != null { w.dev.instances(records.buffer, first); }
+  if indexed {
+    order = mesh.order[0] ?? return;
+    w.dev.indices(order);
+    w.dev.draw_indexed(order.count());
+  } else if records != null {
+    w.dev.draw_copies(mesh.vertices, copies);
+  } else {
+    w.dev.draw(0, mesh.vertices);
+  }
 }
 
 // --- Textures and framebuffers: images on the GPU, and drawing into them ---
-//
-//   colour = w.texture(256, 256);                // empty RGBA
-//   target = w.framebuffer();
-//   target.attach(colour);
-//   w.render_to(target);  w.viewport(0, 0, 256, 256);  …draws…
-//   w.render_to_window(); w.viewport(0, 0, w.width(), w.height());
-//   colour.bind(0);  s.set_int("image", 0);  w.quad().draw(s);
-//
-// Each belongs to its window and is deleted when it dies, like a shader or a mesh.  A texture
-// attached to a framebuffer stays usable after the framebuffer is gone, and the other way round.
 
-fn gg_texture(win: integer, width: integer, height: integer, depth: integer) -> integer;
-#c "gg_texture" "int64_t(int64_t, int64_t, int64_t, int64_t)"
-fn gg_texture_from(win: integer, px: const vector<u32>, width: integer, height: integer) -> integer;
-#c "gg_texture_from" "int64_t(int64_t, const uint32_t*, int64_t, int64_t, int64_t)"
-fn gg_texture_put(
-  tex: integer,
-  x: integer,
-  y: integer,
-  width: integer,
-  height: integer,
-  px: const vector<u32>
-);
-#c "gg_texture_put" "void(int64_t, int64_t, int64_t, int64_t, int64_t, const uint32_t*, int64_t)"
-fn gg_texture_filter(tex: integer, nearest: integer);
-#c "gg_texture_filter" "void(int64_t, int64_t)"
-fn gg_texture_mipmaps(tex: integer);
-#c "gg_texture_mipmaps" "void(int64_t)"
-fn gg_texture_bind(tex: integer, unit: integer);
-#c "gg_texture_bind" "void(int64_t, int64_t)"
-fn gg_texture_size(tex: integer, which: integer) -> integer;
-#c "gg_texture_size" "int64_t(int64_t, int64_t)"
-fn gg_framebuffer(win: integer) -> integer;
-#c "gg_framebuffer" "int64_t(int64_t)"
-fn gg_framebuffer_attach(fb: integer, tex: integer);
-#c "gg_framebuffer_attach" "void(int64_t, int64_t)"
-fn gg_render_to(win: integer, fb: integer);
-#c "gg_render_to" "void(int64_t, int64_t)"
-fn gg_quad(win: integer) -> integer;
-#c "gg_quad" "int64_t(int64_t)"
-
-// An image on the GPU: colour (RGBA, 8 bits a channel) or depth (32-bit float).
+// An image on the GPU.
 pub struct Texture {
-  handle: integer,
+  t: gpu::Texture,
 }
 
-fn OpDrop(self: Texture) {
-  if self.handle != 0 { gg_release(self.handle); }
+// An empty colour texture, sampled between its pixels and clamped at its edges.
+pub fn texture(self: Window, width: integer, height: integer) -> Texture {
+  Texture { t: self.dev.texture(width, height) }
 }
 
-// An empty colour texture, filtered linearly — a render target.
-pub fn texture(self: const Window, width: integer, height: integer) -> Texture {
-  Texture { handle: gg_texture(self.handle, width, height, 0) }
+// An empty depth texture: the depth of a framebuffer, or a shadow map.
+pub fn depth_texture(self: Window, width: integer, height: integer) -> Texture {
+  Texture { t: self.dev.depth_texture(width, height) }
 }
 
-// An empty depth texture, filtered to the nearest texel and clamped at its edges — the depth of a
-// render target, or a shadow map.
-pub fn depth_texture(self: const Window, width: integer, height: integer) -> Texture {
-  Texture { handle: gg_texture(self.handle, width, height, 1) }
+// A canvas as a colour texture, its top row at texture coordinate 0.
+pub fn texture_from(self: Window, image: const Canvas) -> Texture {
+  Texture { t: self.dev.texture_from(image.data, image.width, image.height) }
 }
 
-// A colour texture holding a canvas's pixels, filtered linearly and clamped at its edges.  The
-// canvas's row 0 is the texture's row 0, which GL places at the bottom (texture coordinate 0).
-pub fn texture_from(self: const Window, image: const Canvas) -> Texture {
-  Texture { handle: gg_texture_from(self.handle, image.data, image.width, image.height) }
-}
-
-// Its width in texels.
 pub fn width(self: const Texture) -> integer {
-  gg_texture_size(self.handle, 0)
+  self.t.width()
 }
 
-// And its height.
 pub fn height(self: const Texture) -> integer {
-  gg_texture_size(self.handle, 1)
+  self.t.height()
 }
 
-// Replace the region at (`x`, `y`) — origin bottom-left — with a canvas's pixels.
+// Write `image` into the texture with its top-left at (x, y).
 pub fn put(self: const Texture, x: integer, y: integer, image: const Canvas) {
-  gg_texture_put(self.handle, x, y, image.width, image.height, image.data);
+  self.t.put(x, y, image.data, image.width, image.height);
 }
 
-// Sample the nearest texel (pixel art), or interpolate between texels (the default).
+// Sample the nearest pixel (`true`) or between pixels.
 pub fn filter(self: const Texture, nearest: boolean) {
-  gg_texture_filter(self.handle, if nearest { 1 } else { 0 });
+  self.t.nearest(nearest);
 }
 
-// Build mipmaps from the current pixels and minify through them; call again after `put`.
+// Build the smaller copies a shrunk texture is sampled from.
 pub fn mipmaps(self: const Texture) {
-  gg_texture_mipmaps(self.handle);
+  self.t.mipmaps();
 }
 
-// Bind to texture unit `unit`; a `sampler2D` uniform set to `unit` then reads it.
-pub fn bind(self: const Texture, unit: integer) {
-  gg_texture_bind(self.handle, unit);
-}
-
-// A target for draws other than the window: textures attached as its colour and depth.
+// Something to draw into other than the window: a colour texture, a colour and a depth
+// texture, or a depth texture alone.
 pub struct Framebuffer {
-  handle: integer,
+  target: gpu::Target,
+  into: integer,
+  w: integer,
+  h: integer,
 }
 
-fn OpDrop(self: Framebuffer) {
-  if self.handle != 0 { gg_release(self.handle); }
+// A framebuffer that draws into `colour`, with no depth.
+pub fn framebuffer(self: Window, colour: const Texture) -> Framebuffer {
+  Framebuffer { target: self.dev.colour_target(colour.t), into: gpu::INTO_COLOUR, w: colour.t.width(), h: colour.t.height() }
 }
 
-// An empty framebuffer; attach textures before drawing into it.
-pub fn framebuffer(self: const Window) -> Framebuffer {
-  Framebuffer { handle: gg_framebuffer(self.handle) }
+// A framebuffer that draws into `colour` and keeps its depth in `depth`, of one size.
+pub fn framebuffer_with_depth(self: Window, colour: const Texture, depth: const Texture) -> Framebuffer {
+  Framebuffer { target: self.dev.target(colour.t, depth.t), into: gpu::INTO_COLOUR_DEPTH, w: colour.t.width(), h: colour.t.height() }
 }
 
-// Attach `t`: a depth texture as the depth buffer, a colour texture as the colour.  With only a
-// depth texture the framebuffer draws no colour (a depth-only pass).
-pub fn attach(self: const Framebuffer, t: const Texture) {
-  gg_framebuffer_attach(self.handle, t.handle);
+// A framebuffer of a depth texture alone: no colour is drawn.
+pub fn depth_framebuffer(self: Window, depth: const Texture) -> Framebuffer {
+  Framebuffer { target: self.dev.depth_target(depth.t), into: gpu::INTO_DEPTH, w: depth.t.width(), h: depth.t.height() }
 }
 
-// Draw into `target` from now on — set the viewport to its size.  Dropping the framebuffer that
-// is the target sends the draws back to the window.
-pub fn render_to(self: const Window, target: const Framebuffer) {
-  gg_render_to(self.handle, target.handle);
+// Draw into `target` from now on, keeping what it holds, until `render_to_window`, `swap` or
+// `capture`.  The viewport stays the one the window was told, or the window's own size.
+pub fn render_to(self: Window, target: const Framebuffer) {
+  self.settled();
+  self.into = target.into;
+  self.into_w = target.w;
+  self.into_h = target.h;
+  enter(self.dev, self.pass, self.kept, target.target, self.dev.width(), self.dev.height());
 }
 
 // Draw into the window again.
-pub fn render_to_window(self: const Window) {
-  gg_render_to(self.handle, 0);
+pub fn render_to_window(self: Window) {
+  self.settled();
 }
 
 // Load a PNG file as a colour texture (filtered linearly, clamped at its edges), its top row at
 // texture coordinate 0 as a canvas uploads.  Any PNG colour type loads; 16-bit channels keep their
 // high byte.  A relative path resolves against the program's own directory, as `load_font`'s.
 // Null when the file is missing or is not a PNG this decoder reads.
-pub fn load_texture(self: const Window, path: text) -> Texture? {
+pub fn load_texture(self: Window, path: text) -> Texture? {
   full = path;
   if !path.starts_with("/") {
     dir = source_dir();
@@ -1552,31 +1629,24 @@ pub fn load_texture(self: const Window, path: text) -> Texture? {
 }
 
 // `content` drawn with `font` at `size` pixels to the em, in `color`, as a texture: the text with
-// 2 pixels of transparent margin around it — what 0.9's `create_text_texture` made, for
-// `Painter.image`.
-pub fn text_texture(self: const Window, font: const Font, content: text, size: float, color: integer) -> Texture {
+// 2 pixels of transparent margin around it, for `Painter.image`.
+pub fn text_texture(self: Window, font: const Font, content: text, size: float, color: integer) -> Texture {
   pad = 2;
   cv = canvas(font.measure(content, size) as integer + pad * 2 + 1, font.line_height(size) + pad * 2, 0);
   cv.draw_text(font, content, size, pad, pad, color);
   self.texture_from(cv)
 }
 
-// Two triangles covering the whole target: a `vec2` position at location 0 and a `vec2` texture
-// coordinate at location 1 — for a post-processing pass, or to show a texture.
-pub fn quad(self: const Window) -> GpuMesh {
-  GpuMesh { handle: gg_quad(self.handle) }
-}
-
 // --- 2D drawing on a window: rectangles, images and sprites at pixel positions ---
 //
 //   p = w.painter() ?? return;              // origin top-left, y down, sized to the window
-//   p.rect(10.0, 10.0, 100.0, 20.0, 1.0, 0.5, 0.0, 1.0);
-//   p.image(icon, 120.0, 10.0, 32.0, 32.0);
+//   p.rect(w, 10.0, 10.0, 100.0, 20.0, 1.0, 0.5, 0.0, 1.0);
+//   p.image(w, icon, 120.0, 10.0, 32.0, 32.0);
 //   for ev in w.events() { match ev { Resize { width, height } => p.resize(width, height), _ => {} } }
 //
-// Each holds its own shaders and quad, released when it dies.  A painter draws in call order over
-// whatever the frame holds: the depth test is off for each of its draws and as it was after, so a
-// later rectangle covers an earlier one and a HUD is never hidden behind a 3-D scene.
+// A painter draws in call order over whatever the frame holds: its draws are not tested against
+// the depth that is there, so a later rectangle covers an earlier one and a HUD is never hidden
+// behind a 3-D scene.
 
 // Shaders and a unit quad for drawing at pixel positions.
 pub struct Painter {
@@ -1605,7 +1675,7 @@ fn unit_quad() -> vector<single> {
 }
 
 // A painter for this window, sized to it.  Null when its shaders do not compile.
-pub fn painter(self: const Window) -> Painter? {
+pub fn painter(self: Window) -> Painter? {
   flat = self.shader(FLAT_VERT_2D, FLAT_FRAG_2D) ?? return null;
   tex = self.shader(TEX_VERT_2D, TEX_FRAG_2D) ?? return null;
   Painter {
@@ -1621,43 +1691,44 @@ pub fn resize(self: Painter, width: integer, height: integer) {
   self.proj = pixel_projection(width, height);
 }
 
-// A filled rectangle at (x, y) of `w` x `h` pixels, channels 0.0-1.0; the alpha blends where the
-// window has `GL_BLEND` on.
+// A filled rectangle at (x, y) of `wide` x `high` pixels, channels 0.0-1.0; the alpha blends
+// where the window has `GL_BLEND` on.
 pub fn rect(
-  self: const Painter,
+  self: Painter,
+  w: Window,
   x: float,
   y: float,
-  w: float,
-  h: float,
+  wide: float,
+  high: float,
   r: float,
   g: float,
   b: float,
   a: float
 ) {
-  self.flat.set_mat4("uMVP", build_mvp_2d(self.proj, x, y, w, h));
+  self.flat.set_mat4("uMVP", build_mvp_2d(self.proj, x, y, wide, high));
   self.flat.set_vec4("uColor", r, g, b, a);
-  gg_draw_over(self.quad.handle, self.flat.handle);
+  drawn(self.quad, w, self.flat, DRAW_TRIANGLES, true, false, null, 0, 0, null, null);
 }
 
-// A texture stretched over (x, y) of `w` x `h` pixels; fully transparent texels are not drawn.
-pub fn image(self: const Painter, t: const Texture, x: float, y: float, w: float, h: float) {
-  t.bind(0);
-  self.tex.set_int("uTex", 0);
-  self.tex.set_mat4("uMVP", build_mvp_2d(self.proj, x, y, w, h));
-  gg_draw_over(self.quad.handle, self.tex.handle);
+// A texture stretched over (x, y) of `wide` x `high` pixels; fully transparent texels are not
+// drawn.
+pub fn image(self: Painter, w: Window, t: const Texture, x: float, y: float, wide: float, high: float) {
+  self.tex.set_mat4("uMVP", build_mvp_2d(self.proj, x, y, wide, high));
+  drawn(self.quad, w, self.tex, DRAW_TRIANGLES, true, false, null, 0, 0, t, null);
 }
 
-// Sprite `index` of `sheet` over (x, y) of `w` x `h` pixels.
+// Sprite `index` of `sheet` over (x, y) of `wide` x `high` pixels.
 pub fn sprite(
-  self: const Painter,
-  sheet: const Sprites,
+  self: Painter,
+  w: Window,
+  sheet: Sprites,
   x: float,
   y: float,
-  w: float,
-  h: float,
+  wide: float,
+  high: float,
   index: integer
 ) {
-  sheet.draw_cell(build_mvp_2d(self.proj, x, y, w, h), index, true);
+  sheet.draw_cell(w, build_mvp_2d(self.proj, x, y, wide, high), index, true);
 }
 
 // A canvas atlas on the GPU, cut into a grid of `cols` x `rows` sprites; sprite 0 is the top left,
@@ -1672,7 +1743,7 @@ pub struct Sprites {
 
 // Upload `atlas` as a sprite sheet of `cols` x `rows` cells.  Null when its shader does not
 // compile.
-pub fn sprites(self: const Window, atlas: const Canvas, cols: integer, rows: integer) -> Sprites? {
+pub fn sprites(self: Window, atlas: const Canvas, cols: integer, rows: integer) -> Sprites? {
   sh = self.shader(SPRITE_VERT, SPRITE_FRAG) ?? return null;
   Sprites {
     texture: self.texture_from(atlas),
@@ -1685,26 +1756,24 @@ pub fn sprites(self: const Window, atlas: const Canvas, cols: integer, rows: int
 
 // Draw sprite `index` through `mvp`, which maps the unit quad onto the target (16 floats,
 // column-major).
-pub fn draw(self: const Sprites, mvp: const vector<float>, index: integer) {
-  self.draw_cell(mvp, index, false);
+pub fn draw(self: Sprites, w: Window, mvp: const vector<float>, index: integer) {
+  self.draw_cell(w, mvp, index, false);
 }
 
 // `draw`, or with `over` the 2-D draw `Painter.sprite` makes: in call order, whatever the depth.
-fn draw_cell(self: const Sprites, mvp: const vector<float>, index: integer, over: boolean) {
+fn draw_cell(self: Sprites, w: Window, mvp: const vector<float>, index: integer, over: boolean) {
   if self.cols <= 0 || self.rows <= 0 { return; }
   // the divisors are positive (checked above), so no `??` default is ever taken
   col = (index % self.cols) ?? 0;
   row = (index / self.cols) ?? 0;
   cols = self.cols as float;
   rows = self.rows as float;
-  self.texture.bind(0);
-  self.shader.set_int("uTex", 0);
   self.shader.set_float("uU0", (col as float / cols) ?? 0.0);
   self.shader.set_float("uV0", (row as float / rows) ?? 0.0);
   self.shader.set_float("uU1", ((col + 1) as float / cols) ?? 0.0);
   self.shader.set_float("uV1", ((row + 1) as float / rows) ?? 0.0);
   self.shader.set_mat4("uMVP", mvp);
-  if over { gg_draw_over(self.quad.handle, self.shader.handle); } else { self.quad.draw(self.shader); }
+  drawn(self.quad, w, self.shader, DRAW_TRIANGLES, over, false, null, 0, 0, self.texture, null);
 }
 
 // A mesh in groups, each re-uploaded on its own: after an edit only the groups whose geometry
@@ -1736,7 +1805,7 @@ pub fn group_meshes(stride: integer, mode: integer) -> GroupMeshes {
 // reused).  No vertices empties the group.
 pub fn upsert(
   self: GroupMeshes,
-  w: const Window,
+  w: Window,
   gk: integer,
   verts: const vector<single>,
   min_x: single,
@@ -1778,8 +1847,8 @@ pub fn count(self: const GroupMeshes) -> integer {
 }
 
 // Draw every group with `shader`.
-pub fn draw_all(self: const GroupMeshes, shader: const Shader) {
-  for m in self.meshes { m.draw_mode(shader, self.mode); }
+pub fn draw_all(self: const GroupMeshes, w: Window, shader: Shader) {
+  for m in self.meshes { m.draw_mode(w, shader, self.mode); }
 }
 
 // --- Event tags, modifiers and the named keys ---

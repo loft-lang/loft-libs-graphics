@@ -2,18 +2,17 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 //
 // A program that draws its own textured quad with a painter's shader (crawler's view) reads the
-// painter's textured shader and unit quad, and binds a sprite sheet's texture: those fields are
+// painter's textured shader and unit quad, and reads a sprite sheet's texture: those fields are
 // `pub`.  Building a painter needs a window, so the check is that this file COMPILES — outside the
 // file that declares it, a field without `pub` is refused.
 use graphics::*;
 
-fn quad_draw(p: const Painter) {
-  p.tex.set_int("uTex", 0);
-  p.quad.draw(p.tex);
+fn quad_draw(w: Window, p: Painter, s: const Sprites) {
+  p.quad.draw(w, p.tex, s.texture);
 }
 
-fn sheet_texture(s: const Sprites) {
-  s.texture.bind(0);
+fn sheet_texture(s: const Sprites) -> integer {
+  s.texture.width()
 }
 
 fn test_a_custom_draw_reads_the_painter_and_sheet_objects() {
