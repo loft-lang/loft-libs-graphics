@@ -15,6 +15,7 @@
  *   - the sampler of texture slot n is named `tex<n>` (`tex0`, `tex1`, ...). */
 #include "gl_base.h"
 #include "gpu/gpu_backend.h"
+#include "checked.h" /* GPU_GL_CHECKED or nothing: c/checked.sh sets it for a checked test run */
 
 #if defined(GQ_X11) || defined(GQ_COCOA) || defined(GQ_BROWSER) || defined(GQ_ANDROID)
 
@@ -34,6 +35,14 @@ typedef struct {
     void (*glGetActiveUniformsiv)(unsigned, int, const unsigned *, unsigned, int *);
     /* What a draw's depth is compared by; NULL in a page, which gives this library none. */
     void (*glDepthFunc)(unsigned);
+#if defined(GPU_GL_CHECKED)
+    /* For the checked build: the error a call left, and the driver's own messages where it has
+     * them (KHR_debug: Mesa, not Apple's OpenGL).  NULL in a page. */
+    unsigned (*glGetError)(void);
+    void (*glDebugMessageCallback)(void (*)(unsigned, unsigned, unsigned, unsigned, int,
+                                            const char *, const void *),
+                                   const void *);
+#endif
 } gq_block_api;
 
 #if defined(GQ_BROWSER)
@@ -99,6 +108,10 @@ static int gq_bind_block_api(gq_dev *d) {
 #endif
 #if !defined(GQ_BROWSER)
     (void) GQ_MORE(glDepthFunc);
+#if defined(GPU_GL_CHECKED)
+    (void) GQ_MORE(glGetError);
+    (void) GQ_MORE(glDebugMessageCallback);
+#endif
 #endif
     return GQ_MORE(glUniformBlockBinding) && GQ_MORE(glBindBufferBase) &&
            GQ_MORE(glGetActiveUniformBlockiv) && GQ_MORE(glGetActiveUniformsiv);
@@ -147,6 +160,174 @@ static gq_pipe *gq_pipe_of(int64_t h) {
     return NULL;
 }
 
+/* ── the checked build ─────────────────────────────────────────────────────────────────────── */
+
+#if defined(GPU_GL_CHECKED)
+/* Compiled in only when `c/checked.h` defines GPU_GL_CHECKED (`c/checked.sh`): the library as it
+ * ships holds none of this and pays nothing for it.  In a checked build every call of the table
+ * that reaches OpenGL is followed by a look at the error OpenGL kept, the driver's own messages
+ * are turned on where it has them, and every handle a call uses is looked up first; each fault
+ * is counted and written to stderr with the call it came from.  OpenGL takes a wrong call in
+ * silence, so without this a mistake here shows as a wrong picture or not at all.
+ * `GPU_GL_DEBUG=0` turns the checks of a checked build off, `abort` stops the program at the
+ * first fault; `gq_check` does the first from the program. */
+static int gq_checking = -1; /* -1 not asked yet, 0 off, 1 report, 2 abort */
+static int64_t gq_fault_count = 0;
+static const char *gq_now = "";       /* the table call being made */
+static unsigned (*gq_error_of)(void); /* glGetError of the device opened last */
+static int gq_driver_talks = 0;       /* the driver reports its own errors: do not count twice */
+
+static int gq_check_mode(void) {
+    if (gq_checking < 0) {
+        const char *e = getenv("GPU_GL_DEBUG");
+        gq_checking = e && !strcmp(e, "0") ? 0 : e && !strcmp(e, "abort") ? 2 : 1;
+    }
+    return gq_checking;
+}
+
+void gq_check(int64_t on) {
+    if (on) { if (gq_check_mode() == 0) gq_checking = 1; } else gq_checking = 0;
+}
+
+int64_t gq_faults(void) {
+    return gq_fault_count;
+}
+
+static void gq_fault(const char *what, const char *detail) {
+    gq_fault_count++;
+    fprintf(stderr, "gpu_gl: OpenGL %s in `%s`%s%s\n", what, gq_now, detail ? ": " : "",
+            detail ? detail : "");
+    if (gq_checking == 2) abort();
+}
+
+/* The driver's own word on a call (KHR_debug).  An error, undefined behaviour, and what is
+ * deprecated or not portable are faults; its notes on speed and its notices are not. */
+static void gq_driver_said(unsigned source, unsigned type, unsigned id, unsigned severity,
+                           int length, const char *message, const void *user) {
+    (void) source; (void) id; (void) severity; (void) length; (void) user;
+    if (type == 0x824C) gq_fault("error", message);
+    else if (type == 0x824E) gq_fault("undefined behaviour", message);
+    else if (type == 0x824D) gq_fault("deprecated use", message);
+    else if (type == 0x824F) gq_fault("unportable use", message);
+}
+
+static const char *gq_error_name(unsigned e) {
+    switch (e) {
+    case 0x0500: return "error (invalid enum)";
+    case 0x0501: return "error (invalid value)";
+    case 0x0502: return "error (invalid operation)";
+    case 0x0505: return "error (out of memory)";
+    case 0x0506: return "error (invalid framebuffer operation)";
+    default: return "error";
+    }
+}
+
+/* After a table call: take every error OpenGL kept.  Where the driver talks they were reported
+ * as they happened, with its own text. */
+static void gq_after(void) {
+    int i;
+    if (gq_error_of) {
+        for (i = 0; i < 16; i++) {
+            unsigned e = gq_error_of();
+            if (!e) break;
+            if (!gq_driver_talks) gq_fault(gq_error_name(e), NULL);
+        }
+    }
+    gq_now = "";
+}
+
+/* What the checked mode knows of every handle this backend gave out: which device made it, what
+ * it is, and whether it was released or its device closed.  A released handle is a freed
+ * pointer; used again it reads memory that may hold anything, and nothing says so.  Here the
+ * call is refused and named instead.  An address the allocator gives out again is a new handle
+ * and reads as live: what is caught is every use between a release and that. */
+typedef struct {
+    int64_t h, dev;
+    const char *kind;
+    const char *ended_in; /* the call that released it; NULL while live */
+    int closed;           /* its device closed: only its release is in order */
+} gq_known;
+static gq_known *gq_knowns = NULL;
+static int gq_known_n = 0, gq_known_room = 0;
+
+static gq_known *gq_known_of(int64_t h) {
+    int i;
+    for (i = 0; i < gq_known_n; i++) {
+        if (gq_knowns[i].h == h) return &gq_knowns[i];
+    }
+    return NULL;
+}
+
+static int64_t gq_born(int64_t h, int64_t dev, const char *kind) {
+    gq_known *k;
+    if (!h) return h;
+    k = gq_known_of(h);
+    if (!k) {
+        if (gq_known_n == gq_known_room) {
+            int room = gq_known_room ? gq_known_room * 2 : 64;
+            gq_known *more = (gq_known *) realloc(gq_knowns, (size_t) room * sizeof(gq_known));
+            if (!more) return h;
+            gq_knowns = more;
+            gq_known_room = room;
+        }
+        k = &gq_knowns[gq_known_n++];
+    }
+    k->h = h;
+    k->dev = dev;
+    k->kind = kind;
+    k->ended_in = NULL;
+    k->closed = 0;
+    return h;
+}
+
+/* Whether a call may use handle `h` (0 is "none" and always may). */
+static int gq_live(int64_t h) {
+    gq_known *k = h ? gq_known_of(h) : NULL;
+    char why[160];
+    if (!h) return 1;
+    if (!k) {
+        gq_fault("misuse", "a handle this backend never gave out");
+        return 0;
+    }
+    if (k->ended_in) {
+        snprintf(why, sizeof why, "a %s used after `%s` released it", k->kind, k->ended_in);
+        gq_fault("misuse", why);
+        return 0;
+    }
+    if (k->closed) {
+        snprintf(why, sizeof why, "a %s used after its device closed", k->kind);
+        gq_fault("misuse", why);
+        return 0;
+    }
+    return 1;
+}
+
+/* A release: once, and also in order after the device closed. */
+static int gq_may_release(int64_t h) {
+    gq_known *k = h ? gq_known_of(h) : NULL;
+    char why[160];
+    if (!h) return 0;
+    if (!k) {
+        gq_fault("misuse", "the release of a handle this backend never gave out");
+        return 0;
+    }
+    if (k->ended_in) {
+        snprintf(why, sizeof why, "a %s released twice (first in `%s`)", k->kind, k->ended_in);
+        gq_fault("misuse", why);
+        return 0;
+    }
+    k->ended_in = gq_now;
+    return 1;
+}
+
+static void gq_device_closed(int64_t dev) {
+    int i;
+    for (i = 0; i < gq_known_n; i++) {
+        if (gq_knowns[i].dev == dev) gq_knowns[i].closed = 1;
+    }
+}
+#endif /* GPU_GL_CHECKED */
+
 /* ── the host part ─────────────────────────────────────────────────────────────────────────── */
 
 static int64_t gq_t_open(int64_t width, int64_t height, const char *title, int64_t fullscreen) {
@@ -161,6 +342,20 @@ static int64_t gq_t_open(int64_t width, int64_t height, const char *title, int64
     d->w = gq_of(h);
     d->more_ok = gq_bind_block_api(d);
     gq_note_renderer(d);
+#if defined(GPU_GL_CHECKED)
+    if (gq_check_mode()) {
+        gq_error_of = d->more.glGetError;
+        gq_driver_talks = 0;
+        if (d->more.glDebugMessageCallback) {
+            d->w->api.glEnable(0x92E0); /* GL_DEBUG_OUTPUT */
+            d->w->api.glEnable(0x8242); /* GL_DEBUG_OUTPUT_SYNCHRONOUS: reported inside the call */
+            d->more.glDebugMessageCallback(gq_driver_said, NULL);
+            /* a driver without the extension leaves an error for the enables; then it is silent */
+            gq_driver_talks = !d->more.glGetError || d->more.glGetError() == 0;
+            if (d->more.glGetError) while (d->more.glGetError()) {}
+        }
+    }
+#endif
 #if defined(GQ_X11)
     *(void **) (&d->copy_tex) =
         d->w->xa.glXGetProcAddressARB((const unsigned char *) "glCopyTexSubImage2D");
@@ -549,6 +744,10 @@ static void gq_t_release(int64_t h) {
                 if (p->ubo) w->api.glDeleteBuffers(1, &p->ubo);
             }
             gq_release((int64_t) (intptr_t) p->shader);
+#if defined(GPU_GL_CHECKED)
+            /* what is read of it after this is nothing a draw could take for real */
+            if (gq_checking > 0) memset(p, 0xDD, sizeof *p);
+#endif
             free(p);
             return;
         }
@@ -738,9 +937,126 @@ static const gpu_backend gq_tab = {
     gq_t_indices, gq_viewport, gq_t_scissor, gq_t_draw, gq_t_end, gq_t_present, gq_t_capture,
 };
 
+#if defined(GPU_GL_CHECKED)
+/* The checked table: each call that reaches OpenGL, then `gq_after`. */
+#define GQ_V(name, params, call)                                                                  \
+    static void gq_c_##name params {                                                             \
+        gq_now = #name;                                                                          \
+        call;                                                                                    \
+        gq_after();                                                                              \
+    }
+#define GQ_R(name, params, call)                                                                  \
+    static int64_t gq_c_##name params {                                                          \
+        int64_t r;                                                                               \
+        gq_now = #name;                                                                          \
+        r = call;                                                                                \
+        gq_after();                                                                              \
+        return r;                                                                                \
+    }
+/* The same with the handles a call uses looked up first (`gq_live`): a dead one is a fault and
+ * the call is not made. */
+#define GQ_VG(name, params, guard, call)                                                          \
+    static void gq_c_##name params {                                                             \
+        gq_now = #name;                                                                          \
+        if (guard) { call; }                                                                     \
+        gq_after();                                                                              \
+    }
+GQ_R(open, (int64_t w, int64_t h, const char *t, int64_t f), gq_t_open(w, h, t, f))
+static void gq_c_close(int64_t d) {
+    gq_device_closed(d);
+    gq_t_close(d);
+}
+GQ_R(buffer, (int64_t d, const float *p, int64_t n), gq_born(gq_t_buffer(d, p, n), d, "buffer"))
+GQ_R(index_buffer, (int64_t d, const int64_t *p, int64_t n), gq_born(gq_t_index_buffer(d, p, n), d, "index buffer"))
+GQ_VG(buffer_update, (int64_t b, const float *p, int64_t n), gq_live(b), gq_buffer_update(b, p, n))
+GQ_R(texture, (int64_t d, int64_t w, int64_t h, int64_t z), gq_born(gq_t_texture(d, w, h, z), d, "texture"))
+GQ_VG(texture_put, (int64_t t, int64_t x, int64_t y, int64_t w, int64_t h, const uint32_t *p, int64_t n),
+      gq_live(t), gq_t_texture_put(t, x, y, w, h, p, n))
+GQ_VG(texture_put565, (int64_t t, int64_t x, int64_t y, int64_t w, int64_t h, const int32_t *p, int64_t n),
+      gq_live(t), gq_t_texture_put565(t, x, y, w, h, p, n))
+GQ_VG(texture_nearest, (int64_t t, int64_t on), gq_live(t), gq_t_texture_nearest(t, on))
+GQ_VG(texture_mipmaps, (int64_t t), gq_live(t), gq_t_texture_mipmaps(t))
+static int64_t gq_c_target(int64_t d, int64_t c, int64_t z) {
+    int64_t r = 0;
+    gq_now = "target";
+    if (gq_live(c) && gq_live(z)) r = gq_born(gq_t_target(d, c, z), d, "target");
+    gq_after();
+    return r;
+}
+GQ_R(pipeline, (int64_t d, const gpu_program *p, const gpu_state *s), gq_born(gq_t_pipeline(d, p, s), d, "pipeline"))
+GQ_VG(release, (int64_t h), gq_may_release(h), gq_t_release(h))
+GQ_VG(begin, (int64_t d, int64_t t, int64_t l, int64_t c), gq_live(t), gq_t_begin(d, t, l, c))
+GQ_VG(bind, (int64_t d, int64_t p), gq_live(p), gq_t_use(d, p))
+GQ_V(uniforms, (int64_t d, const float *b, int64_t n), gq_t_uniforms(d, b, n))
+GQ_VG(sample, (int64_t d, int64_t sl, int64_t t), gq_live(t), gq_t_sample(d, sl, t))
+GQ_VG(vertices, (int64_t d, int64_t b), gq_live(b), gq_t_vertices(d, b))
+GQ_VG(instances, (int64_t d, int64_t b, int64_t f), gq_live(b), gq_t_instances(d, b, f))
+GQ_VG(indices, (int64_t d, int64_t b), gq_live(b), gq_t_indices(d, b))
+GQ_V(viewport, (int64_t d, int64_t x, int64_t y, int64_t w, int64_t h), gq_viewport(d, x, y, w, h))
+GQ_V(scissor, (int64_t d, int64_t x, int64_t y, int64_t w, int64_t h, int64_t on), gq_t_scissor(d, x, y, w, h, on))
+GQ_V(draw, (int64_t d, int64_t f, int64_t c, int64_t i, int64_t k), gq_t_draw(d, f, c, i, k))
+GQ_V(end, (int64_t d), gq_t_end(d))
+GQ_V(present, (int64_t d), gq_t_present(d))
+GQ_VG(capture, (int64_t d, int64_t t, uint32_t *o, int64_t n), gq_live(t), gq_t_capture(d, t, o, n))
+
+/* For this library's own tests: one buffer of the device opened last released twice and then
+ * given to a draw, straight through the checked table, as no program can through `gpu`.  The
+ * faults it adds (two, with the checks on) show the register catches them. */
+int64_t gq_check_self(void) {
+    static const float one[3] = {0.0f, 0.0f, 0.0f};
+    int64_t before = gq_fault_count, b;
+    int64_t dev = gq_devs ? (int64_t) (intptr_t) gq_devs->w : 0;
+    if (!dev || gq_check_mode() == 0 || gq_checking == 2) return 0;
+    b = gq_c_buffer(dev, one, 3);
+    gq_c_release(b);
+    gq_c_release(b);
+    gq_c_vertices(dev, b);
+    return gq_fault_count - before;
+}
+
+static const gpu_backend gq_tab_checked = {
+#if defined(GQ_BROWSER)
+    GPU_BACKEND_VERSION, "gpu_gl", "glsl-330",
+#else
+    GPU_BACKEND_WRITES_DEPTH, "gpu_gl", "glsl-330",
+#endif
+    gq_c_open, gq_poll, gq_event_count, gq_events, gq_t_size, gq_c_close,
+    gq_key_down, gq_mouse, gq_text_size, gq_text_copy,
+    gq_c_buffer, gq_c_index_buffer, gq_c_buffer_update, gq_c_texture, gq_c_texture_put,
+    gq_c_texture_put565,
+    gq_c_texture_nearest, gq_c_texture_mipmaps, gq_c_target, gq_c_pipeline, gq_c_release,
+    gq_c_begin, gq_c_bind, gq_c_uniforms, gq_c_sample, gq_c_vertices, gq_c_instances,
+    gq_c_indices, gq_c_viewport, gq_c_scissor, gq_c_draw, gq_c_end, gq_c_present, gq_c_capture,
+};
+
+int64_t gq_checked(void) {
+    return gq_check_mode() != 0;
+}
+#else /* the library as it ships: no check, and nothing to pay for one */
+
+void gq_check(int64_t on) {
+    (void) on;
+}
+
+int64_t gq_faults(void) {
+    return 0;
+}
+
+int64_t gq_checked(void) {
+    return 0;
+}
+
+int64_t gq_check_self(void) {
+    return 0;
+}
+#endif /* GPU_GL_CHECKED */
+
 /* This backend's table: OpenGL is looked for when a device opens, so the table is there on
  * every machine this file has a window host for, and `open` answers 0 where the stack is not. */
 int64_t gq_table(void) {
+#if defined(GPU_GL_CHECKED)
+    if (gq_check_mode()) return (int64_t) (intptr_t) &gq_tab_checked;
+#endif
     return (int64_t) (intptr_t) &gq_tab;
 }
 
@@ -752,6 +1068,22 @@ int64_t gq_table(void) {
 
 const char *gq_renderer(void) {
     return "";
+}
+
+void gq_check(int64_t on) {
+    (void) on;
+}
+
+int64_t gq_faults(void) {
+    return 0;
+}
+
+int64_t gq_checked(void) {
+    return 0;
+}
+
+int64_t gq_check_self(void) {
+    return 0;
 }
 
 #endif

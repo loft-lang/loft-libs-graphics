@@ -55,6 +55,35 @@ declaration: its size in whole vectors, and where each field starts.  A source t
 block out otherwise (a `vec3` field, a field too few) builds no pipeline, and stderr shows
 both layouts.
 
+## A checked build
+
+OpenGL takes a wrong call in silence: a mistake in this backend, or in a shader, shows as a
+wrong picture or not at all.  A checked build of this library says so instead.  It is a
+compile-time choice, so the library as published holds none of it and pays nothing:
+
+```
+gpu_gl/c/checked.sh run <test command>     # build checked, run, build as committed again
+```
+
+In a checked build:
+
+| Check | What it reports |
+|---|---|
+| After every call of this backend that reaches OpenGL | The error OpenGL kept, with the `gpu` call it came from |
+| The driver's own messages, where it has them (Mesa; not Apple's OpenGL, not a page) | Its text for an error, undefined behaviour, a deprecated or an unportable use |
+| Before every call that takes a handle | A buffer, texture, target or pipeline used after its release or after its device closed, and one released twice; the call is not made |
+| A pipeline's memory | Overwritten when it is freed, so a read of it after cannot pass for a live one |
+
+Each fault is counted (`gpu_gl::faults()`) and written to stderr.  `GPU_GL_DEBUG=abort` stops
+the program at the first, which is how a test run fails on one (`checked.sh run` sets it);
+`GPU_GL_DEBUG=0` turns a checked build's checks off.  `gpu_gl::checked()` says whether the
+checks are compiled in and on.
+
+It does not see memory errors inside this library's own C (an address sanitizer does), and a
+handle whose address the allocator has given out again reads as the new object.
+
+`c/checked.sh --check` fails when `c/checked.h` carries the define: it is never committed.
+
 ## Where its window code comes from
 
 `c/gl_base.h` is the graphics library's `c/graphics_gl.c` with its names under another prefix,

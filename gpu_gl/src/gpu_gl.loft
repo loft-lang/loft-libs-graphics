@@ -33,3 +33,43 @@ fn gq_renderer() -> text;
 pub fn renderer() -> text {
   gq_renderer()
 }
+
+fn gq_check(on: integer);
+#c "gq_check" "void(int64_t)"
+fn gq_faults() -> integer;
+#c "gq_faults" "int64_t()"
+fn gq_checked() -> integer;
+#c "gq_checked" "int64_t()"
+fn gq_check_self() -> integer;
+#c "gq_check_self" "int64_t()"
+
+// Whether this library was built checked (`c/checked.sh`) and its checks are on.  The library
+// as it is published is not, and pays nothing for the checks: `faults` is then always 0.
+//
+// A checked build looks at the error OpenGL kept after every call this backend makes of it,
+// turns the driver's own messages on where it has them, and refuses the use of a handle that
+// was released or whose device closed.  Each fault is counted and written to stderr with the
+// call it came from.  OpenGL takes a wrong call in silence, so this is how a mistake in this
+// backend, or in a shader, is seen.  `GPU_GL_DEBUG=abort` stops the program at the first fault,
+// `GPU_GL_DEBUG=0` turns the checks off.
+pub fn checked() -> boolean {
+  gq_checked() != 0
+}
+
+// Turn a checked build's checks off, or on again.  Ask before `table()`: a device opened
+// through a table taken earlier keeps what that table did.
+pub fn check(on: boolean) {
+  gq_check(if on { 1 } else { 0 });
+}
+
+// How many faults a checked build has seen in this program.
+pub fn faults() -> integer {
+  gq_faults()
+}
+
+// For this library's own tests: release one buffer of the window opened last twice, then give
+// it to a draw, as no program can through `gpu`, and answer how many faults that added — 2 in a
+// checked build with its checks on (and not set to abort), 0 otherwise.
+pub fn check_catches() -> integer {
+  gq_check_self()
+}
