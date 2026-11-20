@@ -32,6 +32,8 @@ typedef struct {
     void (*glBindBufferBase)(unsigned, unsigned, unsigned);
     void (*glGetActiveUniformBlockiv)(unsigned, unsigned, unsigned, int *);
     void (*glGetActiveUniformsiv)(unsigned, int, const unsigned *, unsigned, int *);
+    /* What a draw's depth is compared by; NULL in a page, which gives this library none. */
+    void (*glDepthFunc)(unsigned);
 } gq_block_api;
 
 #if defined(GQ_BROWSER)
@@ -94,6 +96,9 @@ static int gq_bind_block_api(gq_dev *d) {
 #define GQ_MORE(name) (*(void **) (&d->more.name) = dlsym(w->libgles, #name), d->more.name != NULL)
 #else
 #define GQ_MORE(name) (d->more.name = gq_##name, 1)
+#endif
+#if !defined(GQ_BROWSER)
+    (void) GQ_MORE(glDepthFunc);
 #endif
     return GQ_MORE(glUniformBlockBinding) && GQ_MORE(glBindBufferBase) &&
            GQ_MORE(glGetActiveUniformBlockiv) && GQ_MORE(glGetActiveUniformsiv);
@@ -471,6 +476,10 @@ static int64_t gq_t_pipeline(int64_t dev, const gpu_program *p, const gpu_state 
         fprintf(stderr, "gpu_gl: this OpenGL has no uniform blocks\n");
         return 0;
     }
+    if (s->depth == 3 && !d->more.glDepthFunc) {
+        fprintf(stderr, "gpu_gl: this OpenGL cannot write a depth without testing it\n");
+        return 0;
+    }
     sh = gq_shader(dev, p->vertex_source, p->fragment_source);
     if (!sh) return 0;
     shader = gq_res_of(sh);
@@ -606,8 +615,11 @@ static void gq_t_use(int64_t dev, int64_t pipeline) {
     gq_dev *d = gq_dev_of(dev);
     gq_pipe *p = gq_pipe_of(pipeline);
     if (!d || !p || !gq_use(d->w, "gpu bind")) return;
+    /* OpenGL writes a depth only while its test is on: an untested write is a test that always
+     * passes. */
     gq_capability(dev, 1, p->state.depth != 0);
-    gq_depth_write(dev, p->state.depth == 2);
+    if (d->more.glDepthFunc) d->more.glDepthFunc(p->state.depth == 3 ? 0x0207 /* GL_ALWAYS */ : 0x0201 /* GL_LESS */);
+    gq_depth_write(dev, p->state.depth >= 2);
     gq_capability(dev, 2, p->state.blend != 0);
     if (p->state.blend) gq_blend(dev, (p->state.blend - 1) / 8, (p->state.blend - 1) % 8);
     gq_capability(dev, 3, p->state.cull != 0);
@@ -712,7 +724,11 @@ static void gq_t_end(int64_t dev) {
 }
 
 static const gpu_backend gq_tab = {
+#if defined(GQ_BROWSER)
     GPU_BACKEND_VERSION, "gpu_gl", "glsl-330",
+#else
+    GPU_BACKEND_WRITES_DEPTH, "gpu_gl", "glsl-330",
+#endif
     gq_t_open, gq_poll, gq_event_count, gq_events, gq_t_size, gq_t_close,
     gq_key_down, gq_mouse, gq_text_size, gq_text_copy,
     gq_t_buffer, gq_t_index_buffer, gq_buffer_update, gq_t_texture, gq_t_texture_put,

@@ -250,6 +250,12 @@ fn test_an_object_outliving_its_device_dies_quietly() {
   assert(mesh.floats() == 1, "the buffer's own record stays readable");
 }
 
+fn test_a_depth_written_without_a_test_reaches_the_backend_as_its_own_state() {
+  dev = open();
+  assert(dev.pipeline(copies(), gpu::State { depth: gpu::DEPTH_WRITE }) != null, "this backend takes the state");
+  assert(after_open().contains("  state shape 0 depth 3 blend 0 cull 0 into 0"), "the state arrives as 3:\n{after_open()}");
+}
+
 fn test_a_program_without_this_backends_source_builds_no_pipeline() {
   dev = open();
   p = gpu::Program { vertex: [gpu::F3], instance: [], block: [], textures: 0, sources: [gpu::source("other", "v", "f")] };

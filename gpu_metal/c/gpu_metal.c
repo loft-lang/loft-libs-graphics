@@ -1481,10 +1481,11 @@ static int64_t gm_pipeline(int64_t dev, const gpu_program *p, const gpu_state *s
     r->vertex_n = (int) p->vertex_n;
     r->instance_n = (int) p->instance_n;
     r->textures = (int) p->textures;
-    /* A draw is tested against a nearer depth and writes its own only where the target has one. */
+    /* A draw is tested against a nearer depth and writes its own only where the target has one;
+     * state 3 writes it untested. */
     depth_desc = gm_o(gm_o(gm_class("MTLDepthStencilDescriptor"), "alloc"), "init");
-    gm_v_l(depth_desc, "setDepthCompareFunction:", has_depth && s->depth ? GM_LESS : GM_ALWAYS);
-    gm_v_l(depth_desc, "setDepthWriteEnabled:", has_depth && s->depth == 2);
+    gm_v_l(depth_desc, "setDepthCompareFunction:", has_depth && s->depth && s->depth != 3 ? GM_LESS : GM_ALWAYS);
+    gm_v_l(depth_desc, "setDepthWriteEnabled:", has_depth && s->depth >= 2);
     r->depth_state = gm_o_p(gm.device, "newDepthStencilStateWithDescriptor:", depth_desc);
     gm_v(depth_desc, "release");
 done:
@@ -2008,7 +2009,7 @@ static void gm_capture(int64_t dev, int64_t target, uint32_t *out, int64_t n) {
 }
 
 static const gpu_backend gm_tab = {
-    GPU_BACKEND_VERSION, "gpu_metal", "msl",
+    GPU_BACKEND_WRITES_DEPTH, "gpu_metal", "msl",
     gm_open, gm_poll, gm_event_count, gm_events, gm_size_of, gm_close,
     gm_key_down, gm_pointer, gm_text_size, gm_text_copy,
     gm_buffer, gm_index_buffer, gm_buffer_update, gm_texture, gm_texture_put, gm_texture_put565,

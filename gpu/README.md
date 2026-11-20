@@ -65,8 +65,13 @@ of target than the pass draws into, a draw whose block or texture slot was not g
 | `Block` | The values of a pipeline's uniform block, set by field position |
 
 Render state is fixed for a pipeline's life: what it draws (`TRIANGLES`, `LINES`, `POINTS`),
-`DEPTH_*`, `blend(source, destination)`, `CULL_*`, and what it draws `INTO_*`.  Two states are
+`DEPTH_OFF`, `DEPTH_TEST`, `DEPTH_TEST_WRITE` or `DEPTH_WRITE`, `blend(source, destination)`,
+`CULL_*`, and what it draws `INTO_*`.  Two states are
 two pipelines.
+
+`DEPTH_WRITE` writes a draw's depth and tests it against nothing: the draw covers what is there
+and leaves its own depth behind.  With a scissor it is a clear of part of a target, depth
+included.  A backend that cannot draw it answers no pipeline.
 
 ## What a host reads of a device
 
@@ -116,6 +121,8 @@ dependency's headers where your C finds them, wherever the two packages are inst
 out of your package, `../../gpu/c/…`, names no file once it is installed).  Fill one
 `gpu_backend`, and
 export its address through a `table()` function (0 where your stack is absent).  Name the tag
-your shading language's sources carry in `shading`.  `gpu` checks every call first, so a
+your shading language's sources carry in `shading`.  A backend that draws `DEPTH_WRITE` (a depth
+written without a test) puts `GPU_BACKEND_WRITES_DEPTH` in its table's `version`; one that
+puts `GPU_BACKEND_VERSION` is never asked for such a pipeline.  `gpu` checks every call first, so a
 backend sees a draw only inside a pass, with a pipeline built for that pass's target and all
 it reads given.
