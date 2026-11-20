@@ -43,6 +43,12 @@ fn test_every_operator_reaches_its_verdict() {
   }
 }
 
+// Whether a `float` of this build is a double: it can tell 1 from 1 and a million-millionth.
+// In a 32-bit program a float is a single and cannot.
+fn float_is_a_double() -> boolean {
+  1.0 + 0.000000000001 > 1.0
+}
+
 fn test_the_report_line_is_the_oracles() {
   sc = parse_scene(source());
   rs = eval_checks(sc);
@@ -52,7 +58,10 @@ fn test_the_report_line_is_the_oracles() {
          "got {rs[9]?.report}");
   // The tolerance clause comes OFF the echoed claim, and a delta that is
   // negative but tiny still renders with its sign.
-  assert(rs[1]?.report == "check: a.w ~ 0.2  ->  0.200 vs 0.200  d=-0.000  PASS",
+  // (The delta here is the last bits of a double.  Where a float is a single, a 32-bit
+  // program, those bits are gone and it is zero from the other side.)
+  tiny = if float_is_a_double() { "-" } else { "+" };
+  assert(rs[1]?.report == "check: a.w ~ 0.2  ->  0.200 vs 0.200  d={tiny}0.000  PASS",
          "got {rs[1]?.report}");
 }
 
