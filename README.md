@@ -46,8 +46,8 @@ backend (`graphics/README.md` § Other backends).
 | [`stage`](stage/) | 0.21.1 | A retained 2-D scene for loft: a node tree you mutate, with transforms, clipping, batching, pointer routing and widget states |
 | **Pixels, images and text** | | |
 | [`imaging`](imaging/) | 0.5.4 | PNG load/save and pixel manipulation for loft: one C source on every target, no Rust crate |
-| [`drawing`](drawing/) | 0.5.1 | Render a .draw scene — a sprite authored as lines of text — pixel-identically to the Python renderer it replaces |
-| [`text2d`](text2d/) | 0.4.7 | Text that always draws — a built-in face, a glyph atlas, measured metrics, wrapping and alignment, with no font file and no GL context |
+| [`drawing`](drawing/) | 0.5.2 | Render a .draw scene — a sprite authored as lines of text — pixel-identically to the Python renderer it replaces |
+| [`text2d`](text2d/) | 0.4.8 | Text that always draws — a built-in face, a glyph atlas, measured metrics, wrapping and alignment, with no font file and no GL context |
 | [`tiles`](tiles/) | 0.7.0 | Tile sheets, map layers and sprites drawn at a surface's own resolution through a camera |
 | **Geometry and motion** | | |
 | [`shapes`](shapes/) | 0.5.4 | 2D collision detection |
