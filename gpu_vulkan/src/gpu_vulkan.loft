@@ -23,3 +23,43 @@ fn gv_table() -> integer;
 pub fn table() -> i64 {
   gv_table()
 }
+
+fn gv_check(on: integer);
+#c "gv_check" "void(int64_t)"
+fn gv_faults() -> integer;
+#c "gv_faults" "int64_t()"
+fn gv_checked() -> integer;
+#c "gv_checked" "int64_t()"
+fn gv_check_self() -> integer;
+#c "gv_check_self" "int64_t()"
+
+// Whether this library was built checked (`c/checked.sh`) and its checks are on.  The library
+// as it is published is not, and pays nothing for the checks: `faults` is then always 0.
+//
+// Vulkan's validation layer (`VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`) sees a wrong
+// call of Vulkan.  A checked build sees what that layer cannot: a buffer, texture, target or
+// pipeline of this backend used after its release, released twice, or used after its device
+// closed.  The call is refused, counted, and written to stderr with the call it came from.
+// `GPU_VULKAN_DEBUG=abort` stops the program at the first fault, `GPU_VULKAN_DEBUG=0` turns
+// the checks off.
+pub fn checked() -> boolean {
+  gv_checked() != 0
+}
+
+// Turn a checked build's checks off, or on again.  Ask before `table()`: a device opened
+// through a table taken earlier keeps what that table did.
+pub fn check(on: boolean) {
+  gv_check(if on { 1 } else { 0 });
+}
+
+// How many faults a checked build has seen in this program.
+pub fn faults() -> integer {
+  gv_faults()
+}
+
+// For this library's own tests: release one buffer of the window opened last twice, then give
+// it to a draw, as no program can through `gpu`, and answer how many faults that added — 2 in a
+// checked build with its checks on (and not set to abort), 0 otherwise.
+pub fn check_catches() -> integer {
+  gv_check_self()
+}
