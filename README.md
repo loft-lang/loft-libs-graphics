@@ -33,10 +33,10 @@ backend (`graphics/README.md` § Other backends).
 | Package | Version | What it is |
 |---|---|---|
 | **Drawing on a GPU** | | |
-| [`gpu`](gpu/) | 0.4.1 | Drawing on a GPU through pipelines, passes and uniform blocks, with no graphics stack named: a backend library beneath it draws |
-| [`gpu_gl`](gpu_gl/) | 0.3.2 | The OpenGL backend of gpu: OpenGL 3.3 on Linux and macOS, OpenGL ES 3 on Android, WebGL2 in a page |
+| [`gpu`](gpu/) | 0.4.2 | Drawing on a GPU through pipelines, passes and uniform blocks, with no graphics stack named: a backend library beneath it draws |
+| [`gpu_gl`](gpu_gl/) | 0.3.3 | The OpenGL backend of gpu: OpenGL 3.3 on Linux and macOS, OpenGL ES 3 on Android, WebGL2 in a page |
 | [`gpu_vulkan`](gpu_vulkan/) | 0.2.2 | The Vulkan backend of gpu: Vulkan 1.3 on Linux, in an X11 window |
-| [`gpu_metal`](gpu_metal/) | 0.2.1 | The Metal backend of gpu: a Mac's GPU through Metal, in a window of its own |
+| [`gpu_metal`](gpu_metal/) | 0.2.2 | The Metal backend of gpu: a Mac's GPU through Metal, in a window of its own |
 | [`gpu_record`](gpu_record/) | 0.3.1 | A GPU backend that draws nothing and writes down every call it receives: for testing a program's drawing on a machine with no display |
 | [`gpu_host`](gpu_host/) | 0.1.1 | Opens a gpu device on the backend this machine has: Metal on a Mac, OpenGL elsewhere and where Metal is absent, Vulkan on Linux by name |
 | **Built on `gpu`** | | |
