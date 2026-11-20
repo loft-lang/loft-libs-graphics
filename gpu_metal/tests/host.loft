@@ -331,8 +331,12 @@ fn test_what_a_device_made_may_outlive_it() {
   dev.end();
   dev.close();
   assert(dev.width() == 0 && !dev.poll(), "a closed device has no window");
-  quad.update(frame());
-  t.put(0, 0, [0xFF010203 as u32], 1, 1);
+  // Using what a closed device made does nothing in the library as it ships.  A checked
+  // build reports it as a fault (tests/checked.loft holds that), so it is not done there.
+  if !gpu_metal::checked() {
+    quad.update(frame());
+    t.put(0, 0, [0xFF010203 as u32], 1, 1);
+  }
   assert(len(pipe.block().floats()) == 0, "the pipeline's block is still its own");
   assert(len(dev.capture_of(target)) == 16, "and a closed device reads nothing into a target's size");
 }

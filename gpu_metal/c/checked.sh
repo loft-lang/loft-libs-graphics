@@ -13,12 +13,15 @@
 # switch is this header and not a -D.
 set -eu
 h="$(dirname "$0")/checked.h"
+# Through a file beside it and not `sed -i`: GNU sed and the BSD sed of macOS take that flag
+# differently.
 set_to() {
     if [ "$1" = on ]; then
-        sed -i 's|^/\* #define GPU_METAL_CHECKED 1 \*/$|#define GPU_METAL_CHECKED 1|' "$h"
+        sed 's|^/\* #define GPU_METAL_CHECKED 1 \*/$|#define GPU_METAL_CHECKED 1|' "$h" > "$h.new"
     else
-        sed -i 's|^#define GPU_METAL_CHECKED 1$|/* #define GPU_METAL_CHECKED 1 */|' "$h"
+        sed 's|^#define GPU_METAL_CHECKED 1$|/* #define GPU_METAL_CHECKED 1 */|' "$h" > "$h.new"
     fi
+    mv "$h.new" "$h"
 }
 case "${1:-}" in
 on | off) set_to "$1" ;;
