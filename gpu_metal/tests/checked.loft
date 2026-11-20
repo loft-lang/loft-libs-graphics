@@ -1,0 +1,93 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The checked build (`c/checked.sh`): that it is off in the library as committed, and that a
+// checked build sees what it is for — a handle of this backend used after its release, released
+// twice, or used after its device closed, none of which Metal's own validation can see.  A
+// check that never fired would read the same as a library without a fault.
+// Off a Mac, and without `GRAPHICS_TEST_WINDOW=1` on one, every test returns at once.
+use gpu;
+use gpu_metal;
+
+fn display() -> boolean {
+  gpu_metal::table() != 0 && must_draw((env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1")
+}
+
+// A run that says its tests must draw (`GRAPHICS_TEST_MUST_DRAW=1`: the library CI, on a runner
+// it gave a display) fails here, where a test would otherwise return having drawn nothing.
+fn must_draw(can: boolean) -> boolean {
+  assert(can || (env_variable("GRAPHICS_TEST_MUST_DRAW") ?? "") != "1", "this run's tests must draw (GRAPHICS_TEST_MUST_DRAW=1) and found no display to draw on");
+  can
+}
+
+// A build that stops at the first fault cannot count two of them.
+fn counting() -> boolean {
+  gpu_metal::checked() && (env_variable("GPU_METAL_DEBUG") ?? "") != "abort"
+}
+
+fn test_an_unchecked_build_counts_nothing_and_a_checked_one_starts_at_none() {
+  devo = gpu::open(gpu_metal::table(), 64, 48, "checked-none");
+  if !display() { return; }
+  dev = devo ?? return assert(false, "no device");
+  mesh = dev.buffer([0.0f, 0.0f, 0.0f]);
+  assert(mesh.floats() == 3, "a buffer was made");
+  dev.begin_window(gpu::CLEAR, 0xFF00FF00);
+  dev.end();
+  if gpu_metal::checked() {
+    assert(gpu_metal::faults() == 0, "a program that keeps the rules has no fault: {gpu_metal::faults()}");
+  } else {
+    assert(gpu_metal::faults() == 0 && gpu_metal::check_catches() == 0, "an unchecked build counts no fault: {gpu_metal::faults()}");
+  }
+}
+
+// A buffer released twice and used after: two faults, and the program goes on.
+fn test_a_checked_build_refuses_a_handle_used_after_its_release() {
+  devo = gpu::open(gpu_metal::table(), 64, 48, "checked-handle");
+  if !display() || !counting() { return; }
+  dev = devo ?? return assert(false, "no device");
+  caught = gpu_metal::check_catches();
+  assert(caught == 2, "a second release and a use after it are each a fault: {caught}");
+  dev.begin_window(gpu::CLEAR, 0xFF00FF00);
+  dev.end();
+  shot = dev.capture();
+  assert(shot[0] == 0xFF00FF00, "the device draws on after the refused calls: {shot[0]:x}");
+}
+
+// What a program CAN do through `gpu`: write a buffer after it closed the buffer's window.
+// The library as it ships takes the call and does nothing; a checked build names it.  Letting
+// the buffer go after the close stays in order, and is no fault.
+fn test_a_checked_build_names_a_buffer_written_after_its_device_closed() {
+  devo = gpu::open(gpu_metal::table(), 64, 48, "checked-closed");
+  // a build set to stop at the first fault is not handed one
+  if !display() || (gpu_metal::checked() && !counting()) { return; }
+  dev = devo ?? return assert(false, "no device");
+  before = gpu_metal::faults();
+  {
+    mesh = dev.buffer([0.0f, 0.0f, 0.0f]);
+    dev.close();
+    mesh.update([1.0f, 2.0f, 3.0f]);
+    after = gpu_metal::faults();
+    if counting() {
+      assert(after == before + 1, "the write after the close is one fault: {after} after {before}");
+    } else if !gpu_metal::checked() {
+      assert(after == 0, "an unchecked build takes the call in silence: {after}");
+    }
+  }
+  if counting() {
+    assert(gpu_metal::faults() == before + 1, "letting the buffer go after the close is no fault: {gpu_metal::faults()}");
+  }
+}
+
+// A checked build with its checks turned off from the program counts nothing more.
+fn test_checks_turned_off_count_nothing() {
+  if !display() || !counting() { return; }
+  gpu_metal::check(false);
+  devo = gpu::open(gpu_metal::table(), 64, 48, "checked-off");
+  dev = devo ?? return assert(false, "no device");
+  before = gpu_metal::faults();
+  assert(!gpu_metal::checked() && gpu_metal::check_catches() == 0, "off: nothing is caught");
+  assert(gpu_metal::faults() == before, "and nothing is counted: {gpu_metal::faults()} after {before}");
+  dev.close();
+  gpu_metal::check(true);
+  assert(gpu_metal::checked(), "on again");
+}

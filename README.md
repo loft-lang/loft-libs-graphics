@@ -3,61 +3,63 @@ Copyright (c) 2026 Jurjen Stellingwerff
 SPDX-License-Identifier: LGPL-3.0-or-later
 -->
 
-# loft-libs-graphics — graphics + geometry libraries for loft
+# loft-libs-graphics — the graphics libraries of loft
 
-Multi-package chunk repo for the graphics stack: drawing
-primitives, image I/O, 2D geometry, mesh generation.  Each
-subdirectory is an independent loft package published to the
-registry under its own name.
+Each directory here is a loft package of its own, published to the registry under its name
+and versioned on its own.  A program installs the ones it uses (`loft install <name>`) and
+never sees this repository.
 
-Per the chunked-repo design in
-[loft's lib_plans/12-library-extraction/](https://github.com/loft-lang/loft/blob/main/doc/claude/lib_plans/12-library-extraction/README.md)
-§ Chunk grouping.
+## Which library for which need
+
+| You want to | Use | It rests on |
+|---|---|---|
+| Paint pixels into an image in memory, load a font, draw text, save a PNG — no window, no GPU | `graphics` (its canvas), `imaging`, `text2d`, `drawing` | nothing of the machine |
+| Build a 2D game scene: nodes you move, batches, clipping, light | `stage` | `graphics` |
+| Open a window and draw with your own shaders and meshes, uniforms set by name | `graphics` | `gpu` |
+| Draw rectangles, images and sprites at pixel positions on any GPU | `gpu_paint` | `gpu` |
+| Draw a 3D scene of tiles, light and actors on any GPU | `scene3d` | `gpu` |
+| Write a renderer of your own that runs on every GPU | `gpu`, opened through `gpu_host` | a backend |
+| Test what a program asks of the GPU, with no display | `gpu_record` | — |
+
+`gpu` is the one layer that touches the machine, and it names no graphics stack: a backend
+(`gpu_gl`, `gpu_vulkan`, `gpu_metal`) is a library of its own, and `gpu_host` opens a device
+on the one this machine has.  Everything above `gpu` is loft, and runs wherever a backend
+does.  A window of `graphics` is OpenGL unless the program carries its shaders for another
+backend (`graphics/README.md` § Other backends).
 
 ## Packages
 
-All four are published to the registry and installable today.
-
-| Subdir | Package | Latest |
+<!-- packages:begin -->
+| Package | Version | What it is |
 |---|---|---|
-| [`graphics/`](graphics/) | `graphics` — a 2D canvas, fonts and text, and a window drawn on the GPU through `gpu` | v0.14.0 |
-| [`imaging/`](imaging/) | `imaging` — PNG load/save, image manipulation | v0.2.2 |
-| [`gpu/`](gpu/) | `gpu` — drawing on a GPU through pipelines, passes and uniform blocks, with no graphics stack named | v0.4.1 |
-| [`gpu_gl/`](gpu_gl/) | `gpu_gl` — the OpenGL backend of `gpu`: OpenGL 3.3, OpenGL ES 3 and WebGL2 | v0.3.2 |
-| [`gpu_metal/`](gpu_metal/) | `gpu_metal` — the Metal backend of `gpu`: a Mac's GPU, in a window of its own | v0.2.1 |
-| [`gpu_host/`](gpu_host/) | `gpu_host` — opens a `gpu` device on the backend this machine has: the one library a game names | v0.1.1 |
-| [`gpu_paint/`](gpu_paint/) | `gpu_paint` — rectangles, images and sprites at pixel positions, drawn through `gpu` | v0.2.1 |
-| [`scene3d/`](scene3d/) | `scene3d` — a 3D scene a game's view gives once (tiles of faces, the cells' light, actors), drawn through `gpu` | v0.6.1 |
-| [`gpu_record/`](gpu_record/) | `gpu_record` — a `gpu` backend that draws nothing and writes down every call, for tests | v0.3.1 |
-| [`tiles/`](tiles/) | `tiles` — tile sheets, map layers and sprites drawn at a surface's own resolution through a camera | v0.1.0 |
-| [`shapes/`](shapes/) | `shapes` — 2D collision detection | v0.4.1 |
-| [`gridmesh/`](gridmesh/) | `gridmesh` — chunk-local mesh generation primitives | v0.2.1 |
+| **Drawing on a GPU** | | |
+| [`gpu`](gpu/) | 0.4.2 | Drawing on a GPU through pipelines, passes and uniform blocks, with no graphics stack named: a backend library beneath it draws |
+| [`gpu_gl`](gpu_gl/) | 0.3.3 | The OpenGL backend of gpu: OpenGL 3.3 on Linux and macOS, OpenGL ES 3 on Android, WebGL2 in a page |
+| [`gpu_vulkan`](gpu_vulkan/) | 0.2.2 | The Vulkan backend of gpu: Vulkan 1.3 on Linux, in an X11 window |
+| [`gpu_metal`](gpu_metal/) | 0.2.2 | The Metal backend of gpu: a Mac's GPU through Metal, in a window of its own |
+| [`gpu_record`](gpu_record/) | 0.3.1 | A GPU backend that draws nothing and writes down every call it receives: for testing a program's drawing on a machine with no display |
+| [`gpu_host`](gpu_host/) | 0.1.1 | Opens a gpu device on the backend this machine has: Metal on a Mac, OpenGL elsewhere and where Metal is absent, Vulkan on Linux by name |
+| **Built on `gpu`** | | |
+| [`gpu_paint`](gpu_paint/) | 0.2.1 | Rectangles, images and sprites at pixel positions, drawn through gpu: a painter and sprite sheets for any backend |
+| [`scene3d`](scene3d/) | 0.6.1 | A 3D scene a game's view gives once — tiles of faces, the cells' light, actors — drawn through gpu |
+| [`graphics`](graphics/) | 0.14.1 | A 2D canvas, windows, drawing on the GPU and text for loft (meshes and glTF are mesh3d and glb) |
+| [`stage`](stage/) | 0.21.1 | A retained 2-D scene for loft: a node tree you mutate, with transforms, clipping, batching, pointer routing and widget states |
+| **Pixels, images and text** | | |
+| [`imaging`](imaging/) | 0.5.4 | PNG load/save and pixel manipulation for loft: one C source on every target, no Rust crate |
+| [`drawing`](drawing/) | 0.5.2 | Render a .draw scene — a sprite authored as lines of text — pixel-identically to the Python renderer it replaces |
+| [`text2d`](text2d/) | 0.4.8 | Text that always draws — a built-in face, a glyph atlas, measured metrics, wrapping and alignment, with no font file and no GL context |
+| [`tiles`](tiles/) | 0.7.0 | Tile sheets, map layers and sprites drawn at a surface's own resolution through a camera |
+| **Geometry and motion** | | |
+| [`shapes`](shapes/) | 0.5.4 | 2D collision detection |
+| [`gridmesh`](gridmesh/) | 0.2.7 | Chunk-local mesh generation primitives |
+| [`tween`](tween/) | 0.1.2 | Property tweens in exact integer time — eleven easing curves, chains and groups |
+<!-- packages:end -->
 
-## Installing a package
+The table is written from each package's `loft.toml` by `./packages.py`; `./packages.py
+--check` says when it is behind.
 
-```sh
-loft install graphics      # 2D canvas + 3D scene rendering
-loft install imaging       # PNG load/save + pixel operations
-loft install shapes        # 2D collision detection
-loft install gridmesh      # mesh generation primitives
-```
-
-Consumers never see the chunk structure — they install
-per-package.
-
-## Versioning + tags
-
-Each package versions independently.  Git tags use the
-**`<package>-v<version>`** convention to disambiguate sibling
-packages in this multi-package repo (same as
-`loft-libs-core`):
-
-| Package + version | Git tag |
-|---|---|
-| graphics 0.5.5 | `graphics-v0.5.5` |
-| imaging 0.2.2 | `imaging-v0.2.2` |
-| shapes 0.4.1 | `shapes-v0.4.1` |
-| gridmesh 0.2.1 | `gridmesh-v0.2.1` |
+A release is tagged `<package>-v<version>` (`graphics-v0.14.1`), since the packages share
+this repository.
 
 ## Where the drawing is tested
 

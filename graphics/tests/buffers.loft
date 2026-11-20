@@ -5,6 +5,7 @@
 // pixels computed by hand on a 64 x 48 window: x = -1..1 spans columns 0-63, y = -1..1 the
 // capture's rows 47..0.  Under Xvfb, start the server with `-noreset` (see window.loft).
 use graphics::*;
+use gpu;
 
 fn display() -> boolean {
   must_draw((env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1")
@@ -26,11 +27,72 @@ uniform float point;
 void main() {{ gl_Position = vec4(pos.x + shifted * dx, pos.y, 0.0, 1.0); gl_PointSize = point; }}
 `;
 
+// `V` without its per-copy input, for a mesh that has none: a backend other than OpenGL
+// refuses a shader that reads an input its mesh does not give.
+const V_PLAIN: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+uniform float shifted;
+uniform float point;
+void main() {{ gl_Position = vec4(pos.x + shifted * 0.0, pos.y, 0.0, 1.0); gl_PointSize = point; }}
+`;
+
 const F: text = `
 #version 330 core
 out vec4 frag;
 void main() {{ frag = vec4(0.0, 1.0, 0.0, 1.0); }}
 `;
+
+// SPIR-V of V_PLAIN with F (vertex), as graphics hands them on, written by gpu_vulkan/spirv.py: do not edit.
+const V_PLAIN_SPV: text = `AwIjBwADAQALAAgAKwAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABwAAAAAABAAAAG1haW4AAAAADQAAABIAAABHAAMACwAAAAIAAABIAAUACwAAAAAA
+AAALAAAAAAAAAEgABQALAAAAAQAAAAsAAAABAAAASAAFAAsAAAACAAAACwAAAAMAAABIAAUACwAA
+AAMAAAALAAAABAAAAEcABAASAAAAHgAAAAAAAABHAAMAFwAAAAIAAABIAAUAFwAAAAAAAAAjAAAA
+AAAAAEgABQAXAAAAAQAAACMAAAAEAAAARwAEABkAAAAhAAAAAAAAAEcABAAZAAAAIgAAAAAAAAAT
+AAIAAgAAACEAAwADAAAAAgAAABYAAwAGAAAAIAAAABcABAAHAAAABgAAAAQAAAAVAAQACAAAACAA
+AAAAAAAAKwAEAAgAAAAJAAAAAQAAABwABAAKAAAABgAAAAkAAAAeAAYACwAAAAcAAAAGAAAACgAA
+AAoAAAAgAAQADAAAAAMAAAALAAAAOwAEAAwAAAANAAAAAwAAABUABAAOAAAAIAAAAAEAAAArAAQA
+DgAAAA8AAAAAAAAAFwAEABAAAAAGAAAAAwAAACAABAARAAAAAQAAABAAAAA7AAQAEQAAABIAAAAB
+AAAAKwAEAAgAAAATAAAAAAAAACAABAAUAAAAAQAAAAYAAAAeAAQAFwAAAAYAAAAGAAAAIAAEABgA
+AAACAAAAFwAAADsABAAYAAAAGQAAAAIAAAAgAAQAGgAAAAIAAAAGAAAAKwAEAAYAAAAdAAAAAAAA
+ACsABAAGAAAAIgAAAAAAgD8gAAQAJAAAAAMAAAAHAAAAKwAEAA4AAAAmAAAAAQAAACAABAApAAAA
+AwAAAAYAAAA2AAUAAgAAAAQAAAAAAAAAAwAAAPgAAgAFAAAAQQAFABQAAAAVAAAAEgAAABMAAAA9
+AAQABgAAABYAAAAVAAAAQQAFABoAAAAbAAAAGQAAAA8AAAA9AAQABgAAABwAAAAbAAAAhQAFAAYA
+AAAeAAAAHAAAAB0AAACBAAUABgAAAB8AAAAWAAAAHgAAAEEABQAUAAAAIAAAABIAAAAJAAAAPQAE
+AAYAAAAhAAAAIAAAAFAABwAHAAAAIwAAAB8AAAAhAAAAHQAAACIAAABBAAUAJAAAACUAAAANAAAA
+DwAAAD4AAwAlAAAAIwAAAEEABQAaAAAAJwAAABkAAAAmAAAAPQAEAAYAAAAoAAAAJwAAAEEABQAp
+AAAAKgAAAA0AAAAmAAAAPgADACoAAAAoAAAA/QABADgAAQA=`;
+
+// SPIR-V of V with F (vertex), as graphics hands them on, written by gpu_vulkan/spirv.py: do not edit.
+const V_SPV: text = `AwIjBwADAQALAAgALQAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ACAAAAAAABAAAAG1haW4AAAAADQAAABIAAAAdAAAARwADAAsAAAACAAAASAAFAAsA
+AAAAAAAACwAAAAAAAABIAAUACwAAAAEAAAALAAAAAQAAAEgABQALAAAAAgAAAAsAAAADAAAASAAF
+AAsAAAADAAAACwAAAAQAAABHAAQAEgAAAB4AAAAAAAAARwADABcAAAACAAAASAAFABcAAAAAAAAA
+IwAAAAAAAABIAAUAFwAAAAEAAAAjAAAABAAAAEcABAAZAAAAIQAAAAAAAABHAAQAGQAAACIAAAAA
+AAAARwAEAB0AAAAeAAAAAQAAABMAAgACAAAAIQADAAMAAAACAAAAFgADAAYAAAAgAAAAFwAEAAcA
+AAAGAAAABAAAABUABAAIAAAAIAAAAAAAAAArAAQACAAAAAkAAAABAAAAHAAEAAoAAAAGAAAACQAA
+AB4ABgALAAAABwAAAAYAAAAKAAAACgAAACAABAAMAAAAAwAAAAsAAAA7AAQADAAAAA0AAAADAAAA
+FQAEAA4AAAAgAAAAAQAAACsABAAOAAAADwAAAAAAAAAXAAQAEAAAAAYAAAADAAAAIAAEABEAAAAB
+AAAAEAAAADsABAARAAAAEgAAAAEAAAArAAQACAAAABMAAAAAAAAAIAAEABQAAAABAAAABgAAAB4A
+BAAXAAAABgAAAAYAAAAgAAQAGAAAAAIAAAAXAAAAOwAEABgAAAAZAAAAAgAAACAABAAaAAAAAgAA
+AAYAAAA7AAQAFAAAAB0AAAABAAAAKwAEAAYAAAAjAAAAAAAAACsABAAGAAAAJAAAAAAAgD8gAAQA
+JgAAAAMAAAAHAAAAKwAEAA4AAAAoAAAAAQAAACAABAArAAAAAwAAAAYAAAA2AAUAAgAAAAQAAAAA
+AAAAAwAAAPgAAgAFAAAAQQAFABQAAAAVAAAAEgAAABMAAAA9AAQABgAAABYAAAAVAAAAQQAFABoA
+AAAbAAAAGQAAAA8AAAA9AAQABgAAABwAAAAbAAAAPQAEAAYAAAAeAAAAHQAAAIUABQAGAAAAHwAA
+ABwAAAAeAAAAgQAFAAYAAAAgAAAAFgAAAB8AAABBAAUAFAAAACEAAAASAAAACQAAAD0ABAAGAAAA
+IgAAACEAAABQAAcABwAAACUAAAAgAAAAIgAAACMAAAAkAAAAQQAFACYAAAAnAAAADQAAAA8AAAA+
+AAMAJwAAACUAAABBAAUAGgAAACkAAAAZAAAAKAAAAD0ABAAGAAAAKgAAACkAAABBAAUAKwAAACwA
+AAANAAAAKAAAAD4AAwAsAAAAKgAAAP0AAQA4AAEA`;
+
+// SPIR-V of V with F (fragment), as graphics hands them on, written by gpu_vulkan/spirv.py: do not edit.
+const F_SPV: text = `AwIjBwADAQALAAgAEAAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABgAEAAAABAAAAG1haW4AAAAACQAAABAAAwAEAAAABwAAAEcABAAJAAAAHgAAAAAA
+AABHAAMADQAAAAIAAABIAAUADQAAAAAAAAAjAAAAAAAAAEgABQANAAAAAQAAACMAAAAEAAAARwAE
+AA8AAAAhAAAAAAAAAEcABAAPAAAAIgAAAAAAAAATAAIAAgAAACEAAwADAAAAAgAAABYAAwAGAAAA
+IAAAABcABAAHAAAABgAAAAQAAAAgAAQACAAAAAMAAAAHAAAAOwAEAAgAAAAJAAAAAwAAACsABAAG
+AAAACgAAAAAAAAArAAQABgAAAAsAAAAAAIA/LAAHAAcAAAAMAAAACgAAAAsAAAAKAAAACwAAAB4A
+BAANAAAABgAAAAYAAAAgAAQADgAAAAIAAAANAAAAOwAEAA4AAAAPAAAAAgAAADYABQACAAAABAAA
+AAAAAAADAAAA+AACAAUAAAA+AAMACQAAAAwAAAD9AAEAOAABAA==`;
 
 const GREEN = 0xFF00FF00;
 const BLACK = 0xFF000000;
@@ -49,7 +111,7 @@ fn test_an_index_list_draws_what_it_names() {
   wo = open_window(64, 48, "g5-indices");
   if !display() { return; }
   w = wo ?? return assert(false, "a display is set and no window opened");
-  s = w.shader(V, F) ?? return assert(false, "shader");
+  s = w.shader_of(V_PLAIN, F, [gpu::source("spirv", V_PLAIN_SPV, F_SPV)]) ?? return assert(false, "shader");
   // the left half: 0 bottom-left, 1 bottom-middle, 2 top-middle, 3 top-left
   m = w.upload(points([-1.0, -1.0, 0.0, -1.0, 0.0, 1.0, -1.0, 1.0]), 3);
   m.indices(w, [0, 1, 2]);
@@ -70,7 +132,7 @@ fn test_update_replaces_the_vertices() {
   wo = open_window(64, 48, "g5-update");
   if !display() { return; }
   w = wo ?? return assert(false, "no window");
-  s = w.shader(V, F) ?? return assert(false, "shader");
+  s = w.shader_of(V_PLAIN, F, [gpu::source("spirv", V_PLAIN_SPV, F_SPV)]) ?? return assert(false, "shader");
   m = w.upload(points([-1.0, -1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 0.0, 1.0, -1.0, 1.0]), 3);
   m.update(points([0.0, -1.0, 1.0, -1.0, 1.0, 1.0, 0.0, -1.0, 1.0, 1.0, 0.0, 1.0]));
   w.clear(BLACK);
@@ -91,7 +153,7 @@ fn test_instances_advance_once_per_copy() {
   wo = open_window(64, 48, "g5-instances");
   if !display() { return; }
   w = wo ?? return assert(false, "no window");
-  s = w.shader(V, F) ?? return assert(false, "shader");
+  s = w.shader_of(V, F, [gpu::source("spirv", V_SPV, F_SPV)]) ?? return assert(false, "shader");
   // a strip x = -1..-0.5: columns 0-15
   strip = w.upload(points([-1.0, -1.0, -0.5, -1.0, -0.5, 1.0, -1.0, -1.0, -0.5, 1.0, -1.0, 1.0]), 3);
   ib = w.instances([0.0 as single, 1.0 as single]);
@@ -114,7 +176,7 @@ fn test_lines_and_points() {
   wo = open_window(64, 48, "g5-modes");
   if !display() { return; }
   w = wo ?? return assert(false, "no window");
-  s = w.shader(V, F) ?? return assert(false, "shader");
+  s = w.shader_of(V_PLAIN, F, [gpu::source("spirv", V_PLAIN_SPV, F_SPV)]) ?? return assert(false, "shader");
   // a vertical line at x = -0.5 + half a pixel (the centre of column 16)
   line = w.upload(points([-0.484375, -1.0, -0.484375, 1.0]), 3);
   w.clear(BLACK);

@@ -1,0 +1,12 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// `asan/run.sh`'s first step: C that reads a freed block on purpose.
+
+fn asan_selftest_read_freed(n: integer) -> integer;
+#c "asan_selftest_read_freed" "int64_t(int64_t)"
+
+// Read a block after its release.  A sanitized build stops here.
+pub fn read_freed(n: integer) -> integer {
+  asan_selftest_read_freed(n)
+}

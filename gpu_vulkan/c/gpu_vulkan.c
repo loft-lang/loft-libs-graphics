@@ -32,6 +32,7 @@
  *   - texture slot n is a `sampler2D` at `set = 0, binding = 1 + n`;
  *   - a program drawing points writes `gl_PointSize`. */
 #include "gpu/gpu_backend.h"
+#include "checked.h" /* GPU_VULKAN_CHECKED or nothing: c/checked.sh sets it for a checked test run */
 
 #if defined(__linux__) && !defined(__ANDROID__) && !defined(__wasm__)
 #include "vk_decl.h"
@@ -2047,15 +2048,179 @@ static const gpu_backend gv_tab = {
     gv_t_indices, gv_t_viewport, gv_t_scissor, gv_t_draw, gv_t_end, gv_t_present, gv_t_capture,
 };
 
+/* ── the checked build ─────────────────────────────────────────────────────────────────────── */
+
+#if defined(GPU_VULKAN_CHECKED)
+/* Compiled in only when `c/checked.h` defines GPU_VULKAN_CHECKED (`c/checked.sh`): the library as
+ * it ships holds none of this and pays nothing for it.  Vulkan's own validation layer
+ * (`VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`) sees a wrong call of Vulkan; it cannot see
+ * a handle of THIS backend used after its release, released twice, or used after its device
+ * closed, because by then the handle is a freed pointer the call reads before Vulkan is
+ * reached.  In a checked build every handle a call uses is looked up first (gpu's register);
+ * each fault is counted and written to stderr with the call it came from, and the call is not
+ * made.  `GPU_VULKAN_DEBUG=0` turns the checks of a checked build off, `abort` stops the
+ * program at the first fault; `gv_check` does the first from the program. */
+static int gv_checking = -1; /* -1 not asked yet, 0 off, 1 report, 2 abort */
+static int64_t gv_fault_count = 0;
+static const char *gv_now = ""; /* the table call being made */
+static int64_t gv_last_dev = 0; /* the device opened last, for `gv_check_self` */
+
+static int gv_check_mode(void) {
+    if (gv_checking < 0) {
+        const char *e = getenv("GPU_VULKAN_DEBUG");
+        gv_checking = e && !strcmp(e, "0") ? 0 : e && !strcmp(e, "abort") ? 2 : 1;
+    }
+    return gv_checking;
+}
+
+void gv_check(int64_t on) {
+    if (on) { if (gv_check_mode() == 0) gv_checking = 1; } else gv_checking = 0;
+}
+
+int64_t gv_faults(void) {
+    return gv_fault_count;
+}
+
+static void gv_fault(const char *detail) {
+    gv_fault_count++;
+    fprintf(stderr, "gpu_vulkan: misuse in `%s`: %s\n", gv_now, detail);
+    if (gv_checking == 2) abort();
+}
+
+#define GPU_REGISTER_FAULT(detail) gv_fault(detail)
+#define GPU_REGISTER_NOW gv_now
+#include "gpu/gpu_register.h"
+
+/* The checked table: each call that takes a handle, with the handle looked up first; a dead one
+ * is a fault and the call is not made. */
+#define GV_G(name, params, guard, call)                                                           \
+    static void gv_c_##name params {                                                             \
+        gv_now = #name;                                                                          \
+        if (guard) { call; }                                                                     \
+        gv_now = "";                                                                             \
+    }
+#define GV_B(name, params, call, dev, kind)                                                       \
+    static int64_t gv_c_##name params {                                                          \
+        int64_t r;                                                                               \
+        gv_now = #name;                                                                          \
+        r = gpu_register_born(call, dev, kind);                                                  \
+        gv_now = "";                                                                             \
+        return r;                                                                                \
+    }
+static int64_t gv_c_open(int64_t w, int64_t h, const char *t, int64_t f) {
+    int64_t d = gv_t_open(w, h, t, f);
+    if (d) gv_last_dev = d;
+    return d;
+}
+static void gv_c_close(int64_t d) {
+    gpu_register_device_closed(d);
+    if (gv_last_dev == d) gv_last_dev = 0;
+    gv_t_close(d);
+}
+GV_B(buffer, (int64_t d, const float *p, int64_t n), gv_t_buffer(d, p, n), d, "buffer")
+GV_B(index_buffer, (int64_t d, const int64_t *p, int64_t n), gv_t_index_buffer(d, p, n), d, "index buffer")
+GV_G(buffer_update, (int64_t b, const float *p, int64_t n), gpu_register_live(b), gv_t_buffer_update(b, p, n))
+GV_B(texture, (int64_t d, int64_t w, int64_t h, int64_t z), gv_t_texture(d, w, h, z), d, "texture")
+GV_G(texture_put, (int64_t t, int64_t x, int64_t y, int64_t w, int64_t h, const uint32_t *p, int64_t n),
+     gpu_register_live(t), gv_t_texture_put(t, x, y, w, h, p, n))
+GV_G(texture_put565, (int64_t t, int64_t x, int64_t y, int64_t w, int64_t h, const int32_t *p, int64_t n),
+     gpu_register_live(t), gv_t_texture_put565(t, x, y, w, h, p, n))
+GV_G(texture_nearest, (int64_t t, int64_t on), gpu_register_live(t), gv_t_texture_nearest(t, on))
+GV_G(texture_mipmaps, (int64_t t), gpu_register_live(t), gv_t_texture_mipmaps(t))
+static int64_t gv_c_target(int64_t d, int64_t c, int64_t z) {
+    int64_t r = 0;
+    gv_now = "target";
+    if (gpu_register_live(c) && gpu_register_live(z)) {
+        r = gpu_register_born(gv_t_target(d, c, z), d, "target");
+    }
+    gv_now = "";
+    return r;
+}
+GV_B(pipeline, (int64_t d, const gpu_program *p, const gpu_state *s), gv_t_pipeline(d, p, s), d, "pipeline")
+GV_G(release, (int64_t h), gpu_register_may_release(h), gv_t_release(h))
+GV_G(begin, (int64_t d, int64_t t, int64_t l, int64_t c), gpu_register_live(t), gv_t_begin(d, t, l, c))
+GV_G(bind, (int64_t d, int64_t p), gpu_register_live(p), gv_t_use(d, p))
+GV_G(sample, (int64_t d, int64_t sl, int64_t t), gpu_register_live(t), gv_t_sample(d, sl, t))
+GV_G(vertices, (int64_t d, int64_t b), gpu_register_live(b), gv_t_vertices(d, b))
+GV_G(instances, (int64_t d, int64_t b, int64_t f), gpu_register_live(b), gv_t_instances(d, b, f))
+GV_G(indices, (int64_t d, int64_t b), gpu_register_live(b), gv_t_indices(d, b))
+GV_G(capture, (int64_t d, int64_t t, uint32_t *o, int64_t n), gpu_register_live(t), gv_t_capture(d, t, o, n))
+
+/* For this library's own tests: one buffer of the device opened last released twice and then
+ * given to a draw, straight through the checked table, as no program can through `gpu`.  The
+ * faults it adds (two, with the checks on) show the register catches them. */
+int64_t gv_check_self(void) {
+    static const float one[3] = {0.0f, 0.0f, 0.0f};
+    int64_t before = gv_fault_count, b;
+    if (!gv_last_dev || gv_check_mode() == 0 || gv_checking == 2) return 0;
+    b = gv_c_buffer(gv_last_dev, one, 3);
+    gv_c_release(b);
+    gv_c_release(b);
+    gv_c_vertices(gv_last_dev, b);
+    return gv_fault_count - before;
+}
+
+static const gpu_backend gv_tab_checked = {
+    GPU_BACKEND_WRITES_DEPTH, "gpu_vulkan", "spirv",
+    gv_c_open, gv_t_poll, gv_t_event_count, gv_t_events, gv_t_size, gv_c_close,
+    gv_t_key_down, gv_t_pointer, gv_t_text_size, gv_t_text_copy,
+    gv_c_buffer, gv_c_index_buffer, gv_c_buffer_update, gv_c_texture, gv_c_texture_put,
+    gv_c_texture_put565,
+    gv_c_texture_nearest, gv_c_texture_mipmaps, gv_c_target, gv_c_pipeline, gv_c_release,
+    gv_c_begin, gv_c_bind, gv_t_uniforms, gv_c_sample, gv_c_vertices, gv_c_instances,
+    gv_c_indices, gv_t_viewport, gv_t_scissor, gv_t_draw, gv_t_end, gv_t_present, gv_c_capture,
+};
+
+int64_t gv_checked(void) {
+    return gv_check_mode() != 0;
+}
+#else /* the library as it ships: no check, and nothing to pay for one */
+
+void gv_check(int64_t on) {
+    (void) on;
+}
+
+int64_t gv_faults(void) {
+    return 0;
+}
+
+int64_t gv_checked(void) {
+    return 0;
+}
+
+int64_t gv_check_self(void) {
+    return 0;
+}
+#endif /* GPU_VULKAN_CHECKED */
+
 /* This backend's table: Vulkan is looked for when a device opens, so the table is there on every
  * Linux machine, and `open` answers 0 where no Vulkan driver draws into an X window. */
 int64_t gv_table(void) {
+#if defined(GPU_VULKAN_CHECKED)
+    if (gv_check_mode()) return (int64_t) (intptr_t) &gv_tab_checked;
+#endif
     return (int64_t) (intptr_t) &gv_tab;
 }
 
 #else /* not Linux: no window host for Vulkan here */
 
 int64_t gv_table(void) {
+    return 0;
+}
+
+void gv_check(int64_t on) {
+    (void) on;
+}
+
+int64_t gv_faults(void) {
+    return 0;
+}
+
+int64_t gv_checked(void) {
+    return 0;
+}
+
+int64_t gv_check_self(void) {
     return 0;
 }
 

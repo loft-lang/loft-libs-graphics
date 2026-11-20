@@ -1,0 +1,9 @@
+#!/bin/sh
+# Copyright (c) 2026 Jurjen Stellingwerff
+# SPDX-License-Identifier: LGPL-3.0-or-later
+#
+# No rustc for a sanitized run (`asan/run.sh` puts this directory first on PATH).  loft asks
+# `rustc --version` when it sums up a test run; every program loft starts inherits the
+# sanitizer's runtime (LD_PRELOAD), and the real rustc never answers under it, so the run
+# would hang after its last test.  The run is on the interpreter and needs no rustc.
+exit 127

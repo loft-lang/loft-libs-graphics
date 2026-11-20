@@ -1,6 +1,6 @@
 [package]
 name = "drawing"
-version = "0.5.1"
+version = "0.5.2"
 loft    = ">=2026.11.20261113"
 repository = "loft-libs-graphics"
 description = "Render a .draw scene — a sprite authored as lines of text — pixel-identically to the Python renderer it replaces"
@@ -23,11 +23,11 @@ categories = ["graphics", "asset-format"]
 #
 # 0.5 is a declared break: `Brush.img`, `Layer.px` and `hair_brush` hold packed 0xAARRGGBB
 # pixels as `vector<u32>`, on graphics 0.12's `u32` canvas.
-api_compatible_with  = "0.5.0"
-data_compatible_with = "0.5.0"
+api_compatible_with  = "0.5.2"   # the API is unchanged; raised with the data floor, which the check on loft main cannot tell apart (loft#2598)
+data_compatible_with = "0.5.2"   # its surface names graphics' records, which graphics 0.14 reshaped
 
 [dependencies]
-graphics = ">=0.12.0"
+graphics = ">=0.14.1"
 imaging  = ">=0.5.3"   # `Brush … file=`: a PNG footprint decoded to pixels
 
 [library]

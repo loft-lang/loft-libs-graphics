@@ -682,9 +682,21 @@ static int gq_on_x_error(void *display, gx_error_event *e) {
     return 0;
 }
 
-/* Open the display.  A server that still counts the connections just closed resets a new one:
- * under Xvfb one open in a thousand, more when several programs open at once.  It is asked
- * again for up to half a second.  A display that is not there refuses, and is not asked twice. */
+/* Whether a display that did not open is worth asking again: the server took the connection
+ * and dropped it before the setup was read.  How that reaches the client depends on where the
+ * drop lands: a reset (ECONNRESET), a write to the closed socket (EPIPE), a read cut short
+ * (EAGAIN), or a clean end of file, which leaves errno 0.  A display that is not there says so
+ * (ECONNREFUSED, ENOENT) and is not asked twice; nor is errno 0 with no DISPLAY named. */
+static int gq_ask_again(int err) {
+    if (err == ECONNRESET || err == EAGAIN || err == EPIPE) return 1;
+    return err == 0 && getenv("DISPLAY") != NULL;
+}
+
+/* Open the display.  An X server starts over when its last client leaves (unless it runs
+ * with `-noreset`), and drops a connection that arrives while it does: a program that closes
+ * its only window and opens another meets it.  Under Xvfb that is one open in a thousand on
+ * an idle machine and one in three on a loaded one.  The server is asked again for up to half
+ * a second. */
 static void *gq_open_display(gq_window *w) {
     struct timeval wait;
     int tries;
@@ -692,7 +704,7 @@ static void *gq_open_display(gq_window *w) {
         void *display;
         errno = 0;
         display = w->xa.XOpenDisplay(NULL);
-        if (display || (errno != ECONNRESET && errno != EAGAIN)) return display;
+        if (display || !gq_ask_again(errno)) return display;
         wait.tv_sec = 0;
         wait.tv_usec = 10000;
         select(0, NULL, NULL, NULL, &wait);
@@ -1349,6 +1361,9 @@ static void gq_present(gq_window *w) {
     if (w->target) w->api.glBindFramebuffer(GL_FRAMEBUFFER, w->target);
 }
 
+/* Where the open below gave up, for GPU_GL_WHY=1: the line and what errno held there. */
+static int gq_fail_line = 0, gq_fail_errno = 0;
+#define GQ_FAIL do { gq_fail_line = __LINE__; gq_fail_errno = errno; goto fail; } while (0)
 int64_t gq_open(int64_t width, int64_t height, const char *title, int64_t fullscreen) {
     static const int context_attrs[] = {GLX_CONTEXT_MAJOR_VERSION_ARB, 3,
                                         GLX_CONTEXT_MINOR_VERSION_ARB, 3,
@@ -1364,20 +1379,20 @@ int64_t gq_open(int64_t width, int64_t height, const char *title, int64_t fullsc
     int screen;
     if (!w) return 0;
     w->thread = pthread_self();
-    if (!gq_bind(w)) goto fail;
+    if (!gq_bind(w)) GQ_FAIL;
     w->display = gq_open_display(w);
-    if (!w->display) goto fail;
+    if (!w->display) GQ_FAIL;
     screen = w->xa.XDefaultScreen(w->display);
     root = w->xa.XRootWindow(w->display, screen);
     if (fullscreen) {
         width = w->xa.XDisplayWidth(w->display, screen);
         height = w->xa.XDisplayHeight(w->display, screen);
     }
-    if (width <= 0 || height <= 0) goto fail;
+    if (width <= 0 || height <= 0) GQ_FAIL;
     config = gq_pick_config(w, screen);
-    if (!config) goto fail;
+    if (!config) GQ_FAIL;
     visual = w->xa.glXGetVisualFromFBConfig(w->display, config);
-    if (!visual) goto fail;
+    if (!visual) GQ_FAIL;
     w->colormap = w->xa.XCreateColormap(w->display, root, visual->visual, GX_ALLOC_NONE);
     memset(&attrs, 0, sizeof attrs);
     attrs.colormap = w->colormap;
@@ -1389,7 +1404,7 @@ int64_t gq_open(int64_t width, int64_t height, const char *title, int64_t fullsc
                                      GX_CW_BORDER_PIXEL | GX_CW_COLORMAP | GX_CW_EVENT_MASK,
                                      &attrs);
     w->xa.XFree(visual);
-    if (!w->window) goto fail;
+    if (!w->window) GQ_FAIL;
     w->xa.XStoreName(w->display, w->window, title);
     w->wm_delete = w->xa.XInternAtom(w->display, "WM_DELETE_WINDOW", 0);
     w->xa.XSetWMProtocols(w->display, w->window, &w->wm_delete, 1);
@@ -1409,13 +1424,13 @@ int64_t gq_open(int64_t width, int64_t height, const char *title, int64_t fullsc
 
     *(void **) (&w->xa.glXCreateContextAttribsARB) =
         w->xa.glXGetProcAddressARB((const unsigned char *) "glXCreateContextAttribsARB");
-    if (!w->xa.glXCreateContextAttribsARB) goto fail;
+    if (!w->xa.glXCreateContextAttribsARB) GQ_FAIL;
     gq_x_failed = 0;
     previous = w->xa.XSetErrorHandler(gq_on_x_error);
     trapped = 1;
     w->context = w->xa.glXCreateContextAttribsARB(w->display, config, NULL, 1, context_attrs);
     w->xa.XSync(w->display, 0);
-    if (gq_x_failed || !w->context) goto fail;
+    if (gq_x_failed || !w->context) GQ_FAIL;
 
     w->xa.XMapWindow(w->display, w->window);
     for (;;) { /* until the server says the window is mapped */
@@ -1427,13 +1442,13 @@ int64_t gq_open(int64_t width, int64_t height, const char *title, int64_t fullsc
             height = ev.configure.height;
         }
     }
-    if (!w->xa.glXMakeCurrent(w->display, w->window, w->context)) goto fail;
+    if (!w->xa.glXMakeCurrent(w->display, w->window, w->context)) GQ_FAIL;
     w->xa.XSync(w->display, 0);
-    if (gq_x_failed) goto fail;
+    if (gq_x_failed) GQ_FAIL;
     gq_current = w;
     w->xa.XSetErrorHandler(previous);
     trapped = 0;
-    if (!gq_bind_gl(w)) goto fail;
+    if (!gq_bind_gl(w)) GQ_FAIL;
     if (w->xa.glXSwapIntervalEXT) w->xa.glXSwapIntervalEXT(w->display, w->window, 1);
     w->width = (int) width;
     w->height = (int) height;
@@ -1450,6 +1465,10 @@ int64_t gq_open(int64_t width, int64_t height, const char *title, int64_t fullsc
     gq_present(w);
     return (int64_t) (intptr_t) w;
 fail:
+    if (gq_fail_line && getenv("GPU_GL_WHY")) {
+        fprintf(stderr, "gpu_gl: no window: gl_base.h:%d errno %d (%s) x-error %d\n", gq_fail_line,
+                gq_fail_errno, strerror(gq_fail_errno), gq_x_failed);
+    }
     if (trapped) { /* tear the half-made context down while its errors are still recorded */
         if (w->context) {
             w->xa.glXMakeCurrent(w->display, 0, NULL);

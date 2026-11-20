@@ -105,6 +105,45 @@ then answers false.  It needs a loft whose C backend builds Android apps.
 so on X11 (`xvfb-run -a -s '-noreset -screen 0 800x600x24'`), and on a Mac, where nothing in the
 environment says whether a window server is reachable, `GRAPHICS_TEST_WINDOW=1` does.
 
+### Other backends
+
+`open_window` draws through OpenGL, and a shader given as GLSL (`shader`) is all it needs.
+A program that also runs on Vulkan (and on Metal, once it carries that source) opens with
+`open_window_native` — the backend the machine has, as `gpu_host` orders them — and gives
+each shader its text for the backends that do not read GLSL:
+
+```loft
+// SPIR-V of VERT with FRAG (vertex), as graphics hands them on, written by gpu_vulkan/spirv.py: do not edit.
+const VERT_SPV: text = `…`;
+// SPIR-V of VERT with FRAG (fragment), as graphics hands them on, written by gpu_vulkan/spirv.py: do not edit.
+const FRAG_SPV: text = `…`;
+
+w = graphics::open_window_native(800, 600, "game") ?? return;
+s = w.shader_of(VERT, FRAG, [gpu::source("spirv", VERT_SPV, FRAG_SPV)]) ?? return;
+```
+
+The GLSL stays the shader a program writes and reads: it names the uniforms, and
+`gpu_vulkan/spirv.py FILE.loft` writes the two constants from it (`--check` in a CI run says
+when one is behind).  Three things hold for such a shader, which OpenGL alone does not ask:
+
+- **Its inputs are numbered in the order of the locations it wrote.**  So a mesh's per-copy
+  inputs (`instance_attrib`) are declared at locations in the order of their offsets in a
+  record, after the per-vertex ones.
+- **A mesh gives every input the shader reads.**  OpenGL reads a missing one as zero; the
+  others refuse the pipeline.  Draw a mesh without per-copy records with a shader that
+  declares none.
+- **A source is for one pair of stages.**  The block's layout comes from both stages'
+  uniforms together, so a vertex stage reused with another fragment stage is marked again.
+
+`GPU_HOST=gpu_vulkan` in the environment makes `open_window` open there, to run a program on
+another backend without changing it.  `open_window_on(table, …)` opens through a table the
+program names: `gpu_record::table()` runs every call with no display and writes it down
+(`tests/recorded.loft`).  `w.backend()` names the backend, `w.refusals()` lists what it
+refused.
+
+The library's own shaders (the painter, sprite sheets) carry SPIR-V; none carries a Metal
+source yet, so on a Mac `painter()` and `sprites()` answer null under `open_window_native`.
+
 ## Moving from 0.13
 
 0.14 is a declared break (`api_compatible_with = "0.14.0"`).  The window draws through `gpu`

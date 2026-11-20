@@ -1,0 +1,41 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Many windows, one after another, each the only one while it lives.  Each device holds a
+// connection to the display, and an X server serves 256 clients by default: 300 devices that
+// were not let go would be refused long before the last.  And an X server starts over when
+// its last client leaves (unless it was started with `-noreset`, and a desktop always has
+// other clients): a connection that arrives while it does is dropped, so a program that
+// closes its only window and opens another meets a server that hangs up on it.  The backend
+// asks again, and every open here answers a device.  On an idle machine a drop is rare (one
+// open in a thousand under Xvfb); `gpu_host/parity/under_load.sh` runs this file with the
+// machine loaded, where one open in three is dropped.
+// Without a display the test returns at once.
+use gpu;
+use gpu_gl;
+
+fn display() -> boolean {
+  must_draw((env_variable("DISPLAY") ?? "") != "" || (env_variable("GRAPHICS_TEST_WINDOW") ?? "") == "1")
+}
+
+// A run that says its tests must draw (`GRAPHICS_TEST_MUST_DRAW=1`: the library CI, on a runner
+// it gave a display) fails here, where a test would otherwise return having drawn nothing.
+fn must_draw(can: boolean) -> boolean {
+  assert(can || (env_variable("GRAPHICS_TEST_MUST_DRAW") ?? "") != "1", "this run's tests must draw (GRAPHICS_TEST_MUST_DRAW=1) and found no display to draw on");
+  can
+}
+
+// Every one of 300 devices opens, is its own size, and shows the colour it was cleared to: the
+// i-th is 8 + i % 5 pixels wide and red i % 256.
+fn test_every_device_in_a_long_row_opens() {
+  if !display() { return; }
+  // no device is kept beside the one in the loop: the server is left with no client between two
+  for i in 0..300 {
+    dev = gpu::open(gpu_gl::table(), 8 + i % 5, 8, "one of many") ?? return assert(false, "device {i} of 300 did not open");
+    dev.begin_window(gpu::CLEAR, 0xFF000000 + ((i % 256) << 16));
+    dev.end();
+    shot = dev.capture();
+    assert(dev.width() == 8 + i % 5 && len(shot) == (8 + i % 5) * 8, "device {i} is {dev.width()} wide, {len(shot)} pixels");
+    assert(shot[0] == 0xFF000000 + ((i % 256) << 16), "device {i} shows its own red: {shot[0]:x}");
+  }
+}

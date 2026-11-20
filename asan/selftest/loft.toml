@@ -1,0 +1,12 @@
+[package]
+name = "asan_selftest"
+version = "0.1.0"
+loft = ">=2026.11.20261116"
+
+[library]
+entry = "src/asan_selftest.loft"
+
+# Not a library and never published: the program `asan/run.sh` runs first, to see that the
+# sanitizer is live in C that loft loads.
+[c]
+shim = "c/selftest.c"

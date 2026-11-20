@@ -38,6 +38,7 @@ use glb::*;
 use imaging;
 use gpu;
 use gpu_gl;
+use gpu_host;
 use shader_rewrite::*;
 use on_gpu::*;
 
@@ -1038,20 +1039,89 @@ out vec4 frag;
 void main() {{ frag = color; }}
 `;
 
-// Open a window of `width` x `height` pixels titled `title`.  Null when no window can open here.
+// SPIR-V of WIPE_VERT (vertex), written by gpu_vulkan/spirv.py: do not edit.
+const WIPE_VERT_SPV: text = `AwIjBwADAQALAAgAHwAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABwAAAAAABAAAAG1haW4AAAAADQAAABIAAABHAAMACwAAAAIAAABIAAUACwAAAAAA
+AAALAAAAAAAAAEgABQALAAAAAQAAAAsAAAABAAAASAAFAAsAAAACAAAACwAAAAMAAABIAAUACwAA
+AAMAAAALAAAABAAAAEcABAASAAAAHgAAAAAAAABHAAMAHAAAAAIAAABIAAUAHAAAAAAAAAAjAAAA
+AAAAAEcABAAeAAAAIQAAAAAAAABHAAQAHgAAACIAAAAAAAAAEwACAAIAAAAhAAMAAwAAAAIAAAAW
+AAMABgAAACAAAAAXAAQABwAAAAYAAAAEAAAAFQAEAAgAAAAgAAAAAAAAACsABAAIAAAACQAAAAEA
+AAAcAAQACgAAAAYAAAAJAAAAHgAGAAsAAAAHAAAABgAAAAoAAAAKAAAAIAAEAAwAAAADAAAACwAA
+ADsABAAMAAAADQAAAAMAAAAVAAQADgAAACAAAAABAAAAKwAEAA4AAAAPAAAAAAAAABcABAAQAAAA
+BgAAAAMAAAAgAAQAEQAAAAEAAAAQAAAAOwAEABEAAAASAAAAAQAAABcABAATAAAABgAAAAIAAAAr
+AAQABgAAABYAAAAAAIA/IAAEABoAAAADAAAABwAAAB4AAwAcAAAABwAAACAABAAdAAAAAgAAABwA
+AAA7AAQAHQAAAB4AAAACAAAANgAFAAIAAAAEAAAAAAAAAAMAAAD4AAIABQAAAD0ABAAQAAAAFAAA
+ABIAAABPAAcAEwAAABUAAAAUAAAAFAAAAAAAAAABAAAAUQAFAAYAAAAXAAAAFQAAAAAAAABRAAUA
+BgAAABgAAAAVAAAAAQAAAFAABwAHAAAAGQAAABcAAAAYAAAAFgAAABYAAABBAAUAGgAAABsAAAAN
+AAAADwAAAD4AAwAbAAAAGQAAAP0AAQA4AAEA`;
+
+// SPIR-V of WIPE_FRAG (fragment), written by gpu_vulkan/spirv.py: do not edit.
+const WIPE_FRAG_SPV: text = `AwIjBwADAQALAAgAEgAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABgAEAAAABAAAAG1haW4AAAAACQAAABAAAwAEAAAABwAAAEcABAAJAAAAHgAAAAAA
+AABHAAMACgAAAAIAAABIAAUACgAAAAAAAAAjAAAAAAAAAEcABAAMAAAAIQAAAAAAAABHAAQADAAA
+ACIAAAAAAAAAEwACAAIAAAAhAAMAAwAAAAIAAAAWAAMABgAAACAAAAAXAAQABwAAAAYAAAAEAAAA
+IAAEAAgAAAADAAAABwAAADsABAAIAAAACQAAAAMAAAAeAAMACgAAAAcAAAAgAAQACwAAAAIAAAAK
+AAAAOwAEAAsAAAAMAAAAAgAAABUABAANAAAAIAAAAAEAAAArAAQADQAAAA4AAAAAAAAAIAAEAA8A
+AAACAAAABwAAADYABQACAAAABAAAAAAAAAADAAAA+AACAAUAAABBAAUADwAAABAAAAAMAAAADgAA
+AD0ABAAHAAAAEQAAABAAAAA+AAMACQAAABEAAAD9AAEAOAABAA==`;
+
+// Open a window of `width` x `height` pixels titled `title`, drawn through OpenGL: the backend
+// a shader given as GLSL alone (`shader`) runs on.  Null when no window can open here.
+// The environment variable `GPU_HOST` names another backend to open on instead (`gpu_vulkan`,
+// `gpu_metal`), for running a program that carries its shaders for it (`shader_of`).
 pub fn open_window(width: integer, height: integer, title: text) -> Window? {
+  named = env_variable("GPU_HOST") ?? "";
+  if named != "" && named != "gpu_gl" {
+    return on_named(named, width, height, title);
+  }
   dev = gpu::open(gpu_gl::table(), width, height, title) ?? return null;
-  wide = dev.width();
-  high = dev.height();
-  Window { dev: dev, kept: Kept {}, pass: Pass {}, into: gpu::INTO_WINDOW, into_w: wide, into_h: high, wipe_quad: [], wipes: [] }
+  Window { dev: dev, kept: Kept {}, pass: Pass {}, into: gpu::INTO_WINDOW, into_w: dev.width(), into_h: dev.height(), wipe_quad: [], wipes: [] }
+}
+
+// Open a window through the backend whose table is `table` (a backend library's `table()`).
+// For a program that picks its backend itself, and for a test on `gpu_record`, which needs no
+// display.  Null when the table is none or the window does not open.
+pub fn open_window_on(table: i64, width: integer, height: integer, title: text) -> Window? {
+  dev = gpu::open(table, width, height, title) ?? return null;
+  Window { dev: dev, kept: Kept {}, pass: Pass {}, into: gpu::INTO_WINDOW, into_w: dev.width(), into_h: dev.height(), wipe_quad: [], wipes: [] }
+}
+
+// A window on the backend `named` alone.
+fn on_named(named: text, width: integer, height: integer, title: text) -> Window? {
+  dev = gpu_host::open_on(named, width, height, title) ?? return null;
+  Window { dev: dev, kept: Kept {}, pass: Pass {}, into: gpu::INTO_WINDOW, into_w: dev.width(), into_h: dev.height(), wipe_quad: [], wipes: [] }
+}
+
+// Open a window on the backend this machine has (Metal on a Mac, OpenGL or Vulkan elsewhere;
+// `gpu_host` says in which order).  Every shader of the program then carries its source for
+// that backend (`shader_of`): a shader given as GLSL alone compiles on OpenGL only.
+pub fn open_window_native(width: integer, height: integer, title: text) -> Window? {
+  dev = gpu_host::open(width, height, title) ?? return null;
+  Window { dev: dev, kept: Kept {}, pass: Pass {}, into: gpu::INTO_WINDOW, into_w: dev.width(), into_h: dev.height(), wipe_quad: [], wipes: [] }
 }
 
 // Open a borderless window covering the screen; read its size with `width()` and `height()`.
 pub fn open_fullscreen(title: text) -> Window? {
   dev = gpu::open_fullscreen(gpu_gl::table(), title) ?? return null;
-  wide = dev.width();
-  high = dev.height();
-  Window { dev: dev, kept: Kept {}, pass: Pass {}, into: gpu::INTO_WINDOW, into_w: wide, into_h: high, wipe_quad: [], wipes: [] }
+  Window { dev: dev, kept: Kept {}, pass: Pass {}, into: gpu::INTO_WINDOW, into_w: dev.width(), into_h: dev.height(), wipe_quad: [], wipes: [] }
+}
+
+// `open_fullscreen` on the backend this machine has, as `open_window_native`.
+pub fn open_fullscreen_native(title: text) -> Window? {
+  dev = gpu_host::open_fullscreen(title) ?? return null;
+  Window { dev: dev, kept: Kept {}, pass: Pass {}, into: gpu::INTO_WINDOW, into_w: dev.width(), into_h: dev.height(), wipe_quad: [], wipes: [] }
+}
+
+// What the backend was asked and refused since the window opened, oldest first: a draw with a
+// call missing or out of order.  Empty in a program that draws as this library's calls allow;
+// for a test, and for finding why nothing appears.
+pub fn refusals(self: const Window) -> vector<text> {
+  self.dev.refusals()
+}
+
+// The name of the backend this window draws through, for a message.
+pub fn backend(self: const Window) -> text {
+  self.dev.backend()
 }
 
 // Take the window's pending input and apply a resize; false once the window was asked to close
@@ -1155,8 +1225,10 @@ pub fn clear(self: Window, color: integer) {
     wiped(self.dev, self.pass, color);
     return;
   }
-  // In the middle of a pass, or inside a scissor: a quad over the whole target that writes its
-  // colour and the far depth without a test, which is what a clear does there.
+  // In the middle of a pass, inside a scissor, or in a framebuffer (whose pass began when
+  // `render_to` named it: the window does not hold a framebuffer): a quad over the whole
+  // target that writes its colour and the far depth without a test, which is what a clear
+  // does there.
   self.ready();
   if len(self.wipe_quad) == 0 {
     self.wipe_quad += [self.dev.buffer([-1.0f, -1.0f, 0.0f, 1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f, -1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f, -1.0f, 1.0f, 0.0f])];
@@ -1164,7 +1236,7 @@ pub fn clear(self: Window, color: integer) {
   found = -1;
   for wipe in self.wipes { if wipe.into == self.into { found = wipe#index; } }
   if found < 0 {
-    prog = gpu::Program { vertex: [gpu::F3], instance: [], block: [gpu::F4], textures: 0, sources: [gpu::source("glsl-330", WIPE_VERT, WIPE_FRAG)] };
+    prog = gpu::Program { vertex: [gpu::F3], instance: [], block: [gpu::F4], textures: 0, sources: [gpu::source("glsl-330", WIPE_VERT, WIPE_FRAG), gpu::source("spirv", WIPE_VERT_SPV, WIPE_FRAG_SPV), gpu::source("record", "", "")] };
     depth = if self.into == gpu::INTO_COLOUR { gpu::DEPTH_OFF } else { gpu::DEPTH_WRITE };
     made = self.dev.pipeline(prog, gpu::State { depth: depth, into: self.into }) ?? return;
     found = len(self.wipes);
@@ -1288,6 +1360,8 @@ pub struct Shader {
   uniforms: vector<Uniform>,
   block: gpu::Block,
   units: vector<integer>,
+  // Its text for the backends that do not read GLSL, as the program gave it (`shader_of`).
+  others: vector<gpu::Source>,
   // The pipelines made of it so far: one for each render state, mesh layout and kind of target
   // it was drawn with.
   made: vector<Made>,
@@ -1302,30 +1376,66 @@ struct Made {
 // the program does not link (the driver's log says why, on stderr), and for a uniform this
 // library cannot carry (a message names its line).
 pub fn shader(self: Window, vertex: text, fragment: text) -> Shader? {
+  self.shader_of(vertex, fragment, [])
+}
+
+// `shader`, for a program that also runs where GLSL is not read: `sources` holds the same
+// shader for each such backend, by the tag its README names ("spirv" for Vulkan, "msl" for
+// Metal).  The GLSL is still what names the uniforms.  A SPIR-V source is written from the
+// GLSL by `gpu_vulkan/spirv.py` (its "as graphics hands them on" form); the vertex inputs of
+// such a shader are numbered in the order of the locations it wrote, so a mesh's per-copy
+// inputs (`instance_attrib`) are declared at locations in the order of their offsets.  Null,
+// with a message, on a backend none of the sources is for.
+pub fn shader_of(self: Window, vertex: text, fragment: text, sources: const vector<gpu::Source>) -> Shader? {
   r = rewrite_shader(vertex, fragment);
   if r.fault != "" {
     eprintln("graphics: {r.fault}");
     return null;
   }
-  // One pipeline now, for a mesh of positions alone: it says whether the shader compiles, and
-  // its block is where the uniforms' values are kept.
+  // One pipeline now, for a mesh of the inputs the vertex stage declares: it says whether the
+  // shader compiles, and its block is where the uniforms' values are kept.
+  declared = declared_inputs(r.vertex);
+  seed: vector<integer> = [for i in 0..len(declared) / 2 { declared[2 * i + 1] ?? gpu::F3 }];
+  if len(seed) == 0 { seed = [gpu::F3]; }
   prog = gpu::Program {
-    vertex: [gpu::F3],
+    vertex: seed,
     instance: [],
     block: block_of(r.uniforms),
     textures: samplers_of(r.uniforms),
-    sources: [gpu::source("glsl-330", r.vertex, r.fragment)],
+    sources: sources_of(numbered_in_order(r.vertex), r.fragment, sources),
   };
   state = gpu::State {};
   first = self.dev.pipeline(prog, state) ?? return null;
   Shader {
     block: first.block(),
-    made: [Made { key: "{key_of(state)}/{[gpu::F3]}/", pipe: first }],
+    made: [Made { key: "seed", pipe: first }],
     vertex: r.vertex,
     fragment: r.fragment,
     uniforms: r.uniforms,
     units: [],
+    others: [for o in sources { gpu::source(o.tag, o.vertex, o.fragment) }],
   }
+}
+
+// The GLSL of a shader with what the program gave for the other backends.
+fn sources_of(vertex: text, fragment: text, others: const vector<gpu::Source>) -> vector<gpu::Source> {
+  // "record" is the backend that draws nothing and writes down each call (`gpu_record`): it
+  // reads no shader text, so every shader runs on it.
+  out = [gpu::source("glsl-330", vertex, fragment), gpu::source("record", "", "")];
+  for o in others { out += [gpu::source(o.tag, o.vertex, o.fragment)]; }
+  out
+}
+
+// The two stages of a shader as this library hands them to `gpu`: its uniforms in one block,
+// its samplers named `tex0`, `tex1`, ….  For the tool that writes a shader's SPIR-V
+// (`tools/rewritten.loft`, run by `gpu_vulkan/spirv.py`).  Empty for a shader it cannot carry.
+pub fn rewritten(vertex: text, fragment: text) -> vector<text> {
+  r = rewrite_shader(vertex, fragment);
+  if r.fault != "" {
+    eprintln("graphics: {r.fault}");
+    return [];
+  }
+  [numbered_in_order(r.vertex), r.fragment]
 }
 
 // Set uniform `name` of this shader; a name the program does not declare is ignored, and so is
@@ -1504,7 +1614,7 @@ fn drawn(
       instance: kinds,
       block: block_of(shader.uniforms),
       textures: samplers_of(shader.uniforms),
-      sources: [gpu::source("glsl-330", with_locations(shader.vertex, moves), shader.fragment)],
+      sources: sources_of(with_locations(shader.vertex, moves), shader.fragment, shader.others),
     };
     pipe = w.dev.pipeline(prog, state) ?? return;
     found = len(shader.made);
@@ -1677,8 +1787,8 @@ fn unit_quad() -> vector<single> {
 
 // A painter for this window, sized to it.  Null when its shaders do not compile.
 pub fn painter(self: Window) -> Painter? {
-  flat = self.shader(FLAT_VERT_2D, FLAT_FRAG_2D) ?? return null;
-  tex = self.shader(TEX_VERT_2D, TEX_FRAG_2D) ?? return null;
+  flat = self.shader_of(FLAT_VERT_2D, FLAT_FRAG_2D, [gpu::source("spirv", FLAT_VERT_2D_SPV, FLAT_FRAG_2D_SPV)]) ?? return null;
+  tex = self.shader_of(TEX_VERT_2D, TEX_FRAG_2D, [gpu::source("spirv", TEX_VERT_2D_SPV, TEX_FRAG_2D_SPV)]) ?? return null;
   Painter {
     flat: flat,
     tex: tex,
@@ -1745,7 +1855,7 @@ pub struct Sprites {
 // Upload `atlas` as a sprite sheet of `cols` x `rows` cells.  Null when its shader does not
 // compile.
 pub fn sprites(self: Window, atlas: const Canvas, cols: integer, rows: integer) -> Sprites? {
-  sh = self.shader(SPRITE_VERT, SPRITE_FRAG) ?? return null;
+  sh = self.shader_of(SPRITE_VERT, SPRITE_FRAG, [gpu::source("spirv", SPRITE_VERT_SPV, SPRITE_FRAG_SPV)]) ?? return null;
   Sprites {
     texture: self.texture_from(atlas),
     shader: sh,
@@ -2852,6 +2962,55 @@ void main() {{
 }}
 `;
 
+// SPIR-V of SPRITE_VERT with SPRITE_FRAG (vertex), as graphics hands them on, written by gpu_vulkan/spirv.py: do not edit.
+const SPRITE_VERT_SPV: text = `AwIjBwADAQALAAgAQAAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ACAAAAAAABAAAAG1haW4AAAAADQAAABkAAAAlAAAARwADAAsAAAACAAAASAAFAAsA
+AAAAAAAACwAAAAAAAABIAAUACwAAAAEAAAALAAAAAQAAAEgABQALAAAAAgAAAAsAAAADAAAASAAF
+AAsAAAADAAAACwAAAAQAAABHAAMAEQAAAAIAAABIAAQAEQAAAAAAAAAFAAAASAAFABEAAAAAAAAA
+BwAAABAAAABIAAUAEQAAAAAAAAAjAAAAAAAAAEgABQARAAAAAQAAACMAAABAAAAASAAFABEAAAAC
+AAAAIwAAAEQAAABIAAUAEQAAAAMAAAAjAAAASAAAAEgABQARAAAABAAAACMAAABMAAAARwAEABMA
+AAAhAAAAAAAAAEcABAATAAAAIgAAAAAAAABHAAQAGQAAAB4AAAAAAAAARwAEACUAAAAeAAAAAAAA
+AEcABAA/AAAAIQAAAAEAAABHAAQAPwAAACIAAAAAAAAAEwACAAIAAAAhAAMAAwAAAAIAAAAWAAMA
+BgAAACAAAAAXAAQABwAAAAYAAAAEAAAAFQAEAAgAAAAgAAAAAAAAACsABAAIAAAACQAAAAEAAAAc
+AAQACgAAAAYAAAAJAAAAHgAGAAsAAAAHAAAABgAAAAoAAAAKAAAAIAAEAAwAAAADAAAACwAAADsA
+BAAMAAAADQAAAAMAAAAVAAQADgAAACAAAAABAAAAKwAEAA4AAAAPAAAAAAAAABgABAAQAAAABwAA
+AAQAAAAeAAcAEQAAABAAAAAGAAAABgAAAAYAAAAGAAAAIAAEABIAAAACAAAAEQAAADsABAASAAAA
+EwAAAAIAAAAgAAQAFAAAAAIAAAAQAAAAFwAEABcAAAAGAAAAAwAAACAABAAYAAAAAQAAABcAAAA7
+AAQAGAAAABkAAAABAAAAKwAEAAYAAAAbAAAAAACAPyAABAAhAAAAAwAAAAcAAAAXAAQAIwAAAAYA
+AAACAAAAIAAEACQAAAADAAAAIwAAADsABAAkAAAAJQAAAAMAAAArAAQADgAAACYAAAABAAAAIAAE
+ACcAAAACAAAABgAAACsABAAOAAAAKgAAAAMAAAArAAQACAAAAC0AAAAAAAAAIAAEAC4AAAABAAAA
+BgAAACsABAAOAAAAMgAAAAIAAAArAAQADgAAADUAAAAEAAAAGQAJADwAAAAGAAAAAQAAAAAAAAAA
+AAAAAAAAAAEAAAAAAAAAGwADAD0AAAA8AAAAIAAEAD4AAAAAAAAAPQAAADsABAA+AAAAPwAAAAAA
+AAA2AAUAAgAAAAQAAAAAAAAAAwAAAPgAAgAFAAAAQQAFABQAAAAVAAAAEwAAAA8AAAA9AAQAEAAA
+ABYAAAAVAAAAPQAEABcAAAAaAAAAGQAAAFEABQAGAAAAHAAAABoAAAAAAAAAUQAFAAYAAAAdAAAA
+GgAAAAEAAABRAAUABgAAAB4AAAAaAAAAAgAAAFAABwAHAAAAHwAAABwAAAAdAAAAHgAAABsAAACR
+AAUABwAAACAAAAAWAAAAHwAAAEEABQAhAAAAIgAAAA0AAAAPAAAAPgADACIAAAAgAAAAQQAFACcA
+AAAoAAAAEwAAACYAAAA9AAQABgAAACkAAAAoAAAAQQAFACcAAAArAAAAEwAAACoAAAA9AAQABgAA
+ACwAAAArAAAAQQAFAC4AAAAvAAAAGQAAAC0AAAA9AAQABgAAADAAAAAvAAAADAAIAAYAAAAxAAAA
+AQAAAC4AAAApAAAALAAAADAAAABBAAUAJwAAADMAAAATAAAAMgAAAD0ABAAGAAAANAAAADMAAABB
+AAUAJwAAADYAAAATAAAANQAAAD0ABAAGAAAANwAAADYAAABBAAUALgAAADgAAAAZAAAACQAAAD0A
+BAAGAAAAOQAAADgAAAAMAAgABgAAADoAAAABAAAALgAAADQAAAA3AAAAOQAAAFAABQAjAAAAOwAA
+ADEAAAA6AAAAPgADACUAAAA7AAAA/QABADgAAQA=`;
+
+// SPIR-V of SPRITE_VERT with SPRITE_FRAG (fragment), as graphics hands them on, written by gpu_vulkan/spirv.py: do not edit.
+const SPRITE_FRAG_SPV: text = `AwIjBwADAQALAAgAJgAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABwAEAAAABAAAAG1haW4AAAAAEQAAACAAAAAQAAMABAAAAAcAAABHAAQADQAAACEA
+AAABAAAARwAEAA0AAAAiAAAAAAAAAEcABAARAAAAHgAAAAAAAABHAAQAIAAAAB4AAAAAAAAARwAD
+ACMAAAACAAAASAAEACMAAAAAAAAABQAAAEgABQAjAAAAAAAAAAcAAAAQAAAASAAFACMAAAAAAAAA
+IwAAAAAAAABIAAUAIwAAAAEAAAAjAAAAQAAAAEgABQAjAAAAAgAAACMAAABEAAAASAAFACMAAAAD
+AAAAIwAAAEgAAABIAAUAIwAAAAQAAAAjAAAATAAAAEcABAAlAAAAIQAAAAAAAABHAAQAJQAAACIA
+AAAAAAAAEwACAAIAAAAhAAMAAwAAAAIAAAAWAAMABgAAACAAAAAXAAQABwAAAAYAAAAEAAAAIAAE
+AAgAAAAHAAAABwAAABkACQAKAAAABgAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAABsAAwALAAAA
+CgAAACAABAAMAAAAAAAAAAsAAAA7AAQADAAAAA0AAAAAAAAAFwAEAA8AAAAGAAAAAgAAACAABAAQ
+AAAAAQAAAA8AAAA7AAQAEAAAABEAAAABAAAAFQAEABQAAAAgAAAAAAAAACsABAAUAAAAFQAAAAMA
+AAAgAAQAFgAAAAcAAAAGAAAAKwAEAAYAAAAZAAAACtcjPBQAAgAaAAAAIAAEAB8AAAADAAAABwAA
+ADsABAAfAAAAIAAAAAMAAAAYAAQAIgAAAAcAAAAEAAAAHgAHACMAAAAiAAAABgAAAAYAAAAGAAAA
+BgAAACAABAAkAAAAAgAAACMAAAA7AAQAJAAAACUAAAACAAAANgAFAAIAAAAEAAAAAAAAAAMAAAD4
+AAIABQAAADsABAAIAAAACQAAAAcAAAA9AAQACwAAAA4AAAANAAAAPQAEAA8AAAASAAAAEQAAAFcA
+BQAHAAAAEwAAAA4AAAASAAAAPgADAAkAAAATAAAAQQAFABYAAAAXAAAACQAAABUAAAA9AAQABgAA
+ABgAAAAXAAAAuAAFABoAAAAbAAAAGAAAABkAAAD3AAMAHQAAAAAAAAD6AAQAGwAAABwAAAAdAAAA
++AACABwAAAD8AAEA+AACAB0AAAA9AAQABwAAACEAAAAJAAAAPgADACAAAAAhAAAA/QABADgAAQA=`;
+
 // `Painter`'s shaders: the unit quad at z = 0, mapped by `uMVP` onto pixel positions (origin
 // top-left, y down).
 
@@ -2872,6 +3031,35 @@ uniform vec4 uColor;
 out vec4 FragColor;
 void main() {{ FragColor = uColor; }}
 `;
+
+// SPIR-V of FLAT_VERT_2D with FLAT_FRAG_2D (vertex), as graphics hands them on, written by gpu_vulkan/spirv.py: do not edit.
+const FLAT_VERT_2D_SPV: text = `AwIjBwADAQALAAgAIwAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABwAAAAAABAAAAG1haW4AAAAADQAAABkAAABHAAMACwAAAAIAAABIAAUACwAAAAAA
+AAALAAAAAAAAAEgABQALAAAAAQAAAAsAAAABAAAASAAFAAsAAAACAAAACwAAAAMAAABIAAUACwAA
+AAMAAAALAAAABAAAAEcAAwARAAAAAgAAAEgABAARAAAAAAAAAAUAAABIAAUAEQAAAAAAAAAHAAAA
+EAAAAEgABQARAAAAAAAAACMAAAAAAAAASAAFABEAAAABAAAAIwAAAEAAAABHAAQAEwAAACEAAAAA
+AAAARwAEABMAAAAiAAAAAAAAAEcABAAZAAAAHgAAAAAAAAATAAIAAgAAACEAAwADAAAAAgAAABYA
+AwAGAAAAIAAAABcABAAHAAAABgAAAAQAAAAVAAQACAAAACAAAAAAAAAAKwAEAAgAAAAJAAAAAQAA
+ABwABAAKAAAABgAAAAkAAAAeAAYACwAAAAcAAAAGAAAACgAAAAoAAAAgAAQADAAAAAMAAAALAAAA
+OwAEAAwAAAANAAAAAwAAABUABAAOAAAAIAAAAAEAAAArAAQADgAAAA8AAAAAAAAAGAAEABAAAAAH
+AAAABAAAAB4ABAARAAAAEAAAAAcAAAAgAAQAEgAAAAIAAAARAAAAOwAEABIAAAATAAAAAgAAACAA
+BAAUAAAAAgAAABAAAAAXAAQAFwAAAAYAAAADAAAAIAAEABgAAAABAAAAFwAAADsABAAYAAAAGQAA
+AAEAAAArAAQABgAAABsAAAAAAIA/IAAEACEAAAADAAAABwAAADYABQACAAAABAAAAAAAAAADAAAA
++AACAAUAAABBAAUAFAAAABUAAAATAAAADwAAAD0ABAAQAAAAFgAAABUAAAA9AAQAFwAAABoAAAAZ
+AAAAUQAFAAYAAAAcAAAAGgAAAAAAAABRAAUABgAAAB0AAAAaAAAAAQAAAFEABQAGAAAAHgAAABoA
+AAACAAAAUAAHAAcAAAAfAAAAHAAAAB0AAAAeAAAAGwAAAJEABQAHAAAAIAAAABYAAAAfAAAAQQAF
+ACEAAAAiAAAADQAAAA8AAAA+AAMAIgAAACAAAAD9AAEAOAABAA==`;
+
+// SPIR-V of FLAT_VERT_2D with FLAT_FRAG_2D (fragment), as graphics hands them on, written by gpu_vulkan/spirv.py: do not edit.
+const FLAT_FRAG_2D_SPV: text = `AwIjBwADAQALAAgAEwAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABgAEAAAABAAAAG1haW4AAAAACQAAABAAAwAEAAAABwAAAEcABAAJAAAAHgAAAAAA
+AABHAAMACwAAAAIAAABIAAQACwAAAAAAAAAFAAAASAAFAAsAAAAAAAAABwAAABAAAABIAAUACwAA
+AAAAAAAjAAAAAAAAAEgABQALAAAAAQAAACMAAABAAAAARwAEAA0AAAAhAAAAAAAAAEcABAANAAAA
+IgAAAAAAAAATAAIAAgAAACEAAwADAAAAAgAAABYAAwAGAAAAIAAAABcABAAHAAAABgAAAAQAAAAg
+AAQACAAAAAMAAAAHAAAAOwAEAAgAAAAJAAAAAwAAABgABAAKAAAABwAAAAQAAAAeAAQACwAAAAoA
+AAAHAAAAIAAEAAwAAAACAAAACwAAADsABAAMAAAADQAAAAIAAAAVAAQADgAAACAAAAABAAAAKwAE
+AA4AAAAPAAAAAQAAACAABAAQAAAAAgAAAAcAAAA2AAUAAgAAAAQAAAAAAAAAAwAAAPgAAgAFAAAA
+QQAFABAAAAARAAAADQAAAA8AAAA9AAQABwAAABIAAAARAAAAPgADAAkAAAASAAAA/QABADgAAQA=`;
 
 // Textured quad vertex shader — samples the full texture with identity UV.
 // `glTexImage2D` stores canvas-top at TC.y=0 and the 2D ortho projection
@@ -2900,6 +3088,47 @@ void main() {{
     FragColor = c;
 }}
 `;
+
+// SPIR-V of TEX_VERT_2D with TEX_FRAG_2D (vertex), as graphics hands them on, written by gpu_vulkan/spirv.py: do not edit.
+const TEX_VERT_2D_SPV: text = `AwIjBwADAQALAAgAMQAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ACAAAAAAABAAAAG1haW4AAAAADQAAABkAAAAlAAAARwADAAsAAAACAAAASAAFAAsA
+AAAAAAAACwAAAAAAAABIAAUACwAAAAEAAAALAAAAAQAAAEgABQALAAAAAgAAAAsAAAADAAAASAAF
+AAsAAAADAAAACwAAAAQAAABHAAMAEQAAAAIAAABIAAQAEQAAAAAAAAAFAAAASAAFABEAAAAAAAAA
+BwAAABAAAABIAAUAEQAAAAAAAAAjAAAAAAAAAEcABAATAAAAIQAAAAAAAABHAAQAEwAAACIAAAAA
+AAAARwAEABkAAAAeAAAAAAAAAEcABAAlAAAAHgAAAAAAAABHAAQAMAAAACEAAAABAAAARwAEADAA
+AAAiAAAAAAAAABMAAgACAAAAIQADAAMAAAACAAAAFgADAAYAAAAgAAAAFwAEAAcAAAAGAAAABAAA
+ABUABAAIAAAAIAAAAAAAAAArAAQACAAAAAkAAAABAAAAHAAEAAoAAAAGAAAACQAAAB4ABgALAAAA
+BwAAAAYAAAAKAAAACgAAACAABAAMAAAAAwAAAAsAAAA7AAQADAAAAA0AAAADAAAAFQAEAA4AAAAg
+AAAAAQAAACsABAAOAAAADwAAAAAAAAAYAAQAEAAAAAcAAAAEAAAAHgADABEAAAAQAAAAIAAEABIA
+AAACAAAAEQAAADsABAASAAAAEwAAAAIAAAAgAAQAFAAAAAIAAAAQAAAAFwAEABcAAAAGAAAAAwAA
+ACAABAAYAAAAAQAAABcAAAA7AAQAGAAAABkAAAABAAAAKwAEAAYAAAAbAAAAAACAPyAABAAhAAAA
+AwAAAAcAAAAXAAQAIwAAAAYAAAACAAAAIAAEACQAAAADAAAAIwAAADsABAAkAAAAJQAAAAMAAAAr
+AAQACAAAACYAAAAAAAAAIAAEACcAAAABAAAABgAAABkACQAtAAAABgAAAAEAAAAAAAAAAAAAAAAA
+AAABAAAAAAAAABsAAwAuAAAALQAAACAABAAvAAAAAAAAAC4AAAA7AAQALwAAADAAAAAAAAAANgAF
+AAIAAAAEAAAAAAAAAAMAAAD4AAIABQAAAEEABQAUAAAAFQAAABMAAAAPAAAAPQAEABAAAAAWAAAA
+FQAAAD0ABAAXAAAAGgAAABkAAABRAAUABgAAABwAAAAaAAAAAAAAAFEABQAGAAAAHQAAABoAAAAB
+AAAAUQAFAAYAAAAeAAAAGgAAAAIAAABQAAcABwAAAB8AAAAcAAAAHQAAAB4AAAAbAAAAkQAFAAcA
+AAAgAAAAFgAAAB8AAABBAAUAIQAAACIAAAANAAAADwAAAD4AAwAiAAAAIAAAAEEABQAnAAAAKAAA
+ABkAAAAmAAAAPQAEAAYAAAApAAAAKAAAAEEABQAnAAAAKgAAABkAAAAJAAAAPQAEAAYAAAArAAAA
+KgAAAFAABQAjAAAALAAAACkAAAArAAAAPgADACUAAAAsAAAA/QABADgAAQA=`;
+
+// SPIR-V of TEX_VERT_2D with TEX_FRAG_2D (fragment), as graphics hands them on, written by gpu_vulkan/spirv.py: do not edit.
+const TEX_FRAG_2D_SPV: text = `AwIjBwADAQALAAgAJgAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABwAEAAAABAAAAG1haW4AAAAAEQAAACAAAAAQAAMABAAAAAcAAABHAAQADQAAACEA
+AAABAAAARwAEAA0AAAAiAAAAAAAAAEcABAARAAAAHgAAAAAAAABHAAQAIAAAAB4AAAAAAAAARwAD
+ACMAAAACAAAASAAEACMAAAAAAAAABQAAAEgABQAjAAAAAAAAAAcAAAAQAAAASAAFACMAAAAAAAAA
+IwAAAAAAAABHAAQAJQAAACEAAAAAAAAARwAEACUAAAAiAAAAAAAAABMAAgACAAAAIQADAAMAAAAC
+AAAAFgADAAYAAAAgAAAAFwAEAAcAAAAGAAAABAAAACAABAAIAAAABwAAAAcAAAAZAAkACgAAAAYA
+AAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAbAAMACwAAAAoAAAAgAAQADAAAAAAAAAALAAAAOwAE
+AAwAAAANAAAAAAAAABcABAAPAAAABgAAAAIAAAAgAAQAEAAAAAEAAAAPAAAAOwAEABAAAAARAAAA
+AQAAABUABAAUAAAAIAAAAAAAAAArAAQAFAAAABUAAAADAAAAIAAEABYAAAAHAAAABgAAACsABAAG
+AAAAGQAAAArXIzwUAAIAGgAAACAABAAfAAAAAwAAAAcAAAA7AAQAHwAAACAAAAADAAAAGAAEACIA
+AAAHAAAABAAAAB4AAwAjAAAAIgAAACAABAAkAAAAAgAAACMAAAA7AAQAJAAAACUAAAACAAAANgAF
+AAIAAAAEAAAAAAAAAAMAAAD4AAIABQAAADsABAAIAAAACQAAAAcAAAA9AAQACwAAAA4AAAANAAAA
+PQAEAA8AAAASAAAAEQAAAFcABQAHAAAAEwAAAA4AAAASAAAAPgADAAkAAAATAAAAQQAFABYAAAAX
+AAAACQAAABUAAAA9AAQABgAAABgAAAAXAAAAuAAFABoAAAAbAAAAGAAAABkAAAD3AAMAHQAAAAAA
+AAD6AAQAGwAAABwAAAAdAAAA+AACABwAAAD8AAEA+AACAB0AAAA9AAQABwAAACEAAAAJAAAAPgAD
+ACAAAAAhAAAA/QABADgAAQA=`;
 
 // Build an MVP = proj * translate(x, y, 0) * scale(w, h, 1) without going
 // through the generic math::mat4_mul path. The model matrix is sparse, so

@@ -320,9 +320,21 @@ static void gv_x_close(gv_x_window *x) {
     x->event_count = x->event_cap = x->text_len = x->text_cap = 0;
 }
 
-/* Open the display.  A server that still counts the connections just closed resets a new one:
- * under Xvfb one open in a thousand, more when several programs open at once.  It is asked
- * again for up to half a second.  A display that is not there refuses, and is not asked twice. */
+/* Whether a display that did not open is worth asking again: the server took the connection
+ * and dropped it before the setup was read.  How that reaches the client depends on where the
+ * drop lands: a reset (ECONNRESET), a write to the closed socket (EPIPE), a read cut short
+ * (EAGAIN), or a clean end of file, which leaves errno 0.  A display that is not there says so
+ * (ECONNREFUSED, ENOENT) and is not asked twice; nor is errno 0 with no DISPLAY named. */
+static int gv_x_ask_again(int err) {
+    if (err == ECONNRESET || err == EAGAIN || err == EPIPE) return 1;
+    return err == 0 && getenv("DISPLAY") != NULL;
+}
+
+/* Open the display.  An X server starts over when its last client leaves (unless it runs
+ * with `-noreset`), and drops a connection that arrives while it does: a program that closes
+ * its only window and opens another meets it.  Under Xvfb that is one open in a thousand on
+ * an idle machine and one in three on a loaded one.  The server is asked again for up to half
+ * a second. */
 static void *gv_x_open_display(gv_x_window *x) {
     struct timeval wait;
     int tries;
@@ -330,7 +342,7 @@ static void *gv_x_open_display(gv_x_window *x) {
         void *display;
         errno = 0;
         display = x->xa.XOpenDisplay(NULL);
-        if (display || (errno != ECONNRESET && errno != EAGAIN)) return display;
+        if (display || !gv_x_ask_again(errno)) return display;
         wait.tv_sec = 0;
         wait.tv_usec = 10000;
         select(0, NULL, NULL, NULL, &wait);
