@@ -1,0 +1,4 @@
+# tiles' 64-bit work in a 32-bit device app (loft --native-esp; loft's WIDTH32.md § The image gate).
+tl_first        the camera is 16.16 fixed point: a tile's place times 65536 is past 32 bits before the zoom divides it
+tl_sprite_at    the same: a sprite's corner in 16.16 fixed point, scaled by the zoom
+tl_draw_ground  the same: the ground's first and last tile through the camera's zoom
