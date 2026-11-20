@@ -80,10 +80,8 @@ fn test_a_canvas_becomes_a_texture() {
   t = w.texture_from(img);
   assert(t.width() == 2 && t.height() == 2, "size {t.width()}x{t.height()}");
   t.filter(true);
-  t.bind(0);
-  show.set_int("image", 0);
   w.clear(0xFF000000);
-  w.quad().draw(show);
+  w.quad().draw(w, show, t);
   c = w.capture();
   assert(at(c, 16, 36) == RED, "canvas (0, 0) is the bottom left: {at(c, 16, 36):x}");
   assert(at(c, 48, 36) == GREEN, "canvas (1, 0) the bottom right: {at(c, 48, 36):x}");
@@ -100,21 +98,17 @@ fn test_draws_into_a_framebuffer() {
   half = w.upload(left_half(), 3);
   colour = w.texture(32, 32);
   depth = w.depth_texture(32, 32);
-  target = w.framebuffer();
-  target.attach(colour);
-  target.attach(depth);
+  target = w.framebuffer_with_depth(colour, depth);
   w.render_to(target);
   w.viewport(0, 0, 32, 32);
   w.clear(RED);
   flat.set_vec4("color", 0.0, 1.0, 0.0, 1.0);
-  half.draw(flat);
+  half.draw(w, flat);
   w.render_to_window();
   w.viewport(0, 0, 64, 48);
   w.clear(BLUE);
   colour.filter(true);
-  colour.bind(0);
-  show.set_int("image", 0);
-  w.quad().draw(show);
+  w.quad().draw(w, show, colour);
   c = w.capture();
   assert(at(c, 31, 24) == GREEN, "the left half was drawn green: {at(c, 31, 24):x}");
   assert(at(c, 32, 24) == RED, "the right half kept the target's clear: {at(c, 32, 24):x}");
@@ -128,10 +122,8 @@ fn test_put_replaces_a_region() {
   t = w.texture_from(canvas(4, 1, RED));
   t.put(1, 0, canvas(2, 1, GREEN));
   t.filter(true);
-  t.bind(0);
-  show.set_int("image", 0);
   w.clear(0xFF000000);
-  w.quad().draw(show);
+  w.quad().draw(w, show, t);
   c = w.capture();
   got = [at(c, 8, 24), at(c, 24, 24), at(c, 40, 24), at(c, 56, 24)];
   assert(got == [RED, GREEN, GREEN, RED], "columns {got}");
@@ -145,11 +137,12 @@ fn test_the_window_is_the_target_again() {
   w = wo ?? return assert(false, "no window");
   {
     depth = w.depth_texture(16, 16);
-    only_depth = w.framebuffer();
-    only_depth.attach(depth);
+    only_depth = w.depth_framebuffer(depth);
     w.render_to(only_depth);
     w.clear(RED);
   }
+  // the framebuffer is gone; the window is drawn into again once it is said so
+  w.render_to_window();
   w.viewport(0, 0, 64, 48);
   w.clear(GREEN);
   c = w.capture();
@@ -167,7 +160,7 @@ fn test_a_png_becomes_a_texture() {
   assert(t.width() == 64 && t.height() == 32, "size {t.width()}x{t.height()}");
   gold = imaging::png(file("gold/gold-text-fixture.png")) ?? return assert(false, "gold decodes");
   w.clear(0xFF000000);
-  p.image(t, 0.0, 0.0, 64.0, 32.0);
+  p.image(w, t, 0.0, 0.0, 64.0, 32.0);
   c = w.capture();
   differ = 0;
   for i in 0..64 * 32 {
@@ -182,7 +175,7 @@ fn test_a_png_becomes_a_texture() {
   t2 = w.load_texture(shot) ?? return assert(false, "the RGBA PNG loads");
   t2.filter(true);
   w.clear(0xFF0000FF);
-  p.image(t2, 0.0, 0.0, 64.0, 32.0);
+  p.image(w, t2, 0.0, 0.0, 64.0, 32.0);
   c = w.capture();
   assert(at(c, 16, 16) == rgba(10, 200, 30, 255), "the opaque texel: {at(c, 16, 16):x}");
   assert(at(c, 48, 16) == 0xFF0000FF, "the transparent texel is not drawn: {at(c, 48, 16):x}");

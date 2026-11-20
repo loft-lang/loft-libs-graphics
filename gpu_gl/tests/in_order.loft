@@ -3,7 +3,7 @@
 //
 // What `gpu` promises of every backend and OpenGL does not give by itself, against values
 // worked out by hand: a texture changed between two draws of a pass, a uniform block given again
-// between draws, a depth written without a test, and a window that has no alpha and reads back the frame it shows.
+// between draws, a depth written without a test, a point of the size its shader writes, and a window that has no alpha and reads back the frame it shows.
 // Without a display every test returns at once (`DISPLAY`, or `GRAPHICS_TEST_WINDOW=1` on a
 // Mac).
 use gpu;
@@ -247,4 +247,54 @@ fn test_a_depth_written_without_a_test_lets_a_further_draw_through() {
   assert(mid[24 * 64 + 48] == 0xFFFF0000, "and was cut by the scissor on the right: {mid[24 * 64 + 48]:x}");
   assert(shot[24 * 64 + 16] == 0xFFFFFF00, "left: the further frame passed the depth it left: {shot[24 * 64 + 16]:x}");
   assert(shot[24 * 64 + 48] == 0xFFFF0000, "right: the near frame kept its depth: {shot[24 * 64 + 48]:x}");
+}
+
+const DOT_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(std140) uniform Block {{ vec4 color; float size; }};
+void main() {{ gl_Position = vec4(pos.xy, 0.0, 1.0); gl_PointSize = size; }}
+`;
+
+const DOT_F: text = `
+#version 330 core
+layout(std140) uniform Block {{ vec4 color; float size; }};
+out vec4 frag;
+void main() {{ frag = color; }}
+`;
+
+// A point is as large as its vertex stage says, here as on every other backend: one of 5
+// pixels at the centre of pixel (40, 24) covers the 5 x 5 around it, one of 1 its own pixel.
+fn test_a_point_has_the_size_its_shader_writes() {
+  devo = gpu::open(gpu_gl::table(), 64, 48, "point-size");
+  if !display() { return; }
+  dev = devo ?? return assert(false, "no device");
+  prog = gpu::Program {
+    vertex: [gpu::F3],
+    instance: [],
+    block: [gpu::F4, gpu::F1],
+    textures: 0,
+    sources: [gpu::source("glsl-330", DOT_V, DOT_F)],
+  };
+  pipe = dev.pipeline(prog, gpu::State { shape: gpu::POINTS }) ?? return assert(false, "no pipeline");
+  // x = (40.5 / 32) - 1, y = 1 - (24.5 / 24)
+  dot = dev.buffer([0.265625f, -0.0208333333f, 0.0f]);
+  u = pipe.block();
+  u.f4(0, 0.0, 1.0, 0.0, 1.0);
+  u.f1(1, 5.0);
+  dev.begin_window(gpu::CLEAR, 0xFF000000);
+  dev.bind(pipe);
+  dev.uniforms(u); dev.vertices(dot); dev.draw(0, 1);
+  dev.end();
+  big = dev.capture();
+  u.f1(1, 1.0);
+  dev.begin_window(gpu::CLEAR, 0xFF000000);
+  dev.bind(pipe);
+  dev.uniforms(u); dev.vertices(dot); dev.draw(0, 1);
+  dev.end();
+  small = dev.capture();
+  assert(len(dev.refusals()) == 0, "nothing refused: {dev.refusals()}");
+  assert(big[24 * 64 + 40] == 0xFF00FF00 && big[26 * 64 + 42] == 0xFF00FF00 && big[22 * 64 + 38] == 0xFF00FF00, "5 pixels: the corners of the 5 x 5 are drawn: {big[26 * 64 + 42]:x} {big[22 * 64 + 38]:x}");
+  assert(big[24 * 64 + 43] == 0xFF000000 && big[24 * 64 + 37] == 0xFF000000, "and it stops there: {big[24 * 64 + 43]:x} {big[24 * 64 + 37]:x}");
+  assert(small[24 * 64 + 40] == 0xFF00FF00 && small[24 * 64 + 41] == 0xFF000000 && small[25 * 64 + 40] == 0xFF000000, "1 pixel: its own alone: {small[24 * 64 + 41]:x}");
 }

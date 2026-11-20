@@ -1,13 +1,10 @@
-/* DERIVED from graphics/c/graphics_gl.c by gpu_gl/c/derive_base.sh: do not edit.
- * The window hosts, the GL function table and the texture and framebuffer code of the
- * graphics library, under the prefix gq_ so both link into one program.  graphics keeps
- * its own copy until its Window is a gpu Device; then this is the only one. */
 /* Copyright (c) 2026 Jurjen Stellingwerff
  * SPDX-License-Identifier: LGPL-3.0-or-later
  *
- * The graphics library's window and GL context, in C99: a `[c] shim` loft builds itself, bound by
- * the `#c` declarations in src/graphics.loft.  A window is a handle (its record's address as an
- * integer, 0 for none) that the loft `Window` holds and closes when it dies.  A shader or a mesh
+ * This backend's window and GL context, in C99, under gpu_gl.c: the window hosts, the GL
+ * function table and the texture and framebuffer code.  (It was the graphics library's own C
+ * until graphics 0.14 drew through `gpu`; this is now the only copy.)  A window is a handle (its
+ * record's address as an integer, 0 for none) that its device holds and closes when it dies.  A shader or a mesh
  * is a handle too, holding a counted reference to its window: released after the window closed it
  * is a no-op (closing the context freed it), and the window's record lives until the last one.
  *

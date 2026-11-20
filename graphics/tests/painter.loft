@@ -33,13 +33,13 @@ fn test_rectangles_land_on_their_pixels() {
   w = wo ?? return assert(false, "a display is set and no window opened");
   p = w.painter() ?? return assert(false, "the painter's shaders compile");
   w.clear(BLACK);
-  p.rect(8.0, 4.0, 16.0, 10.0, 1.0, 0.0, 0.0, 1.0);
+  p.rect(w, 8.0, 4.0, 16.0, 10.0, 1.0, 0.0, 0.0, 1.0);
   c = w.capture();
   assert(at(c, 8, 4) == RED && at(c, 23, 13) == RED, "the corners (8, 4) and (23, 13)");
   assert(at(c, 24, 4) == BLACK && at(c, 8, 14) == BLACK && at(c, 7, 4) == BLACK, "and no further");
   p.resize(32, 24);
   w.clear(BLACK);
-  p.rect(0.0, 0.0, 16.0, 12.0, 0.0, 1.0, 0.0, 1.0);
+  p.rect(w, 0.0, 0.0, 16.0, 12.0, 0.0, 1.0, 0.0, 1.0);
   c = w.capture();
   assert(
     at(c, 31, 23) == GREEN && at(c, 32, 24) == BLACK,
@@ -60,7 +60,7 @@ fn test_an_image_keeps_its_rows_and_skips_the_transparent() {
   t = w.texture_from(img);
   t.filter(true);
   w.clear(BLACK);
-  p.image(t, 32.0, 0.0, 32.0, 48.0);
+  p.image(w, t, 32.0, 0.0, 32.0, 48.0);
   c = w.capture();
   assert(
     at(c, 40, 10) == RED && at(c, 56, 10) == GREEN,
@@ -82,8 +82,8 @@ fn test_a_sprite_shows_its_cell() {
   }
   sheet = w.sprites(atlas, 2, 1) ?? return assert(false, "sprite shader");
   w.clear(BLACK);
-  p.sprite(sheet, 0.0, 0.0, 32.0, 48.0, 1);
-  p.sprite(sheet, 32.0, 0.0, 32.0, 48.0, 0);
+  p.sprite(w, sheet, 0.0, 0.0, 32.0, 48.0, 1);
+  p.sprite(w, sheet, 32.0, 0.0, 32.0, 48.0, 0);
   c = w.capture();
   assert(at(c, 16, 24) == GREEN, "sprite 1 is the right cell: {at(c, 16, 24):x}");
   assert(at(c, 48, 24) == RED, "sprite 0 the left: {at(c, 48, 24):x}");
@@ -119,13 +119,13 @@ fn test_groups_reupload_on_their_own() {
   set.upsert(w, 1, band(-1.0, -0.5), z, z, z, z);
   set.upsert(w, 2, band(0.5, 1.0), z, z, z, z);
   w.clear(BLACK);
-  set.draw_all(s);
+  set.draw_all(w, s);
   c = w.capture();
   got = [at(c, 8, 24), at(c, 24, 24), at(c, 40, 24), at(c, 56, 24)];
   assert(got == [WHITE, BLACK, BLACK, WHITE], "groups 1 and 2: {got}");
   set.upsert(w, 1, band(-0.5, 0.0), z, z, z, z);
   w.clear(BLACK);
-  set.draw_all(s);
+  set.draw_all(w, s);
   c = w.capture();
   got = [at(c, 8, 24), at(c, 24, 24), at(c, 40, 24), at(c, 56, 24)];
   assert(got == [BLACK, WHITE, BLACK, WHITE], "group 1 moved, group 2 kept: {got}");
@@ -171,10 +171,10 @@ fn test_a_painter_draws_in_call_order_over_a_3d_frame() {
   sheet = w.sprites(atlas, 2, 1) ?? return assert(false, "sprite shader");
   assert(w.enabled(GL_DEPTH_TEST), "the window opened with depth testing on");
   w.clear(BLACK);
-  full.draw(near);
-  p.rect(8.0, 4.0, 16.0, 10.0, 0.0, 1.0, 0.0, 1.0);
-  p.rect(16.0, 4.0, 16.0, 10.0, 1.0, 0.0, 0.0, 1.0);
-  p.sprite(sheet, 40.0, 20.0, 16.0, 16.0, 1);
+  full.draw(w, near);
+  p.rect(w, 8.0, 4.0, 16.0, 10.0, 0.0, 1.0, 0.0, 1.0);
+  p.rect(w, 16.0, 4.0, 16.0, 10.0, 1.0, 0.0, 0.0, 1.0);
+  p.sprite(w, sheet, 40.0, 20.0, 16.0, 16.0, 1);
   c = w.capture();
   assert(at(c, 10, 8) == GREEN, "the rectangle is not hidden behind the 3-D quad: {at(c, 10, 8):x}");
   assert(at(c, 20, 8) == RED, "the later rectangle covers the earlier: {at(c, 20, 8):x}");

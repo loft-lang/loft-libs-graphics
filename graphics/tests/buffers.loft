@@ -22,7 +22,8 @@ const V: text = `
 layout(location = 0) in vec3 pos;
 layout(location = 5) in float dx;
 uniform float shifted;
-void main() {{ gl_Position = vec4(pos.x + shifted * dx, pos.y, 0.0, 1.0); }}
+uniform float point;
+void main() {{ gl_Position = vec4(pos.x + shifted * dx, pos.y, 0.0, 1.0); gl_PointSize = point; }}
 `;
 
 const F: text = `
@@ -51,15 +52,15 @@ fn test_an_index_list_draws_what_it_names() {
   s = w.shader(V, F) ?? return assert(false, "shader");
   // the left half: 0 bottom-left, 1 bottom-middle, 2 top-middle, 3 top-left
   m = w.upload(points([-1.0, -1.0, 0.0, -1.0, 0.0, 1.0, -1.0, 1.0]), 3);
-  m.indices([0, 1, 2]);
+  m.indices(w, [0, 1, 2]);
   w.clear(BLACK);
-  m.draw_indexed(s, DRAW_TRIANGLES);
+  m.draw_indexed(w, s, DRAW_TRIANGLES);
   c = w.capture();
   assert(at(c, 28, 40) == GREEN, "the triangle 0-1-2 holds the bottom right of the half");
   assert(at(c, 4, 4) == BLACK, "and not its top left");
-  m.indices([0, 1, 2, 0, 2, 3]);
+  m.indices(w, [0, 1, 2, 0, 2, 3]);
   w.clear(BLACK);
-  m.draw_indexed(s, DRAW_TRIANGLES);
+  m.draw_indexed(w, s, DRAW_TRIANGLES);
   c = w.capture();
   assert(at(c, 4, 4) == GREEN, "the second list covers the top left too");
   assert(at(c, 40, 24) == BLACK, "and nothing right of the middle");
@@ -73,14 +74,14 @@ fn test_update_replaces_the_vertices() {
   m = w.upload(points([-1.0, -1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 0.0, 1.0, -1.0, 1.0]), 3);
   m.update(points([0.0, -1.0, 1.0, -1.0, 1.0, 1.0, 0.0, -1.0, 1.0, 1.0, 0.0, 1.0]));
   w.clear(BLACK);
-  m.draw(s);
+  m.draw(w, s);
   c = w.capture();
   assert(at(c, 48, 24) == GREEN, "the right half is drawn");
   assert(at(c, 16, 24) == BLACK, "the left half no longer");
   // fewer vertices: one triangle of three, the count follows the data
   m.update(points([0.0, -1.0, 1.0, -1.0, 1.0, 1.0]));
   w.clear(BLACK);
-  m.draw(s);
+  m.draw(w, s);
   c = w.capture();
   assert(at(c, 60, 40) == GREEN, "the remaining triangle");
   assert(at(c, 36, 4) == BLACK, "the dropped one");
@@ -94,16 +95,16 @@ fn test_instances_advance_once_per_copy() {
   // a strip x = -1..-0.5: columns 0-15
   strip = w.upload(points([-1.0, -1.0, -0.5, -1.0, -0.5, 1.0, -1.0, -1.0, -0.5, 1.0, -1.0, 1.0]), 3);
   ib = w.instances([0.0 as single, 1.0 as single]);
-  strip.instance_attrib(ib, 5, 1, 1, 0);
+  strip.instance_attrib(5, 1, 0);
   s.set_float("shifted", 1.0);
   w.clear(BLACK);
-  strip.draw_instanced(s, 2);
+  strip.draw_instanced(w, s, ib, 2);
   c = w.capture();
   got = [at(c, 8, 24), at(c, 24, 24), at(c, 40, 24), at(c, 56, 24)];
   assert(got == [GREEN, BLACK, GREEN, BLACK], "copies at dx 0 and 1: {got}");
   ib.update([0.5 as single, 1.5 as single]);
   w.clear(BLACK);
-  strip.draw_instanced(s, 2);
+  strip.draw_instanced(w, s, ib, 2);
   c = w.capture();
   got = [at(c, 8, 24), at(c, 24, 24), at(c, 40, 24), at(c, 56, 24)];
   assert(got == [BLACK, GREEN, BLACK, GREEN], "copies at dx 0.5 and 1.5: {got}");
@@ -117,15 +118,15 @@ fn test_lines_and_points() {
   // a vertical line at x = -0.5 + half a pixel (the centre of column 16)
   line = w.upload(points([-0.484375, -1.0, -0.484375, 1.0]), 3);
   w.clear(BLACK);
-  line.draw_mode(s, DRAW_LINES);
+  line.draw_mode(w, s, DRAW_LINES);
   c = w.capture();
   assert(at(c, 16, 24) == GREEN, "the line lies in column 16");
   assert(at(c, 14, 24) == BLACK && at(c, 18, 24) == BLACK, "and only there");
   // a point of 5 pixels at the centre of pixel (40, 24): x = (40.5 / 32) - 1, y = 1 - (24.5 / 24)
   dot = w.upload(points([0.265625, -0.0208333333]), 3);
-  w.point_size(5.0);
+  s.set_float("point", 5.0);
   w.clear(BLACK);
-  dot.draw_mode(s, DRAW_POINTS);
+  dot.draw_mode(w, s, DRAW_POINTS);
   c = w.capture();
   assert(at(c, 40, 24) == GREEN && at(c, 42, 26) == GREEN, "the point covers 5 x 5 around it");
   assert(at(c, 43, 24) == BLACK && at(c, 37, 24) == BLACK, "and stops there");

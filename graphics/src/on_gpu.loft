@@ -1,0 +1,274 @@
+#package
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// This library's drawing calls, said in `gpu`'s terms.
+//
+// A program of this library sets a uniform by its name and uploads a mesh by its stride; `gpu`
+// sets a block's fields by position and reads a program's inputs from a list.  The pieces
+// here carry one to the other, and nothing in them touches a window: each is a plain
+// function over values, tested without a display.
+use gpu;
+use shader_rewrite::*;
+
+// ── a mesh's stride as a program's inputs ──
+
+// The inputs a mesh of `stride` floats a vertex gives a shader, in the order of their
+// locations: a position of three; from 6 floats a normal of three; at exactly 8 a texture
+// coordinate of two; from 10 a colour of four; from 14 an anchor of three and a birth time.
+// Floats the rule gives no meaning (a stride of 5, of 12) are still part of every vertex: they
+// follow as inputs no shader of this library reads, so the list always adds up to the stride.
+// Empty for a stride under 3, which is no mesh.
+fn inputs_of(stride: integer) -> vector<integer> {
+  if stride < 3 { return []; }
+  out = [gpu::F3];
+  used = 3;
+  if stride >= 6 {
+    out += [gpu::F3];
+    used = 6;
+  }
+  if stride == 8 {
+    out += [gpu::F2];
+    used = 8;
+  }
+  if stride >= 10 {
+    out += [gpu::F4];
+    used = 10;
+  }
+  if stride >= 14 {
+    out += [gpu::F3, gpu::F1];
+    used = 14;
+  }
+  rest = stride - used;
+  while rest > 0 {
+    take = if rest > 4 { 4 } else { rest };
+    out += [take];
+    rest -= take;
+  }
+  out
+}
+
+// ── a shader's uniforms as a block ──
+
+// The block of a rewritten shader as a `gpu::Program` declares it: one entry a field, in the
+// fields' order.
+fn block_of(unis: const vector<Uniform>) -> vector<integer> {
+  out: vector<integer> = [];
+  for u in unis {
+    if u.floats == 0 { continue; }
+    if u.count > 0 {
+      out += [gpu::f4s(u.count)];
+    } else {
+      out += [u.floats];
+    }
+  }
+  out
+}
+
+// How many textures a rewritten shader samples.
+fn samplers_of(unis: const vector<Uniform>) -> integer {
+  n = 0;
+  for u in unis { if u.floats == 0 { n += 1; } }
+  n
+}
+
+// Where a setter's name points: which uniform, and which element when the name ends in one
+// (`uLights[3]`).  `uniform` is -1 for a name the shader does not declare.
+struct Place {
+  uniform: integer,
+  element: integer,
+}
+
+fn place_of(unis: const vector<Uniform>, name: text) -> Place {
+  plain = name;
+  element = -1;
+  open = name.find("[");
+  if open != null && name.ends_with("]") {
+    plain = name[0..open];
+    element = name[open + 1..name.size() - 1] as integer ?? -2;
+  }
+  for u in unis {
+    if u.name == plain {
+      // an element of something that is no array, or none of an array: not this uniform
+      if (u.count > 0) != (element >= 0) || element == -2 || element >= u.count && u.count > 0 {
+        return Place { uniform: -1, element: -1 };
+      }
+      return Place { uniform: u#index, element: element };
+    }
+  }
+  Place { uniform: -1, element: -1 }
+}
+
+// Set the uniform `name` from `v`, as `set_float` (one value), `set_vec2`, `set_vec3`,
+// `set_vec4` and `set_mat4` (sixteen) do.  False, and the block as it was, for a name the
+// shader does not declare and for values that are not the uniform's own size: what OpenGL
+// ignores.
+fn put_floats(block: gpu::Block, unis: const vector<Uniform>, name: text, v: const vector<float>) -> boolean {
+  p = place_of(unis, name);
+  if p.uniform < 0 { return false; }
+  u = unis[p.uniform] ?? return false;
+  want = if u.kind == "vec3" { 3 } else { u.floats };
+  if u.floats == 0 || u.kind == "int" || len(v) != want { return false; }
+  x = v[0] ?? 0.0;
+  y = if len(v) > 1 { v[1] ?? 0.0 } else { 0.0 };
+  z = if len(v) > 2 { v[2] ?? 0.0 } else { 0.0 };
+  w = if len(v) > 3 { v[3] ?? 0.0 } else { 0.0 };
+  if p.element >= 0 {
+    block.f4_at(u.at, p.element, x, y, z, w);
+  } else if u.floats == 1 {
+    block.f1(u.at, x);
+  } else if u.floats == 2 {
+    block.f2(u.at, x, y);
+  } else if u.floats == 4 {
+    block.f4(u.at, x, y, z, w);
+  } else {
+    block.mat4(u.at, v);
+  }
+  true
+}
+
+// Set the uniform `name` from a whole number, as `set_int` does: an `int` of the shader, or the
+// texture unit a sampler reads, kept in `units` (one entry a slot).  False for any other name.
+fn put_int(block: gpu::Block, unis: const vector<Uniform>, units: vector<integer>, name: text, v: integer) -> boolean {
+  p = place_of(unis, name);
+  if p.uniform < 0 || p.element >= 0 { return false; }
+  u = unis[p.uniform] ?? return false;
+  if u.floats == 0 {
+    while len(units) <= u.at { units += [0]; }
+    units[u.at] = v;
+    return true;
+  }
+  if u.kind != "int" { return false; }
+  block.f1(u.at, v as float);
+  true
+}
+
+// ── what a window was told, as a pipeline's state ──
+
+// The render state a window keeps between draws, as its calls leave it: what `enable` and
+// `disable` switched, the factors `blend` gave, the face `cull` named, whether `depth_write`
+// is on.  A window opens as OpenGL does with this library's one change: the depth test on, its
+// write on, no blending (its factors one and zero), no culling (its face the back).
+struct Kept {
+  depth_test: boolean = true,
+  depth_write: boolean = true,
+  blending: boolean = false,
+  blend_source: integer = 1,
+  blend_destination: integer = 0,
+  culling: boolean = false,
+  cull_front: boolean = false,
+  scissoring: boolean = false,
+  // The rectangle `scissor` gave, for while the scissor is on.
+  cut_x: integer = 0,
+  cut_y: integer = 0,
+  cut_w: integer = 0,
+  cut_h: integer = 0,
+  // Whether `viewport` was called, and its rectangle; until then draws map onto the window's
+  // own size.
+  framed: boolean = false,
+  frame_x: integer = 0,
+  frame_y: integer = 0,
+  frame_w: integer = 0,
+  frame_h: integer = 0,
+}
+
+// Switch a capability, as `enable(cap)` and `disable(cap)` do: 1 the depth test, 2 blending,
+// 3 culling, 4 the scissor.  Another number changes nothing.
+fn switch(kept: Kept, cap: integer, on: boolean) {
+  if cap == 1 { kept.depth_test = on; }
+  if cap == 2 { kept.blending = on; }
+  if cap == 3 { kept.culling = on; }
+  if cap == 4 { kept.scissoring = on; }
+}
+
+// Whether a capability is on, as `enabled(cap)` answers.
+fn switched(kept: const Kept, cap: integer) -> boolean {
+  if cap == 1 { return kept.depth_test; }
+  if cap == 2 { return kept.blending; }
+  if cap == 3 { return kept.culling; }
+  if cap == 4 { return kept.scissoring; }
+  false
+}
+
+// The state of the pipeline a draw needs now: `shape` is the draw's (0 triangles, 1 lines,
+// 2 points), `into` what the pass draws into (`gpu::INTO_*`).  `over` is a painter's draw: over
+// whatever depth is there.  The scissor is no part of it: `gpu` takes that with each draw.
+//
+// OpenGL writes a depth only while it tests one, so a depth test off is no depth at all,
+// whatever `depth_write` says.
+fn state_of(kept: const Kept, shape: integer, into: integer, over: boolean) -> gpu::State {
+  depth = gpu::DEPTH_OFF;
+  if kept.depth_test && !over {
+    depth = if kept.depth_write { gpu::DEPTH_TEST_WRITE } else { gpu::DEPTH_TEST };
+  }
+  gpu::State {
+    shape: if shape == 1 { gpu::LINES } else if shape == 2 { gpu::POINTS } else { gpu::TRIANGLES },
+    depth: depth,
+    blend: if kept.blending { gpu::blend(kept.blend_source, kept.blend_destination) } else { gpu::BLEND_OFF },
+    cull: if !kept.culling { gpu::CULL_NONE } else if kept.cull_front { gpu::CULL_FRONT } else { gpu::CULL_BACK },
+    into: into,
+  }
+}
+
+// One number a state: two states are one pipeline exactly when their numbers are equal.
+fn key_of(state: const gpu::State) -> integer {
+  state.shape + 4 * state.depth + 16 * state.cull + 64 * state.into + 256 * state.blend
+}
+
+// ── a frame as passes ──
+
+// A program of this library clears, draws, changes what it draws into, reads the frame back
+// and shows it, in any order.  `gpu` draws inside passes: a pass names its target and whether
+// it starts cleared, and nothing set in one reaches the next.  `Pass` is what the layer holds
+// between two calls to say the first in terms of the second.
+struct Pass {
+  // A pass is open: draws may follow.
+  open: boolean = false,
+  // `clear` was called and no pass has started since: the next pass starts cleared.
+  wipe: boolean = false,
+  colour: integer = 0,
+}
+
+// Before a draw: a pass into `target` (the window when null) is open after this.  It starts
+// cleared when a `clear` is waiting, and with the area the window was told (`viewport`,
+// `scissor`), which a pass does not take from the one before.  A target keeps the area OpenGL
+// would draw to there: the window's own size (`width`, `height`) until `viewport` said other.
+fn enter(dev: gpu::Device, pass: Pass, kept: const Kept, target: const gpu::Target?, width: integer, height: integer) {
+  if pass.open { return; }
+  load = if pass.wipe { gpu::CLEAR } else { gpu::KEEP };
+  if target == null {
+    dev.begin_window(load, pass.colour);
+  } else {
+    dev.begin(target, load, pass.colour);
+  }
+  pass.open = true;
+  pass.wipe = false;
+  if kept.framed {
+    dev.viewport(kept.frame_x, kept.frame_y, kept.frame_w, kept.frame_h);
+  } else if target != null {
+    dev.viewport(0, 0, width, height);
+  }
+  if kept.scissoring { dev.scissor(kept.cut_x, kept.cut_y, kept.cut_w, kept.cut_h); }
+}
+
+// End the pass that is open, if one is.
+fn leave(dev: gpu::Device, pass: Pass) {
+  if pass.open {
+    dev.end();
+    pass.open = false;
+  }
+}
+
+// `clear(colour)` with no scissor on: what was drawn is over, and the next pass starts cleared.
+fn wiped(dev: gpu::Device, pass: Pass, colour: integer) {
+  leave(dev, pass);
+  pass.wipe = true;
+  pass.colour = colour;
+}
+
+// Before the frame is read, shown, or drawn into something else: every draw so far is done,
+// and a `clear` nothing was drawn after has still cleared `target`.
+fn settle(dev: gpu::Device, pass: Pass, kept: const Kept, target: const gpu::Target?, width: integer, height: integer) {
+  if pass.wipe && !pass.open { enter(dev, pass, kept, target, width, height); }
+  leave(dev, pass);
+}

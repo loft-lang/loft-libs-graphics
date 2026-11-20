@@ -1,0 +1,260 @@
+#package
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// A shader as a program writes it for this library, made into one `gpu` can take.
+//
+// A program declares its uniforms one by one and sets each by name (`s.set_vec3("uColor", …)`).
+// `gpu` reads one `layout(std140) uniform` block whose fields are set by position, and samplers
+// named `tex0`, `tex1`, ….  `rewrite_shader` moves every `uniform <type> <name>;` of the two
+// stages into that one block, written into both, and answers where each name went, so the
+// setters keep working and the shader's own code is left as written:
+//
+//   uniform mat4 uVP;            layout(std140) uniform Block { mat4 uVP; vec4 uColor_blk; };
+//   uniform vec3 uColor;   →     #define uColor (uColor_blk.xyz)
+//   uniform sampler2D uTex;      uniform sampler2D tex0;
+//                                #define uTex tex0
+//
+// What a block cannot hold as the program wrote it is given another form, and the name is
+// defined to read it back: a `vec3` is a `vec4` (the stacks disagree on where the field after a
+// three-float one starts), an `int` is a `float`.  An array of `vec3` or `vec4` stays as it is:
+// its elements stand four floats apart on every stack.  A declaration this cannot carry (a
+// matrix of another size, a struct, a value of its own, one split over lines) is a `fault`
+// naming the stage and the line, and nothing is rewritten.
+//
+// Every line of the source keeps its number: a moved declaration leaves an empty line, and a
+// `#line` after what is written in puts the count back (the line after `#line n` is line n, to
+// glslang and to Mesa alike), so a driver's message names the line the author wrote.
+
+// Where one uniform of the program went.
+struct Uniform {
+  name: text,
+  // The type as declared: "float", "vec2", "vec3", "vec4", "mat4", "int", "sampler2D".
+  kind: text,
+  // How many floats one element takes in the block: 1, 2, 4 or 16; 0 for a sampler.
+  floats: integer,
+  // 0 for a plain field, the length of an array.
+  count: integer,
+  // Its position among the block's fields, or the texture slot of a sampler.
+  at: integer,
+}
+
+// The two stages rewritten, and the uniforms in the block's order, the samplers by slot after.
+struct Rewritten {
+  vertex: text,
+  fragment: text,
+  uniforms: vector<Uniform>,
+  // "" when the shader was rewritten; otherwise why not, and the sources are as given.
+  fault: text,
+}
+
+// How many floats an element of `kind` takes in the block; -1 for a type a block cannot hold,
+// 0 for a sampler.
+fn floats_of(kind: text) -> integer {
+  if kind == "float" || kind == "int" { return 1; }
+  if kind == "vec2" { return 2; }
+  if kind == "vec3" || kind == "vec4" { return 4; }
+  if kind == "mat4" { return 16; }
+  if kind == "sampler2D" { return 0; }
+  -1
+}
+
+// A line without its `//` comment and the blanks around it.
+fn code_of(raw: text) -> text {
+  cut = raw.find("//") ?? return raw.trim();
+  raw[0..cut].trim()
+}
+
+// Whether a line (as `code_of` gives it) declares a loose uniform.
+fn declares(line: text) -> boolean {
+  line.starts_with("uniform ") || line.starts_with("uniform\t")
+}
+
+// The words of `line`, blanks and tabs between them.
+fn words_of(line: text) -> vector<text> {
+  out: vector<text> = [];
+  for part in line.replace("\t", " ").split(' ') {
+    if part != "" { out += [part]; }
+  }
+  out
+}
+
+// The uniforms `source` declares, added to `into` in order; a name both stages declare is one
+// uniform.  Answers "" or the fault.
+fn collect(source: text, stage: text, into: vector<Uniform>) -> text {
+  number = 0;
+  for raw in source.split('\n') {
+    number += 1;
+    line = code_of(raw);
+    if !declares(line) { continue; }
+    if !line.ends_with(";") {
+      return "{stage} shader, line {number}: a uniform is declared on one line, ending in `;`";
+    }
+    if line.contains("=") {
+      return "{stage} shader, line {number}: a uniform with a value of its own is not carried; set it from the program";
+    }
+    words = words_of(line[0..line.size() - 1]);
+    first = 1;
+    if len(words) > 1 && (words[1] == "lowp" || words[1] == "mediump" || words[1] == "highp") { first = 2; }
+    if len(words) < first + 2 {
+      return "{stage} shader, line {number}: a uniform needs a type and a name";
+    }
+    kind = words[first] ?? "";
+    size = floats_of(kind);
+    if size < 0 {
+      return "{stage} shader, line {number}: a uniform of type `{kind}` is not carried (float, vec2, vec3, vec4, mat4, int and sampler2D are)";
+    }
+    names = "";
+    for w in words[first + 1..] { names += w; }
+    for declared in names.split(',') {
+      name = declared;
+      count = 0;
+      open = declared.find("[");
+      if open != null {
+        if !declared.ends_with("]") {
+          return "{stage} shader, line {number}: `{declared}` is not a name or a name with a length";
+        }
+        name = declared[0..open];
+        count = declared[open + 1..declared.size() - 1] as integer ?? 0;
+        if count < 1 {
+          return "{stage} shader, line {number}: the length of `{name}` must be a number written out";
+        }
+        if kind != "vec3" && kind != "vec4" {
+          return "{stage} shader, line {number}: an array of `{kind}` is not carried (of vec3 and vec4 is)";
+        }
+      }
+      if name == "" {
+        return "{stage} shader, line {number}: a uniform needs a name";
+      }
+      known = false;
+      for u in into {
+        if u.name == name {
+          known = true;
+          if u.kind != kind || u.count != count {
+            return "{stage} shader, line {number}: `{name}` is declared as another type in the other stage";
+          }
+        }
+      }
+      if !known {
+        into += [Uniform { name: name, kind: kind, floats: size, count: count, at: -1 }];
+      }
+    }
+  }
+  ""
+}
+
+// Number the block's fields and the samplers' slots, each in the order declared.
+fn place(unis: vector<Uniform>) {
+  field = 0;
+  slot = 0;
+  for u in unis {
+    if u.floats == 0 {
+      u.at = slot;
+      slot += 1;
+    } else {
+      u.at = field;
+      field += 1;
+    }
+  }
+}
+
+// What both stages are given in place of their loose uniforms.
+fn preamble(unis: const vector<Uniform>) -> text {
+  block = "";
+  defines = "";
+  samplers = "";
+  for u in unis {
+    if u.floats == 0 {
+      samplers += "uniform sampler2D tex{u.at};\n#define {u.name} tex{u.at}\n";
+    } else if u.count > 0 {
+      block += " {u.kind} {u.name}[{u.count}];";
+    } else if u.kind == "vec3" {
+      block += " vec4 {u.name}_blk;";
+      defines += "#define {u.name} ({u.name}_blk.xyz)\n";
+    } else if u.kind == "int" {
+      block += " float {u.name}_blk;";
+      defines += "#define {u.name} int({u.name}_blk)\n";
+    } else {
+      block += " {u.kind} {u.name};";
+    }
+  }
+  if block != "" { block = "layout(std140) uniform Block {{{block} }};\n"; }
+  "{block}{defines}{samplers}"
+}
+
+// One stage: its loose uniforms out (an empty line each), `given` in after the `#version` line
+// (or first, when there is none), and the line count put back.
+fn stage_with(source: text, given: text) -> text {
+  out = "";
+  number = 0;
+  placed = false;
+  lines = source.split('\n');
+  for raw in lines {
+    number += 1;
+    line = code_of(raw);
+    if !placed && !line.starts_with("#version") && line != "" {
+      // no `#version` ahead of the first line of code: what is given goes before it
+      out += "{given}#line {number}\n";
+      placed = true;
+    }
+    if declares(line) {
+      out += "\n";
+      continue;
+    }
+    out += raw;
+    if number < len(lines) { out += "\n"; }
+    if !placed && line.starts_with("#version") {
+      out += "{given}#line {number + 1}\n";
+      placed = true;
+    }
+  }
+  out
+}
+
+// The two stages of a shader with their uniforms in one block, and where each went.  A shader
+// that declares no loose uniform is answered as given.
+fn rewrite_shader(vertex: text, fragment: text) -> Rewritten {
+  unis: vector<Uniform> = [];
+  fault = collect(vertex, "vertex", unis);
+  if fault == "" { fault = collect(fragment, "fragment", unis); }
+  if fault != "" || len(unis) == 0 {
+    return Rewritten { vertex: vertex, fragment: fragment, uniforms: [], fault: fault };
+  }
+  place(unis);
+  given = preamble(unis);
+  Rewritten { vertex: stage_with(vertex, given), fragment: stage_with(fragment, given), uniforms: unis, fault: "" }
+}
+
+// The vertex stage with each input it reads at a location of its own choosing moved to the one
+// `gpu` gives it: `moves` is pairs, the location written and the location to write.  An input
+// at a location `moves` does not name stays where it is.
+fn with_locations(vertex: text, moves: const vector<integer>) -> text {
+  out = "";
+  number = 0;
+  lines = vertex.split('\n');
+  for raw in lines {
+    number += 1;
+    out += moved(raw, moves);
+    if number < len(lines) { out += "\n"; }
+  }
+  out
+}
+
+// A line that declares an input (`layout (location = n) in …`) with its location moved.
+fn moved(raw: text, moves: const vector<integer>) -> text {
+  line = code_of(raw);
+  if !line.starts_with("layout") || !line.contains(" in ") { return raw; }
+  at = raw.find("location") ?? return raw;
+  equals = raw[at..].find("=") ?? return raw;
+  close = raw[at..].find(")") ?? return raw;
+  if close < equals { return raw; }
+  written = raw[at + equals + 1..at + close].trim() as integer ?? return raw;
+  pair = 0;
+  while pair + 1 < len(moves) {
+    if (moves[pair] ?? -1) == written {
+      return "{raw[0..at + equals + 1]} {moves[pair + 1] ?? written}{raw[at + close..]}";
+    }
+    pair += 2;
+  }
+  raw
+}

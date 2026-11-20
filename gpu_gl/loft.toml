@@ -1,6 +1,6 @@
 [package]
 name = "gpu_gl"
-version = "0.3.1"
+version = "0.3.2"
 # Its shim includes gpu's header by the dependency's name (`gpu/gpu_backend.h`), which loft
 # provides from the daily build that carries its decision C165 on.
 loft = ">=2026.11.20261116"
@@ -18,8 +18,8 @@ gpu = ">=0.4.0"
 [library]
 entry = "src/gpu_gl.loft"
 
-# The backend's table in C99 (c/gpu_gl.c), over the window hosts and GL table the graphics
-# library's C holds (c/gl_base.h, derived from it by c/derive_base.sh).  The window system and
+# The backend's table in C99 (c/gpu_gl.c), over the window hosts and GL table of c/gl_base.h
+# (the graphics library's own C until graphics 0.14; now this library's).  The window system and
 # OpenGL are opened at run time; a page's WebGL2 comes through its `loft_gl` imports.
 [c]
 shim = "c/gpu_gl.c"
