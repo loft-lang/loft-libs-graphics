@@ -28,3 +28,10 @@ glb = ">=0.1.1"
 imaging = ">=0.5.1"
 gpu = ">=0.4.0"
 gpu_gl = ">=0.3.0"
+
+# Not part of the library: `desktop/` holds the programs that send a window real key and mouse
+# events to check what it reports.  They are built by `desktop/input.sh` and `input_mac.sh`.
+[thirdparty.input-check]
+kind     = "system"
+names    = ["Xtst", "CoreGraphics"]
+provider = "the OS's own way to send input events (XTest on Linux, CoreGraphics on macOS), linked by the input check's sender only"
