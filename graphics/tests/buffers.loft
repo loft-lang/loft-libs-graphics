@@ -31,8 +31,8 @@ out vec4 frag;
 void main() {{ frag = vec4(0.0, 1.0, 0.0, 1.0); }}
 `;
 
-const GREEN = 0xFF00FF00;
-const BLACK = 0xFF000000;
+const GREEN: u32 = 0xFF00FF00;
+const BLACK: u32 = 0xFF000000;
 
 fn points(xy: vector<float>) -> vector<single> {
   out: vector<single> = [];
@@ -40,8 +40,8 @@ fn points(xy: vector<float>) -> vector<single> {
   out
 }
 
-fn at(c: const Canvas, x: integer, y: integer) -> integer {
-  (c.data[y * 64 + x] ?? -1) | 0xFF000000
+fn at(c: const Canvas, x: integer, y: integer) -> u32 {
+  (c.data[y * 64 + x] ?? 0) | 0xFF000000
 }
 
 fn test_an_index_list_draws_what_it_names() {

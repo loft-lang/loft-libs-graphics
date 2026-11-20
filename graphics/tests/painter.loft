@@ -17,14 +17,14 @@ fn must_draw(can: boolean) -> boolean {
   can
 }
 
-const RED = 0xFFFF0000;
-const GREEN = 0xFF00FF00;
-const BLUE = 0xFF0000FF;
-const WHITE = 0xFFFFFFFF;
-const BLACK = 0xFF000000;
+const RED: u32 = 0xFFFF0000;
+const GREEN: u32 = 0xFF00FF00;
+const BLUE: u32 = 0xFF0000FF;
+const WHITE: u32 = 0xFFFFFFFF;
+const BLACK: u32 = 0xFF000000;
 
-fn at(c: const Canvas, x: integer, y: integer) -> integer {
-  (c.data[y * 64 + x] ?? -1) | 0xFF000000
+fn at(c: const Canvas, x: integer, y: integer) -> u32 {
+  (c.data[y * 64 + x] ?? 0) | 0xFF000000
 }
 
 fn test_rectangles_land_on_their_pixels() {

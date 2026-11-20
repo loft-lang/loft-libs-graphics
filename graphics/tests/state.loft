@@ -31,9 +31,9 @@ out vec4 frag;
 void main() {{ frag = color; }}
 `;
 
-const BLUE = 0xFF0000FF;
-const GREEN = 0xFF00FF00;
-const RED = 0xFFFF0000;
+const BLUE: u32 = 0xFF0000FF;
+const GREEN: u32 = 0xFF00FF00;
+const RED: u32 = 0xFFFF0000;
 
 // Two triangles over the whole window, counter-clockwise (front-facing) or clockwise.
 fn quad(clockwise: boolean) -> vector<single> {
@@ -48,9 +48,9 @@ fn quad(clockwise: boolean) -> vector<single> {
   out
 }
 
-fn pixel(w: const Window, x: integer, y: integer) -> integer {
+fn pixel(w: const Window, x: integer, y: integer) -> u32 {
   c = w.capture();
-  (c.data[y * 64 + x] ?? -1) | 0xFF000000
+  (c.data[y * 64 + x] ?? 0) | 0xFF000000
 }
 
 fn test_blend() {

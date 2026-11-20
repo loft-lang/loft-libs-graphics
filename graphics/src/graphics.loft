@@ -42,40 +42,40 @@ use imaging;
 
 // Pack RGBA channels into a single integer using bitwise ops.
 // Layout: bits 24..31 = alpha, 16..23 = red, 8..15 = green, 0..7 = blue.
-// Loft integers are 64-bit signed post-2c, so the packed value fits
-// directly — no widening cast needed.  Each channel is MASKED to 8 bits, so an
+// A colour is a `u32`, the same 32 bits on a 64-bit build and under `--width 32`.  The alpha
+// byte is shifted as a `u32`, which keeps that shift 64-bit under the 32-bit regime, where an
+// `integer` shift past i32 would read null.  Each channel is MASKED to 8 bits, so an
 // out-of-range argument wraps rather than saturating or being refused.
 // Example: @GFX-001 — the alpha byte is the one a hand-written hex literal
 // leaves at zero, and a zero alpha is fully transparent.
-pub fn rgba(cr: integer, cg: integer, cb: integer, ca: integer) -> integer {
-  ((ca & 255) << 24) | ((cr & 255) << 16) | ((cg & 255) << 8) | (cb & 255)
+pub fn rgba(cr: integer, cg: integer, cb: integer, ca: integer) -> u32 {
+  (((ca & 255) as u32) << 24) | ((cr & 255) << 16) | ((cg & 255) << 8) | (cb & 255)
 }
 
 // Opaque colour: the same pack with alpha 255.  `rgb(255, 0, 0)` is 0xFFFF0000 —
 // NOT the 0xFF0000 a reader reaches for, which has alpha 0.
 // Example: @GFX-001 — why the literal and this call are different colours, and
 // what each compositing path does with the difference.
-pub fn rgb(cr: integer, cg: integer, cb: integer) -> integer {
+pub fn rgb(cr: integer, cg: integer, cb: integer) -> u32 {
   rgba(cr, cg, cb, 255)
 }
 
 // The channels back out of a packed colour, matching `rgba`'s layout — red,
 // green, blue, then alpha off the high byte.
-pub fn color_r(color: integer) -> integer { (color >> 16) & 255 }
+pub fn color_r(color: u32) -> integer { (color >> 16) & 255 }
 // Green.
-pub fn color_g(color: integer) -> integer { (color >> 8) & 255 }
+pub fn color_g(color: u32) -> integer { (color >> 8) & 255 }
 // Blue.
-pub fn color_b(color: integer) -> integer { color & 255 }
+pub fn color_b(color: u32) -> integer { color & 255 }
 // Alpha.  255 is opaque; a colour written as a bare 0xRRGGBB literal reads 0
 // here, which is what makes it composite to nothing.
-pub fn color_a(color: integer) -> integer {
-  // The mask keeps the high byte whether the shift brings in sign bits (a 32-bit colour with
-  // alpha 128 or more is negative) or not.
+pub fn color_a(color: u32) -> integer {
   (color >> 24) & 255
 }
 
 // A 2D pixel canvas: one packed 0xAARRGGBB `u32` a pixel, 4 bytes, stored
-// row-major: data[y * width + x].  A colour handed to a canvas keeps its low 32 bits.
+// row-major: data[y * width + x].  A colour is a `u32`: an `integer` outside 0..=4294967295
+// handed to one reads 0, the language's checked narrowing into a `u32`.
 pub struct Canvas {
   pub const width: integer,
   pub const height: integer,
@@ -87,13 +87,13 @@ pub struct Canvas {
 // what the earlier doubling built, at sizes 0, 1, 9 216, 65 537 and 691 200, and no
 // slower anywhere: a 691 200-pixel frame 393 us interpreted against the doubling's 437,
 // and a 1920x1080 canvas -19 % in the C.
-fn filled(count: integer, value: integer) -> vector<u32> {
+fn filled(count: integer, value: u32) -> vector<u32> {
   if count <= 0 { return []; }
-  [value & 4294967295; count]
+  [value; count]
 }
 
 // Create a canvas filled with a solid color.
-pub fn canvas(cw: integer, ch: integer, fill_color: integer) -> Canvas {
+pub fn canvas(cw: integer, ch: integer, fill_color: u32) -> Canvas {
   // Build `data` inside the literal so the const field is set once at
   // construction (was a post-literal `result.data = …` fill).
   Canvas { width: cw, height: ch, data: filled(cw * ch, fill_color) }
@@ -104,7 +104,7 @@ pub fn canvas(cw: integer, ch: integer, fill_color: integer) -> Canvas {
 // test.  Bound with `width`/`height`.
 // Example: @GFX-003 — a neighbourhood scan that tests the returned colour
 // miscounts its own transparent pixels as off-canvas.
-pub fn get_pixel(self: const Canvas, gx: integer, gy: integer) -> integer {
+pub fn get_pixel(self: const Canvas, gx: integer, gy: integer) -> u32 {
   if gx < 0 or gx >= self.width or gy < 0 or gy >= self.height {
     0
   } else {
@@ -120,28 +120,28 @@ pub fn get_pixel(self: const Canvas, gx: integer, gy: integer) -> integer {
 // it, rather than showing through it.
 // Example: @GFX-003 — an out-of-range coordinate is declined in silence, so a
 // wrong index is a missing part of the drawing, never a message.
-pub fn set_pixel(self: Canvas, sx: integer, sy: integer, color: integer) {
+pub fn set_pixel(self: Canvas, sx: integer, sy: integer, color: u32) {
   if sx >= 0 and sx < self.width and sy >= 0 and sy < self.height {
     sp_idx = sy * self.width + sx;
     sp_d = &self.data;
     if sp_idx < len(sp_d) {
-      sp_d[sp_idx] = color & 4294967295;
+      sp_d[sp_idx] = color;
     }
   }
 }
 
 // Fill the entire canvas with a solid color.
-pub fn clear(self: Canvas, color: integer) {
+pub fn clear(self: Canvas, color: u32) {
   cl_n = self.data.len();
-  cl_c: u32 = color & 4294967295;
+  cl_c: u32 = color;
   for cl_i in 0..cl_n {
     self.data[cl_i] = cl_c;
   }
 }
 
-// Alpha-blend src over dst. Both are 0xAARRGGBB packed integers.
+// Alpha-blend src over dst. Both are 0xAARRGGBB packed `u32` colours.
 // Uses standard "src over" compositing: out = src * alpha + dst * (1 - alpha).
-pub fn blend(dst: integer, src: integer) -> integer {
+pub fn blend(dst: u32, src: u32) -> u32 {
   sa = color_a(src);
   if sa == 255 { return src; }
   if sa == 0 { return dst; }
@@ -156,12 +156,12 @@ pub fn blend(dst: integer, src: integer) -> integer {
 // Draw a pixel with alpha blending at (x, y) — the compositing counterpart to
 // `set_pixel`, and the one a caller reaching for alpha usually meant.
 // Example: @GFX-002 — store versus composite, side by side.
-pub fn blend_pixel(self: Canvas, bx: integer, by: integer, color: integer) {
+pub fn blend_pixel(self: Canvas, bx: integer, by: integer, color: u32) {
   if bx >= 0 and bx < self.width and by >= 0 and by < self.height {
     bp_idx = by * self.width + bx;
     bp_d = &self.data;
     if bp_idx < len(bp_d) {
-      bp_d[bp_idx] = blend(bp_d[bp_idx] ?? 0, color) & 4294967295;
+      bp_d[bp_idx] = blend(bp_d[bp_idx] ?? 0, color);
     }
   }
 }
@@ -170,14 +170,14 @@ pub fn blend_pixel(self: Canvas, bx: integer, by: integer, color: integer) {
 // solid primitive here it STORES the colour (see `set_pixel`); a rectangle drawn
 // in a half-transparent colour is not a translucent overlay.
 // Example: @GFX-002 — what the buffer holds afterwards.
-pub fn fill_rect(self: Canvas, rx: integer, ry: integer, rw: integer, rh: integer, color: integer) {
+pub fn fill_rect(self: Canvas, rx: integer, ry: integer, rw: integer, rh: integer, color: u32) {
   x0 = if rx < 0 { 0 } else { rx };
   y0 = if ry < 0 { 0 } else { ry };
   x1 = if rx + rw > self.width { self.width } else { rx + rw };
   y1 = if ry + rh > self.height { self.height } else { ry + rh };
   fr_d = &self.data;
   fr_n = len(fr_d);
-  fr_c: u32 = color & 4294967295;
+  fr_c: u32 = color;
   for fr_y in y0..y1 {
     for fr_x in x0..x1 {
       fr_idx = fr_y * self.width + fr_x;
@@ -192,13 +192,13 @@ pub fn fill_rect(self: Canvas, rx: integer, ry: integer, rw: integer, rh: intege
 // EXCLUSIVE — `[x0, x1)` — and a reversed span draws nothing rather than being
 // normalised.
 // Example: @GFX-004 — where a span starts and stops, and what silence looks like.
-pub fn hline(self: Canvas, hx0: integer, hx1: integer, hy: integer, color: integer) {
+pub fn hline(self: Canvas, hx0: integer, hx1: integer, hy: integer, color: u32) {
   if hy < 0 or hy >= self.height { return; }
   left = if hx0 < 0 { 0 } else { hx0 };
   right = if hx1 > self.width { self.width } else { hx1 };
   hl_d = &self.data;
   hl_n = len(hl_d);
-  hl_c: u32 = color & 4294967295;
+  hl_c: u32 = color;
   for hl_x in left..right {
     hl_idx = hy * self.width + hl_x;
     if hl_idx < hl_n {
@@ -210,13 +210,13 @@ pub fn hline(self: Canvas, hx0: integer, hx1: integer, hy: integer, color: integ
 // Draw a vertical line from (x, y0) to (x, y1). Clipped.  Exclusive end and
 // no normalisation, exactly like `hline`.
 // Example: @GFX-004 — the half-open span rule on both axes.
-pub fn vline(self: Canvas, vx: integer, vy0: integer, vy1: integer, color: integer) {
+pub fn vline(self: Canvas, vx: integer, vy0: integer, vy1: integer, color: u32) {
   if vx < 0 or vx >= self.width { return; }
   top = if vy0 < 0 { 0 } else { vy0 };
   bottom = if vy1 > self.height { self.height } else { vy1 };
   vl_d = &self.data;
   vl_n = len(vl_d);
-  vl_c: u32 = color & 4294967295;
+  vl_c: u32 = color;
   for vl_y in top..bottom {
     vl_idx = vl_y * self.width + vx;
     if vl_idx < vl_n {
@@ -228,7 +228,7 @@ pub fn vline(self: Canvas, vx: integer, vy0: integer, vy1: integer, color: integ
 // Draw a rectangle outline (1px border). Clipped.  Built from four half-open
 // spans, so (x, y, w, h) covers x .. x + w - 1 by y .. y + h - 1.
 // Example: @GFX-004 — the exact pixels, and the hollow interior.
-pub fn draw_rect(self: Canvas, drx: integer, dry: integer, drw: integer, drh: integer, color: integer) {
+pub fn draw_rect(self: Canvas, drx: integer, dry: integer, drw: integer, drh: integer, color: u32) {
   self.hline(drx, drx + drw, dry, color);
   self.hline(drx, drx + drw, dry + drh - 1, color);
   self.vline(drx, dry, dry + drh, color);
@@ -239,7 +239,7 @@ pub fn draw_rect(self: Canvas, drx: integer, dry: integer, drw: integer, drh: in
 
 // Draw a line from (x0, y0) to (x1, y1) using Bresenham's algorithm.
 // Handles all octants. Each pixel is set (no blending).
-pub fn draw_line(self: Canvas, lx0: integer, ly0: integer, lx1: integer, ly1: integer, color: integer) {
+pub fn draw_line(self: Canvas, lx0: integer, ly0: integer, lx1: integer, ly1: integer, color: u32) {
   dx = if lx1 > lx0 { lx1 - lx0 } else { lx0 - lx1 };
   dy = if ly1 > ly0 { ly1 - ly0 } else { ly0 - ly1 };
   sx = if lx0 < lx1 { 1 } else { -1 };
@@ -266,7 +266,7 @@ pub fn draw_line(self: Canvas, lx0: integer, ly0: integer, lx1: integer, ly1: in
 
 // Draw a circle outline using the midpoint algorithm.
 // Center at (cx, cy) with the given radius. Clipped via set_pixel.
-pub fn draw_circle(self: Canvas, ccx: integer, ccy: integer, radius: integer, color: integer) {
+pub fn draw_circle(self: Canvas, ccx: integer, ccy: integer, radius: integer, color: u32) {
   cx = 0;
   cy = radius;
   d = 1 - radius;
@@ -292,7 +292,7 @@ pub fn draw_circle(self: Canvas, ccx: integer, ccy: integer, radius: integer, co
 }
 
 // Fill a circle (solid disk). Center at (cx, cy), given radius.
-pub fn fill_circle(self: Canvas, fcx: integer, fcy: integer, radius: integer, color: integer) {
+pub fn fill_circle(self: Canvas, fcx: integer, fcy: integer, radius: integer, color: u32) {
   cx = 0;
   cy = radius;
   d = 1 - radius;
@@ -313,7 +313,7 @@ pub fn fill_circle(self: Canvas, fcx: integer, fcy: integer, radius: integer, co
 }
 
 // Fill an axis-aligned ellipse (solid). Center (cx, cy), radii (rx, ry).
-pub fn fill_ellipse(self: Canvas, fex: integer, fey: integer, ferx: integer, fery: integer, color: integer) {
+pub fn fill_ellipse(self: Canvas, fex: integer, fey: integer, ferx: integer, fery: integer, color: u32) {
   fe_x = 0;
   fe_y = fery;
   fe_rx2 = ferx * ferx;
@@ -347,7 +347,7 @@ pub fn fill_ellipse(self: Canvas, fex: integer, fey: integer, ferx: integer, fer
 }
 
 // Draw an axis-aligned ellipse outline. Center (cx, cy), radii (rx, ry).
-pub fn draw_ellipse(self: Canvas, ecx: integer, ecy: integer, erx: integer, ery: integer, color: integer) {
+pub fn draw_ellipse(self: Canvas, ecx: integer, ecy: integer, erx: integer, ery: integer, color: u32) {
   // Midpoint ellipse algorithm — two regions.
   ex = 0;
   ey = ery;
@@ -393,7 +393,7 @@ pub fn draw_ellipse(self: Canvas, ecx: integer, ecy: integer, erx: integer, ery:
 // (bx1,by1) and (bx2,by2). Uses adaptive subdivision — splits until segments
 // are flat enough, then draws with Bresenham lines.
 // Flatness threshold: max deviation of control points from the chord.
-pub fn draw_bezier(self: Canvas, bx0: integer, by0: integer, bx1: integer, by1: integer, bx2: integer, by2: integer, bx3: integer, by3: integer, color: integer) {
+pub fn draw_bezier(self: Canvas, bx0: integer, by0: integer, bx1: integer, by1: integer, bx2: integer, by2: integer, bx3: integer, by3: integer, color: u32) {
   // Stack-based adaptive subdivision. Each segment = 8 entries (4 points × 2 coords).
   // Use a stack pointer (`bz_top`) with truncate-then-append on each
   // push so the lint sees only appends + slice reads, never indexed
@@ -452,7 +452,7 @@ pub fn draw_bezier(self: Canvas, bx0: integer, by0: integer, bx1: integer, by1: 
 
 // Draw an anti-aliased line using Xiaolin Wu's algorithm.
 // Uses blend_pixel for sub-pixel coverage.
-pub fn draw_aa_line(self: Canvas, ax0: integer, ay0: integer, ax1: integer, ay1: integer, color: integer) {
+pub fn draw_aa_line(self: Canvas, ax0: integer, ay0: integer, ax1: integer, ay1: integer, color: u32) {
   aa_dx = if ax1 > ax0 { ax1 - ax0 } else { ax0 - ax1 };
   aa_dy = if ay1 > ay0 { ay1 - ay0 } else { ay0 - ay1 };
   aa_steep = aa_dy > aa_dx;
@@ -507,7 +507,7 @@ pub fn draw_aa_line(self: Canvas, ax0: integer, ay0: integer, ax1: integer, ay1:
 
 // Fill a triangle with vertices (tx0,ty0), (tx1,ty1), (tx2,ty2).
 // Uses flat-top/flat-bottom decomposition with scanline fill.
-pub fn fill_triangle(self: Canvas, tx0: integer, ty0: integer, tx1: integer, ty1: integer, tx2: integer, ty2: integer, color: integer) {
+pub fn fill_triangle(self: Canvas, tx0: integer, ty0: integer, tx1: integer, ty1: integer, tx2: integer, ty2: integer, color: u32) {
   // Sort vertices by y: ta_y <= tb_y <= tc_y
   ta_x = tx0; ta_y = ty0;
   tb_x = tx1; tb_y = ty1;
@@ -580,7 +580,7 @@ pub struct Coord {
 /// row rule below is inclusive rather than the half-open rule a scanline filler
 /// usually takes. See the note on `polygon_crossings`.
 // Example: @GFX-006 — the star's hollow middle, and the triangle agreement.
-pub fn fill_polygon(self: Canvas, pts: const vector<Coord>, color: integer) {
+pub fn fill_polygon(self: Canvas, pts: const vector<Coord>, color: u32) {
   fp_n = len(pts);
   if fp_n < 3 { return; }
   fp_top = pts[0]?.py;
@@ -850,7 +850,7 @@ fn resample(self: const Canvas, ow: integer, oh: integer, support0: float,
           rl_rgb += [if rl_u > 255 { 255 } else { rl_u }];
         }
       }
-      rl_od[yy * ow + xx] = ((rl_a << 24) | (rl_rgb[0]? << 16) | (rl_rgb[1]? << 8) | rl_rgb[2]?) & 4294967295;
+      rl_od[yy * ow + xx] = rgba(rl_rgb[0]?, rl_rgb[1]?, rl_rgb[2]?, rl_a);
     }
     rl_vbase += rl_n;
   }
@@ -997,7 +997,7 @@ fn gg_poll(h: integer) -> integer;
 #c "gg_poll" "int64_t(int64_t)"
 fn gg_swap(h: integer);
 #c "gg_swap" "void(int64_t)"
-fn gg_clear(h: integer, color: integer);
+fn gg_clear(h: integer, color: i64);
 #c "gg_clear" "void(int64_t, int64_t)"
 fn gg_close(h: integer);
 #c "gg_close" "void(int64_t)"
@@ -1114,7 +1114,7 @@ pub fn mouse_buttons(self: const Window) -> integer {
 }
 
 // Clear the frame to `color` (packed 0xAARRGGBB, as `rgba` packs it) and the depth buffer.
-pub fn clear(self: const Window, color: integer) {
+pub fn clear(self: const Window, color: u32) {
   gg_clear(self.handle, color);
 }
 
@@ -1547,14 +1547,14 @@ pub fn load_texture(self: const Window, path: text) -> Texture? {
   }
   img = imaging::png(file(full)) ?? return null;
   px: vector<u32> = [];
-  for p in img.data { px += [rgba(p.r, p.g, p.b, p.a) & 4294967295]; }
+  for p in img.data { px += [rgba(p.r, p.g, p.b, p.a)]; }
   self.texture_from(Canvas { width: img.width, height: img.height, data: px })
 }
 
 // `content` drawn with `font` at `size` pixels to the em, in `color`, as a texture: the text with
 // 2 pixels of transparent margin around it — what 0.9's `create_text_texture` made, for
 // `Painter.image`.
-pub fn text_texture(self: const Window, font: const Font, content: text, size: float, color: integer) -> Texture {
+pub fn text_texture(self: const Window, font: const Font, content: text, size: float, color: u32) -> Texture {
   pad = 2;
   cv = canvas(font.measure(content, size) as integer + pad * 2 + 1, font.line_height(size) + pad * 2, 0);
   cv.draw_text(font, content, size, pad, pad, color);
@@ -2736,7 +2736,7 @@ pub fn draw_text(
   size: float,
   x: integer,
   y: integer,
-  color: integer
+  color: u32
 ) {
   t = font.rasterize_text(content, size);
   cr = color_r(color);
