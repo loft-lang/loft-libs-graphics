@@ -18,7 +18,7 @@ fn mk_field4() -> ChunkField {
   field_new(0, xs, ys, 3, 2)
 }
 
-fn has_ck(v: vector<integer>, ck: integer) -> boolean {
+fn has_ck(v: vector<i64>, ck: i64) -> boolean {
   found = false;
   for i in 0..len(v) { if (v[i] ?? -1) == ck { found = true; } }
   found

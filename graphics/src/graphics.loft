@@ -1900,7 +1900,7 @@ pub struct GroupMeshes {
 
 // Where group `gk` lives in `meshes`, and its bounds.
 struct GroupSlot {
-  const gk: integer,
+  const gk: i64,
   at: integer,
   min_x: single,
   min_z: single,
@@ -1918,7 +1918,7 @@ pub fn group_meshes(stride: integer, mode: integer) -> GroupMeshes {
 pub fn upsert(
   self: GroupMeshes,
   w: Window,
-  gk: integer,
+  gk: i64,
   verts: const vector<single>,
   min_x: single,
   min_z: single,
@@ -1949,7 +1949,7 @@ pub fn upsert(
 }
 
 // Whether group `gk` has been uploaded.
-pub fn has(self: const GroupMeshes, gk: integer) -> boolean {
+pub fn has(self: const GroupMeshes, gk: i64) -> boolean {
   self.slots[gk] != null
 }
 
