@@ -1,0 +1,26 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// The two stages of a shader as `graphics` hands them to `gpu`: read from the two files named,
+// written as `<file>.out` beside each.  `gpu_vulkan/spirv.py` runs this to write the SPIR-V of
+// a shader a program gives `graphics` with its uniforms declared one by one.
+//
+//   loft --interpret graphics/tools/rewritten.loft VERTEX.glsl FRAGMENT.glsl
+use graphics;
+
+fn main() {
+  args = arguments();
+  if len(args) < 2 {
+    eprintln("rewritten.loft: give the vertex and the fragment file");
+    return;
+  }
+  vertex = file(args[len(args) - 2]).content() ?? "";
+  fragment = file(args[-1]).content() ?? "";
+  both = graphics::rewritten(vertex, fragment);
+  if len(both) != 2 {
+    eprintln("rewritten.loft: the shader is not one graphics can carry");
+    return;
+  }
+  file("{args[len(args) - 2]}.out").write(both[0]);
+  file("{args[-1]}.out").write(both[1]);
+}
