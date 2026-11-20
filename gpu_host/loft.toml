@@ -1,18 +1,18 @@
 [package]
 name = "gpu_host"
-version = "0.1.0"
+version = "0.1.1"
 loft = ">=2026.10.0"
 repository = "loft-libs-graphics"
 description = "Opens a gpu device on the backend this machine has: Metal on a Mac, OpenGL elsewhere and where Metal is absent, Vulkan on Linux by name"
 categories  = ["graphics", "game"]
 
 # ⚠ FIRST release, so both floors are this release itself.
-api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
-data_compatible_with = "0.1.0"   # oldest own release whose stored data this reads
+api_compatible_with  = "0.1.1"   # the API is unchanged; raised with the data floor, which the check cannot tell apart (loft#2598)
+data_compatible_with = "0.1.1"   # its records hold gpu's, which gpu 0.4.1 reshaped
 
 # The one package that names backends: a game depends on this and on `gpu`, never on a backend.
 [dependencies]
-gpu = ">=0.3.0"
+gpu = ">=0.4.1"
 gpu_gl = ">=0.2.0"
 gpu_metal = ">=0.1.0"
 gpu_vulkan = ">=0.1.0"

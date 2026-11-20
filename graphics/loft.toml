@@ -26,7 +26,7 @@ entry = "src/graphics.loft"
 mesh3d = ">=0.1.1"
 glb = ">=0.1.1"
 imaging = ">=0.5.1"
-gpu = ">=0.4.0"
+gpu = ">=0.4.1"
 gpu_gl = ">=0.3.0"
 
 # Not part of the library: `desktop/` holds the programs that send a window real key and mouse
