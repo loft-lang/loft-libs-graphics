@@ -10,12 +10,12 @@ use graphics::*;
 
 // Classify a canvas by EXACT colour, dryopea's RENDERER.md R0 technique: a
 // byte-diff says *different*, a classification says *what*.  `other` must read 0.
-fn count_of(cv: const graphics::Canvas, want: integer) -> integer {
+fn count_of(cv: const graphics::Canvas, want: i64) -> integer {
   n = 0;
   for v in cv.data { if v == want { n = n + 1; } }
   n
 }
-fn other_than(cv: const graphics::Canvas, a: integer, b: integer) -> integer {
+fn other_than(cv: const graphics::Canvas, a: i64, b: i64) -> integer {
   n = 0;
   for v in cv.data { if v != a and v != b { n = n + 1; } }
   n
@@ -29,8 +29,8 @@ fn test_full_alpha_is_the_colour() {
   cv = graphics::canvas(8, 8, 0xff000000);
   st.render_stage(cv);
   assert(cv.get_pixel(1, 1) == 0xffc03030, "opaque paints the colour exactly");
-  assert(count_of(cv, 0xffc03030) == 16, "a 4x4 rect is 16 pixels");
-  assert(other_than(cv, 0xffc03030, 0xff000000) == 0, "no third colour anywhere");
+  assert(count_of(cv, 0xffc03030l) == 16, "a 4x4 rect is 16 pixels");
+  assert(other_than(cv, 0xffc03030l, 0xff000000l) == 0, "no third colour anywhere");
 }
 
 // Alpha 0 leaves the destination untouched.
@@ -41,7 +41,7 @@ fn test_zero_alpha_paints_nothing() {
   st.compose();
   cv = graphics::canvas(8, 8, 0xff102030);
   st.render_stage(cv);
-  assert(count_of(cv, 0xff102030) == 64, "every pixel is still the background");
+  assert(count_of(cv, 0xff102030l) == 64, "every pixel is still the background");
 }
 
 // THE HAND-COMPUTED CELL.  alpha 0.5 -> ia = round(0.5*255) = 128.
@@ -57,7 +57,7 @@ fn test_half_alpha_over_black() {
   st.render_stage(cv);
   assert(cv.get_pixel(1, 1) == 0xff800000,
          "half red over black is 0x80, got {cv.get_pixel(1, 1)}");
-  assert(other_than(cv, 0xff800000, 0xff000000) == 0, "no third colour");
+  assert(other_than(cv, 0xff800000l, 0xff000000l) == 0, "no third colour");
 }
 
 // Half alpha over a NON-black destination — the case that catches a composite

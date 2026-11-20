@@ -12,7 +12,7 @@ use graphics::*;
 
 EPS = 0.000001;
 fn near(a: float, b: float) -> boolean { a - b < EPS and b - a < EPS }
-fn count_of(cv: const graphics::Canvas, want: integer) -> integer {
+fn count_of(cv: const graphics::Canvas, want: i64) -> integer {
   n = 0;
   for v in cv.data { if v == want { n = n + 1; } }
   n
@@ -207,7 +207,7 @@ fn test_both_render_paths_agree_about_the_light() {
   assert(want != 0xc03030, "and it is NOT the raw material, or this proves nothing");
   cv = graphics::canvas(16, 16, 0xff000000);
   st.render_stage(cv);
-  assert(count_of(cv, 0xff000000 | want) == 20,
+  assert(count_of(cv, 0xff000000l | want) == 20,
          "the software path paints the LIT colour over its 5x4");
 
   f = st.pack_instances();

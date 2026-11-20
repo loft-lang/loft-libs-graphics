@@ -9,7 +9,7 @@
 use stage::*;
 use graphics::*;
 
-fn count_of(cv: const graphics::Canvas, want: integer) -> integer {
+fn count_of(cv: const graphics::Canvas, want: i64) -> integer {
   n = 0;
   for v in cv.data { if v == want { n = n + 1; } }
   n
@@ -60,8 +60,8 @@ fn test_overlapping_rectangles_match_the_software_canvas() {
   _ = st.node_add(-1, stage::Place { pl_x: 12.0, pl_y: 6.0, pl_w: 20.0, pl_h: 10.0,
                                      pl_colour: 0xff0000 });
   frame = both_ways(st, 48, 32) ?? return;
-  assert(count_of(frame, 0xff00ff00) == 140, "140 green, got {count_of(frame, 0xff00ff00)}");
-  assert(count_of(frame, 0xffff0000) == 200, "200 red, got {count_of(frame, 0xffff0000)}");
+  assert(count_of(frame, 0xff00ff00l) == 140, "140 green, got {count_of(frame, 0xff00ff00l)}");
+  assert(count_of(frame, 0xffff0000l) == 200, "200 red, got {count_of(frame, 0xffff0000l)}");
 }
 
 // A clipping parent: the scissor cuts the child at (5,5)-(10,10) = 25 pixels — and on GL the
@@ -72,7 +72,7 @@ fn test_a_clipped_child_matches_the_software_canvas() {
   _ = st.node_add(p, stage::Place { pl_x: 5.0, pl_y: 5.0, pl_w: 20.0, pl_h: 20.0,
                                     pl_colour: 0x00ff00 });
   frame = both_ways(st, 32, 32) ?? return;
-  assert(count_of(frame, 0xff00ff00) == 25, "5x5 survives the clip, got {count_of(frame, 0xff00ff00)}");
+  assert(count_of(frame, 0xff00ff00l) == 25, "5x5 survives the clip, got {count_of(frame, 0xff00ff00l)}");
 }
 
 // ⚠ THE WINDOW IS HANDED BACK AS IT WAS.  The pass turns depth testing off and blending and the

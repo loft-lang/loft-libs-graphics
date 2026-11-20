@@ -102,7 +102,7 @@ pub struct StageNode {
     nd_facing: float,        // where it points, in radians; kept in BOTH models
     nd_mirror: boolean,      // side-on: is it drawn flipped side to side?
     nd_seq: integer,         // index into `st_seqs`, or -1 for a still sprite
-    nd_elapsed: integer,     // MICROSECONDS into the sequence — see `advance`
+    nd_elapsed: i64,         // MICROSECONDS into the sequence — see `advance`
     nd_cols: integer,        // the atlas grid this node's cells live in
     nd_rows: integer,
     nd_sway: float,          // ambient sway amplitude in pixels; 0 is still
@@ -682,9 +682,9 @@ pub fn render(list: const vector<DrawRect>, cv: graphics::Canvas) {
 }
 
 // 0xRRGGBB -> 0xAARRGGBB, leaving an already-opaque colour alone.
-pub fn opaque(colour: integer) -> integer {
-    if (colour & 0xff000000) != 0 { return colour; }
-    colour | 0xff000000
+pub fn opaque(colour: i64) -> i64 {
+    if (colour & 0xff000000l) != 0 { return colour; }
+    colour | 0xff000000l
 }
 
 
@@ -1969,9 +1969,9 @@ fn paint_band(self: const Stage, view: integer, cv: graphics::Canvas,
         for py in y0..y1 {
             for px in x0..x1 {
                 d = cv.get_pixel(px, py);
-                dr = (d >> 16) & 255;
-                dg = (d >> 8) & 255;
-                db = d & 255;
+                dr = ((d >> 16) & 255) as integer;
+                dg = ((d >> 8) & 255) as integer;
+                db = (d & 255) as integer;
                 cv.set_pixel(px, py, 0xff000000
                     | (over(sr, dr, ia) << 16)
                     | (over(sg, dg, ia) << 8)
@@ -2956,10 +2956,10 @@ pub fn blur_region(cv: graphics::Canvas, x0: integer, y0: integer, x1: integer,
                     jx = kx;
                     if jx < 0 { jx = 0; }
                     if jx >= w { jx = w - 1; }
-                    v: integer = src[jy * w + jx] ?? 0;
-                    sr = sr + ((v >> 16) & 255);
-                    sg = sg + ((v >> 8) & 255);
-                    sb = sb + (v & 255);
+                    v: i64 = src[jy * w + jx] ?? 0;
+                    sr = sr + (((v >> 16) & 255) as integer);
+                    sg = sg + (((v >> 8) & 255) as integer);
+                    sb = sb + ((v & 255) as integer);
                     n = n + 1;
                 }
             }
