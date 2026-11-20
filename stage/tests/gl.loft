@@ -130,5 +130,5 @@ fn test_the_light_map_matches_the_software_canvas() {
     }
   }
   assert(worst <= 6, "the GL light map is {worst} levels from the software one");
-  assert(f.get_pixel(20, 16) == 0xffc08040, "full at the light: {f.get_pixel(20, 16):x}");
+  assert(f.get_pixel(20, 16) == 0xffc08040l, "full at the light: {f.get_pixel(20, 16):x}");
 }

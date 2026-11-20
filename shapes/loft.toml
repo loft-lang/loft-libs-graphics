@@ -1,9 +1,10 @@
 [package]
 name = "shapes"
-version = "0.5.4"
+version = "0.5.5"
 loft = ">=2026.8.0"
 
 api_compatible_with  = "0.3.0"   # oldest own release this is a drop-in for
 data_compatible_with = "0.3.0"   # oldest own release whose stored data this reads
+width32 = true   # its tests pass in a 32-bit program (loft --width 32); the library CI runs them there
 [library]
 entry = "src/shapes.loft"

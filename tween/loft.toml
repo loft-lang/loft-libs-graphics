@@ -1,6 +1,6 @@
 [package]
 name    = "tween"
-version = "0.1.2"
+version = "0.1.3"
 loft    = ">=2026.10.0"
 repository = "loft-libs-graphics"
 description = "Property tweens in exact integer time — eleven easing curves, chains and groups"
@@ -8,6 +8,7 @@ categories  = ["animation", "game"]
 
 api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
 data_compatible_with = "0.1.0"   # oldest own release whose stored data this reads
+width32 = true   # its tests pass in a 32-bit program (loft --width 32); the library CI runs them there
 
 # ⚠ **NO DEPENDENCIES, AND THAT IS THE POINT.**  A tween takes a duration in
 # whatever integer unit its consumer's clock already runs in, so it never has

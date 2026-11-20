@@ -28,7 +28,7 @@ fn test_full_alpha_is_the_colour() {
   st.compose();
   cv = graphics::canvas(8, 8, 0xff000000);
   st.render_stage(cv);
-  assert(cv.get_pixel(1, 1) == 0xffc03030, "opaque paints the colour exactly");
+  assert(cv.get_pixel(1, 1) == 0xffc03030l, "opaque paints the colour exactly");
   assert(count_of(cv, 0xffc03030l) == 16, "a 4x4 rect is 16 pixels");
   assert(other_than(cv, 0xffc03030l, 0xff000000l) == 0, "no third colour anywhere");
 }
@@ -55,7 +55,7 @@ fn test_half_alpha_over_black() {
   st.compose();
   cv = graphics::canvas(8, 8, 0xff000000);
   st.render_stage(cv);
-  assert(cv.get_pixel(1, 1) == 0xff800000,
+  assert(cv.get_pixel(1, 1) == 0xff800000l,
          "half red over black is 0x80, got {cv.get_pixel(1, 1)}");
   assert(other_than(cv, 0xff800000l, 0xff000000l) == 0, "no third colour");
 }
@@ -73,7 +73,7 @@ fn test_half_alpha_over_a_colour() {
   cv = graphics::canvas(8, 8, 0xff404040);
   st.render_stage(cv);
   got = cv.get_pixel(1, 1);
-  assert(got == 0xffa02020, "half red over 0x40 grey is 0xa02020, got {got}");
+  assert(got == 0xffa02020l, "half red over 0x40 grey is 0xa02020, got {got}");
 }
 
 // Two translucent nodes stack IN ORDER, and the second sees the first's result.
@@ -95,7 +95,7 @@ fn test_two_translucent_nodes_stack_in_order() {
   cv = graphics::canvas(8, 8, 0xff000000);
   st.render_stage(cv);
   got = cv.get_pixel(1, 1);
-  assert(got == 0xffc08080, "red then white, both half — expect 0xc08080, got {got}");
+  assert(got == 0xffc08080l, "red then white, both half — expect 0xc08080, got {got}");
 }
 
 // Tint is the node's own colour: two nodes of the same shape and alpha differ only
@@ -107,7 +107,7 @@ fn test_tint_reaches_the_composite() {
   st.compose();
   cv = graphics::canvas(8, 8, 0xff000000);
   st.render_stage(cv);
-  assert(cv.get_pixel(1, 1) == 0xff00ff00 and cv.get_pixel(5, 1) == 0xff0000ff,
+  assert(cv.get_pixel(1, 1) == 0xff00ff00l and cv.get_pixel(5, 1) == 0xff0000ffl,
          "each node keeps its own tint");
 }
 

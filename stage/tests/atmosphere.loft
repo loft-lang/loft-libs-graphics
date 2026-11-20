@@ -56,7 +56,7 @@ fn test_fog_at_density_one_is_exactly_the_fog_colour() {
   st.compose();
   cv = graphics::canvas(40, 10, 0xff000000);
   st.render_view(0, cv);
-  assert(cv.get_pixel(5, 5) == 0xff2040ff,
+  assert(cv.get_pixel(5, 5) == 0xff2040ffl,
          "full fog is the fog colour exactly — got {cv.get_pixel(5, 5)}");
 }
 
@@ -70,7 +70,7 @@ fn test_fog_between_the_ends_is_hand_computed() {
   st.compose();
   cv = graphics::canvas(40, 10, 0xff000000);
   st.render_view(0, cv);
-  assert(cv.get_pixel(5, 5) == 0xff703898, "half fog — got {cv.get_pixel(5, 5)}");
+  assert(cv.get_pixel(5, 5) == 0xff703898l, "half fog — got {cv.get_pixel(5, 5)}");
 }
 
 // ⚠ FOG IS PER LAYER, so a foggy distance leaves the foreground alone.  That is
@@ -83,8 +83,8 @@ fn test_fog_reaches_only_its_own_layer() {
   st.compose();
   cv = graphics::canvas(40, 10, 0xff000000);
   st.render_view(0, cv);
-  assert(cv.get_pixel(5, 5) == 0xff2040ff, "the background is fogged out");
-  assert(cv.get_pixel(25, 5) == 0xffc03030, "the foreground is untouched");
+  assert(cv.get_pixel(5, 5) == 0xff2040ffl, "the background is fogged out");
+  assert(cv.get_pixel(25, 5) == 0xffc03030l, "the foreground is untouched");
 }
 
 // ── blur ────────────────────────────────────────────────────────────────────
@@ -118,7 +118,7 @@ fn test_a_uniform_layer_blurs_to_itself() {
   cv = graphics::canvas(40, 10, 0xff000000);
   st.render_view(0, cv);
   off = 0;
-  for v in cv.data { if v != 0xff808080 { off = off + 1; } }
+  for v in cv.data { if v != 0xff808080l { off = off + 1; } }
   assert(off == 0, "{off} pixels changed — the border darkened");
 }
 
@@ -165,8 +165,8 @@ fn test_a_sharp_foreground_over_a_blurred_background_stays_sharp() {
   e = (cv.get_pixel(20, 5) >> 16) & 255;
   assert(e > 0 and e < 255, "the background edge is a gradient, got {e}");
   // The foreground edge is HARD: background one side, full colour the other.
-  assert(cv.get_pixel(29, 5) == 0xff000000, "nothing just left of the foreground");
-  assert(cv.get_pixel(30, 5) == 0xff00ff00,
+  assert(cv.get_pixel(29, 5) == 0xff000000l, "nothing just left of the foreground");
+  assert(cv.get_pixel(30, 5) == 0xff00ff00l,
          "and full colour immediately right — a fullscreen blur would soften this");
 }
 

@@ -100,7 +100,7 @@ fn test_centred_text_is_centred() {
   found = false;
   for y in 0..16 {
     for x in 0..32 {
-      if cv.get_pixel(x, y) == 0xffffffff and x < 13 { found = true; }
+      if cv.get_pixel(x, y) == 0xffffffffl and x < 13 { found = true; }
     }
   }
   assert(!found, "no ink left of the centred start column");

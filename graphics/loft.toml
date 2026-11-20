@@ -15,6 +15,7 @@ loft = ">=2026.11.20261113"
 # `const Window`, and a framebuffer is made of its textures (README § Moving from 0.13).
 api_compatible_with  = "0.14.1"  # oldest own release this is a drop-in for: 0.14.1 gave `Shader` its sources for other backends
 data_compatible_with = "0.14.1"  # oldest own release whose stored data this reads
+width32 = true   # its tests pass in a 32-bit program (loft --width 32); the library CI runs them there
 repository = "loft-libs-graphics"
 description = "A 2D canvas, windows, drawing on the GPU and text for loft (meshes and glTF are mesh3d and glb)"
 

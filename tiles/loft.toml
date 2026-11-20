@@ -9,6 +9,7 @@ categories  = ["graphics", "game"]
 # ⚠ FIRST release, so both floors are this release itself.
 api_compatible_with  = "0.1.0"   # oldest own release this is a drop-in for
 data_compatible_with = "0.1.0"   # oldest own release whose stored data this reads
+width32 = true   # its tests pass in a 32-bit program (loft --width 32); the library CI runs them there
 
 [dependencies]
 imaging = ">=0.4.0"   # `sheet_from_image` / `sheet_from_png`

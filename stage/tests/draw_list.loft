@@ -81,7 +81,7 @@ fn test_the_alpha_byte_is_added_at_the_boundary() {
   st.compose();
   cv = graphics::canvas(8, 8, 0xff000000);
   stage::render(st.draw_list(), cv);
-  assert(cv.get_pixel(1, 1) == 0xffc03030, "a 0xRRGGBB node paints, rather than vanishing");
+  assert(cv.get_pixel(1, 1) == 0xffc03030l, "a 0xRRGGBB node paints, rather than vanishing");
 }
 
 // Scaffolding emits nothing: a parent that exists only to hold a transform has no
