@@ -205,3 +205,157 @@ fn test_a_key_names_one_state() {
   // 3 depths x (1 unblended + 2 blends) x 3 culls, for each of 3 shapes and 4 targets
   assert(len(seen) == 3 * 3 * 3 * 3 * 4, "the states a window can be left in: {len(seen)}");
 }
+
+// ── a frame as passes ──
+
+struct Rig {
+  dev: gpu::Device,
+  pipe: gpu::Pipeline,
+  into: gpu::Pipeline,
+  mesh: gpu::Buffer,
+  colour: gpu::Texture,
+  target: gpu::Target,
+}
+
+fn plain() -> gpu::Program {
+  gpu::Program { vertex: [gpu::F3], instance: [], block: [], textures: 0, sources: [gpu::source("record", "v", "f")] }
+}
+
+// A device on the recording backend with what a draw needs; the log starts empty after it.
+// The target is the sixth thing made, so the log names it 6.
+fn rig() -> Rig {
+  gpu_record::reset();
+  dev = gpu::open(gpu_record::table(), 64, 48, "passes")!;
+  colour = dev.texture(16, 16);
+  r = Rig {
+    pipe: dev.pipeline(plain(), gpu::State {})!,
+    into: dev.pipeline(plain(), gpu::State { into: gpu::INTO_COLOUR })!,
+    mesh: dev.buffer([0.0f, 0.0f, 0.0f]),
+    target: dev.colour_target(colour),
+    colour: colour,
+    dev: dev,
+  };
+  gpu_record::reset();
+  r
+}
+
+// One draw into the window, the way the layer will make it.
+fn draw(r: Rig, pass: Pass, kept: const Kept) {
+  enter(r.dev, pass, kept, null, 64, 48);
+  r.dev.bind(r.pipe);
+  r.dev.vertices(r.mesh);
+  r.dev.draw(0, 1);
+}
+
+// And one into the target.
+fn draw_into(r: Rig, pass: Pass, kept: const Kept) {
+  enter(r.dev, pass, kept, r.target, 64, 48);
+  r.dev.bind(r.into);
+  r.dev.vertices(r.mesh);
+  r.dev.draw(0, 1);
+}
+
+// The log with the lines of a draw itself left out: the passes and their area.
+fn passes(r: const Rig) -> text {
+  assert(len(r.dev.refusals()) == 0, "gpu refused nothing: {r.dev.refusals()}");
+  out = "";
+  for line in gpu_record::log().split('\n') {
+    if line == "" || line.starts_with("  bind") || line.starts_with("  vertices") { continue; }
+    out += if line.starts_with("  draw") { "draw" } else { line.trim() };
+    out += "; ";
+  }
+  out.trim()
+}
+
+fn test_a_clear_and_its_draws_are_one_pass_that_starts_cleared() {
+  r = rig();
+  pass = Pass {};
+  kept = Kept {};
+  wiped(r.dev, pass, 0xFF102030);
+  draw(r, pass, kept);
+  draw(r, pass, kept);
+  settle(r.dev, pass, kept, null, 64, 48);
+  r.dev.present();
+  assert(passes(r) == "begin 0 clear ff102030; draw; draw; end; present;", "one pass: {passes(r)}");
+}
+
+fn test_a_clear_nothing_is_drawn_after_still_clears() {
+  r = rig();
+  pass = Pass {};
+  kept = Kept {};
+  wiped(r.dev, pass, 0xFF00FF00);
+  settle(r.dev, pass, kept, null, 64, 48);
+  r.dev.present();
+  assert(passes(r) == "begin 0 clear ff00ff00; end; present;", "a pass of its own: {passes(r)}");
+  // and a frame with nothing at all is no pass
+  gpu_record::reset();
+  settle(r.dev, pass, kept, null, 64, 48);
+  r.dev.present();
+  assert(passes(r) == "present;", "nothing to do: {passes(r)}");
+}
+
+fn test_a_draw_with_no_clear_keeps_the_frame_and_a_second_clear_starts_over() {
+  r = rig();
+  pass = Pass {};
+  kept = Kept {};
+  draw(r, pass, kept);
+  wiped(r.dev, pass, 0xFF000001);
+  draw(r, pass, kept);
+  wiped(r.dev, pass, 0xFF000002);
+  wiped(r.dev, pass, 0xFF000003);
+  draw(r, pass, kept);
+  settle(r.dev, pass, kept, null, 64, 48);
+  assert(passes(r) == "begin 0 keep; draw; end; begin 0 clear ff000001; draw; end; begin 0 clear ff000003; draw; end;", "kept, cleared, and the last of two clears: {passes(r)}");
+}
+
+// Into a target and back: each is a pass of its own that keeps what the target held, and a
+// clear waiting for the window is the window's.
+fn test_another_target_is_another_pass() {
+  r = rig();
+  pass = Pass {};
+  kept = Kept {};
+  wiped(r.dev, pass, 0xFF0000FF);
+  // `render_to(target)` before anything was drawn: the window is cleared all the same
+  settle(r.dev, pass, kept, null, 64, 48);
+  draw_into(r, pass, kept);
+  wiped(r.dev, pass, 0xFF00FF00);
+  draw_into(r, pass, kept);
+  // `render_to_window()`
+  settle(r.dev, pass, kept, r.target, 64, 48);
+  draw(r, pass, kept);
+  settle(r.dev, pass, kept, null, 64, 48);
+  want = "begin 0 clear ff0000ff; end; begin 6 keep; viewport 0,0 64x48; draw; end; begin 6 clear ff00ff00; viewport 0,0 64x48; draw; end; begin 0 keep; draw; end;";
+  assert(passes(r) == want, "the window, the target twice, the window:\n{passes(r)}\n{want}");
+}
+
+// Reading the frame back in the middle of it: the draws so far are done, and the rest go on
+// over them.
+fn test_a_capture_between_draws_keeps_the_frame() {
+  r = rig();
+  pass = Pass {};
+  kept = Kept {};
+  wiped(r.dev, pass, 0xFF202020);
+  draw(r, pass, kept);
+  settle(r.dev, pass, kept, null, 64, 48);
+  shot = r.dev.capture();
+  draw(r, pass, kept);
+  settle(r.dev, pass, kept, null, 64, 48);
+  got = passes(r);
+  assert(got.starts_with("begin 0 clear ff202020; draw; end; capture 0 pixels ") && got.ends_with("; begin 0 keep; draw; end;"), "two passes around the read ({len(shot)} pixels): {got}");
+}
+
+// What `viewport` and `scissor` said holds for every pass after, as it does in OpenGL.
+fn test_every_pass_starts_with_the_area_the_window_was_told() {
+  r = rig();
+  pass = Pass {};
+  kept = Kept { framed: true, frame_x: 8, frame_y: 4, frame_w: 32, frame_h: 24, scissoring: true, cut_x: 1, cut_y: 2, cut_w: 3, cut_h: 4 };
+  draw(r, pass, kept);
+  settle(r.dev, pass, kept, null, 64, 48);
+  draw_into(r, pass, kept);
+  settle(r.dev, pass, kept, r.target, 64, 48);
+  kept.scissoring = false;
+  draw(r, pass, kept);
+  settle(r.dev, pass, kept, null, 64, 48);
+  want = "begin 0 keep; viewport 8,4 32x24; scissor 1,2 3x4; draw; end; begin 6 keep; viewport 8,4 32x24; scissor 1,2 3x4; draw; end; begin 0 keep; viewport 8,4 32x24; draw; end;";
+  assert(passes(r) == want, "the area, pass after pass:\n{passes(r)}\n{want}");
+}
