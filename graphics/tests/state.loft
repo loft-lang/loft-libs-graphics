@@ -60,9 +60,9 @@ AAArAAQADQAAAA4AAAABAAAAIAAEAA8AAAACAAAABwAAADYABQACAAAABAAAAAAAAAADAAAA+AAC
 AAUAAABBAAUADwAAABAAAAAMAAAADgAAAD0ABAAHAAAAEQAAABAAAAA+AAMACQAAABEAAAD9AAEA
 OAABAA==`;
 
-const BLUE = 0xFF0000FF;
-const GREEN = 0xFF00FF00;
-const RED = 0xFFFF0000;
+const BLUE = 0xFF0000FFl;
+const GREEN = 0xFF00FF00l;
+const RED = 0xFFFF0000l;
 
 // Two triangles over the whole window, counter-clockwise (front-facing) or clockwise.
 fn quad(clockwise: boolean) -> vector<single> {
@@ -79,7 +79,7 @@ fn quad(clockwise: boolean) -> vector<single> {
 
 fn pixel(w: Window, x: integer, y: integer) -> integer {
   c = w.capture();
-  (c.data[y * 64 + x] ?? -1) | 0xFF000000
+  (c.data[y * 64 + x] ?? -1) | 0xFF000000l
 }
 
 fn test_blend() {

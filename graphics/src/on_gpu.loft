@@ -226,7 +226,7 @@ struct Pass {
   open: boolean = false,
   // `clear` was called and no pass has started since: the next pass starts cleared.
   wipe: boolean = false,
-  colour: integer = 0,
+  colour: i64 = 0,
 }
 
 // Before a draw: a pass into `target` (the window when null) is open after this.  It starts
@@ -260,7 +260,7 @@ fn leave(dev: gpu::Device, pass: Pass) {
 }
 
 // `clear(colour)` with no scissor on: what was drawn is over, and the next pass starts cleared.
-fn wiped(dev: gpu::Device, pass: Pass, colour: integer) {
+fn wiped(dev: gpu::Device, pass: Pass, colour: i64) {
   leave(dev, pass);
   pass.wipe = true;
   pass.colour = colour;

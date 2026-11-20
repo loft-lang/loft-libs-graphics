@@ -47,7 +47,7 @@ fn test_a_frame_is_passes_that_close_and_nothing_refused() {
   mesh = w.upload([-1.0f, -1.0f, 0.0f, 1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f], 3);
   mesh.instance_attrib(1, 1, 0);
   records = w.instances([0.0f, 0.5f, -0.5f]);
-  image = w.texture_from(graphics::canvas(4, 4, 0xFFFFFFFF));
+  image = w.texture_from(graphics::canvas(4, 4, 0xFFFFFFFFl));
   colour = w.texture(32, 24);
   depth = w.depth_texture(32, 24);
   target = w.framebuffer_with_depth(colour, depth);
@@ -55,15 +55,15 @@ fn test_a_frame_is_passes_that_close_and_nothing_refused() {
   log_before = gpu_record::log();
   // into a framebuffer: a clear, three copies with depth
   w.render_to(target);
-  w.clear(0xFF000000);
+  w.clear(0xFF000000l);
   w.enable(graphics::GL_DEPTH_TEST);
   mesh.draw_instanced(w, s, records, 3, 0, image);
   // onto the window: a clear, a clear inside a scissor, a blended rectangle, the framebuffer's image
   w.render_to_window();
-  w.clear(0xFF202020);
+  w.clear(0xFF202020l);
   w.enable(graphics::GL_SCISSOR_TEST);
   w.scissor(8, 8, 16, 16);
-  w.clear(0xFFFF0000);
+  w.clear(0xFFFF0000l);
   w.disable(graphics::GL_SCISSOR_TEST);
   w.disable(graphics::GL_DEPTH_TEST);
   w.enable(graphics::GL_BLEND);

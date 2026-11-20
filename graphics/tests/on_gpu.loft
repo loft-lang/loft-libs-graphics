@@ -271,7 +271,7 @@ fn test_a_clear_and_its_draws_are_one_pass_that_starts_cleared() {
   r = rig();
   pass = Pass {};
   kept = Kept {};
-  wiped(r.dev, pass, 0xFF102030);
+  wiped(r.dev, pass, 0xFF102030l);
   draw(r, pass, kept);
   draw(r, pass, kept);
   settle(r.dev, pass, kept, null, 64, 48);
@@ -283,7 +283,7 @@ fn test_a_clear_nothing_is_drawn_after_still_clears() {
   r = rig();
   pass = Pass {};
   kept = Kept {};
-  wiped(r.dev, pass, 0xFF00FF00);
+  wiped(r.dev, pass, 0xFF00FF00l);
   settle(r.dev, pass, kept, null, 64, 48);
   r.dev.present();
   assert(passes(r) == "begin 0 clear ff00ff00; end; present;", "a pass of its own: {passes(r)}");
@@ -299,10 +299,10 @@ fn test_a_draw_with_no_clear_keeps_the_frame_and_a_second_clear_starts_over() {
   pass = Pass {};
   kept = Kept {};
   draw(r, pass, kept);
-  wiped(r.dev, pass, 0xFF000001);
+  wiped(r.dev, pass, 0xFF000001l);
   draw(r, pass, kept);
-  wiped(r.dev, pass, 0xFF000002);
-  wiped(r.dev, pass, 0xFF000003);
+  wiped(r.dev, pass, 0xFF000002l);
+  wiped(r.dev, pass, 0xFF000003l);
   draw(r, pass, kept);
   settle(r.dev, pass, kept, null, 64, 48);
   assert(passes(r) == "begin 0 keep; draw; end; begin 0 clear ff000001; draw; end; begin 0 clear ff000003; draw; end;", "kept, cleared, and the last of two clears: {passes(r)}");
@@ -314,11 +314,11 @@ fn test_another_target_is_another_pass() {
   r = rig();
   pass = Pass {};
   kept = Kept {};
-  wiped(r.dev, pass, 0xFF0000FF);
+  wiped(r.dev, pass, 0xFF0000FFl);
   // `render_to(target)` before anything was drawn: the window is cleared all the same
   settle(r.dev, pass, kept, null, 64, 48);
   draw_into(r, pass, kept);
-  wiped(r.dev, pass, 0xFF00FF00);
+  wiped(r.dev, pass, 0xFF00FF00l);
   draw_into(r, pass, kept);
   // `render_to_window()`
   settle(r.dev, pass, kept, r.target, 64, 48);
@@ -334,7 +334,7 @@ fn test_a_capture_between_draws_keeps_the_frame() {
   r = rig();
   pass = Pass {};
   kept = Kept {};
-  wiped(r.dev, pass, 0xFF202020);
+  wiped(r.dev, pass, 0xFF202020l);
   draw(r, pass, kept);
   settle(r.dev, pass, kept, null, 64, 48);
   shot = r.dev.capture();
