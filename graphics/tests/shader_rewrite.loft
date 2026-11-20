@@ -1,0 +1,196 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// A shader as a program writes it, rewritten for `gpu`: its loose uniforms in one block, its
+// samplers by slot, every line still on its own number.  The sources are ones programs draw
+// with today: dryopea's ground shader, crawler's instanced hex floor, stage's light pass.
+// No window is needed.
+use shader_rewrite::*;
+
+// ── dryopea: a matrix and a colour ──
+
+const GROUND_V: text = `
+#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aNormal;
+uniform mat4 uVP;
+void main() {{ gl_Position = uVP * vec4(aPos, 1.0); }}
+`;
+
+const GROUND_F: text = `
+#version 330 core
+uniform vec3 uColor;
+out vec4 FragColor;
+void main() {{ FragColor = vec4(uColor, 1.0); }}
+`;
+
+const GROUND_V_WANT: text = `
+#version 330 core
+layout(std140) uniform Block {{ mat4 uVP; vec4 uColor_blk; }};
+#define uColor (uColor_blk.xyz)
+#line 2
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aNormal;
+
+void main() {{ gl_Position = uVP * vec4(aPos, 1.0); }}
+`;
+
+const GROUND_F_WANT: text = `
+#version 330 core
+layout(std140) uniform Block {{ mat4 uVP; vec4 uColor_blk; }};
+#define uColor (uColor_blk.xyz)
+#line 2
+
+out vec4 FragColor;
+void main() {{ FragColor = vec4(uColor, 1.0); }}
+`;
+
+fn test_loose_uniforms_become_one_block_in_both_stages() {
+  r = rewrite_shader(GROUND_V, GROUND_F);
+  assert(r.fault == "", "no fault: {r.fault}");
+  assert(r.vertex == GROUND_V_WANT, "the vertex stage:\n{r.vertex}");
+  assert(r.fragment == GROUND_F_WANT, "the fragment stage:\n{r.fragment}");
+  assert(len(r.uniforms) == 2, "two uniforms: {len(r.uniforms)}");
+  matrix = r.uniforms[0];
+  colour = r.uniforms[1];
+  assert(matrix.name == "uVP" && matrix.kind == "mat4" && matrix.floats == 16 && matrix.at == 0, "the matrix is field 0");
+  assert(colour.name == "uColor" && colour.kind == "vec3" && colour.floats == 4 && colour.at == 1, "the colour is field 1, four floats wide");
+}
+
+// ── every kind at once ──
+
+const KINDS_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+uniform mat4 uMVP;   // the camera
+uniform float uTime, uScale;
+uniform	highp vec2 uSize;
+void main() {{ gl_Position = uMVP * vec4(pos * uScale + vec3(uSize, uTime), 1.0); }}
+`;
+
+const KINDS_F: text = `
+#version 330 core
+uniform sampler2D uScene;
+uniform vec4 uTint;
+uniform int uCount;
+uniform vec4 uLights[32];     // x, y, radius, power
+uniform vec3 uLightCol[32];
+uniform sampler2D uMask;
+uniform float uTime;
+out vec4 frag;
+void main() {{
+  vec3 lit = vec3(0.0);
+  for (int i = 0; i < uCount; i++) {{ lit += uLightCol[i] * uLights[i].w; }}
+  frag = texture(uScene, vec2(0.5)) * texture(uMask, vec2(0.5)) * uTint + vec4(lit * uTime, 0.0);
+}}
+`;
+
+const KINDS_GIVEN: text = `layout(std140) uniform Block {{ mat4 uMVP; float uTime; float uScale; vec2 uSize; vec4 uTint; float uCount_blk; vec4 uLights[32]; vec3 uLightCol[32]; }};
+#define uCount int(uCount_blk)
+uniform sampler2D tex0;
+#define uScene tex0
+uniform sampler2D tex1;
+#define uMask tex1
+`;
+
+fn field(r: const Rewritten, name: text) -> text {
+  for u in r.uniforms {
+    if u.name == name { return "{u.kind} {u.floats} x{u.count} at {u.at}"; }
+  }
+  "none"
+}
+
+fn test_every_kind_a_block_holds_and_the_samplers_by_slot() {
+  r = rewrite_shader(KINDS_V, KINDS_F);
+  assert(r.fault == "", "no fault: {r.fault}");
+  assert(r.vertex.contains(KINDS_GIVEN) && r.fragment.contains(KINDS_GIVEN), "both stages are given the same block:\n{r.fragment}");
+  assert(field(r, "uMVP") == "mat4 16 x0 at 0", "uMVP: {field(r, "uMVP")}");
+  assert(field(r, "uTime") == "float 1 x0 at 1", "uTime, declared in both stages, is one field: {field(r, "uTime")}");
+  assert(field(r, "uScale") == "float 1 x0 at 2", "uScale, the second name of one line: {field(r, "uScale")}");
+  assert(field(r, "uSize") == "vec2 2 x0 at 3", "uSize, behind a tab and a precision: {field(r, "uSize")}");
+  assert(field(r, "uTint") == "vec4 4 x0 at 4", "uTint: {field(r, "uTint")}");
+  assert(field(r, "uCount") == "int 1 x0 at 5", "uCount: {field(r, "uCount")}");
+  assert(field(r, "uLights") == "vec4 4 x32 at 6", "uLights: {field(r, "uLights")}");
+  assert(field(r, "uLightCol") == "vec3 4 x32 at 7", "uLightCol: {field(r, "uLightCol")}");
+  assert(field(r, "uScene") == "sampler2D 0 x0 at 0", "uScene is slot 0: {field(r, "uScene")}");
+  assert(field(r, "uMask") == "sampler2D 0 x0 at 1", "uMask is slot 1: {field(r, "uMask")}");
+  assert(len(r.uniforms) == 10, "ten uniforms: {len(r.uniforms)}");
+}
+
+// A line of the author's is where it was: the count of lines, and the line each one is on
+// once what was written in and its `#line` are left out.
+fn test_every_line_keeps_its_number() {
+  r = rewrite_shader(KINDS_V, KINDS_F);
+  before = KINDS_F.split('\n');
+  after: vector<text> = [];
+  skip = 0;
+  for line in r.fragment.split('\n') {
+    if line.starts_with("layout(std140) uniform Block") { skip = 7; }
+    if skip > 0 { skip -= 1; if line.starts_with("#line") { assert(line == "#line 2", "the count is put back to the line after `#version`: {line}"); } continue; }
+    after += [line];
+  }
+  assert(len(after) == len(before), "{len(after)} lines of the author's, {len(before)} written");
+  for line in before {
+    kept = after[line#index] ?? "";
+    assert(kept == line || (kept == "" && line.trim().starts_with("uniform")), "line {line#index + 1} moved: `{kept}` for `{line}`");
+  }
+}
+
+fn test_a_shader_without_loose_uniforms_is_left_as_written() {
+  plain_v = "#version 330 core\nlayout(location = 0) in vec3 pos;\nlayout(std140) uniform Block {{ vec4 color; }};\nvoid main() {{ gl_Position = vec4(pos, 1.0); }}\n";
+  plain_f = "#version 330 core\nout vec4 frag;\nvoid main() {{ frag = vec4(1.0); }}\n";
+  r = rewrite_shader(plain_v, plain_f);
+  assert(r.fault == "" && r.vertex == plain_v && r.fragment == plain_f && len(r.uniforms) == 0, "untouched: {r.fault}");
+}
+
+// ── what cannot be carried is named, with its stage and line ──
+
+fn fault_of(vertex: text, fragment: text) -> text {
+  r = rewrite_shader(vertex, fragment);
+  assert(r.fault == "" || (r.vertex == vertex && r.fragment == fragment && len(r.uniforms) == 0), "a fault rewrites nothing");
+  r.fault
+}
+
+fn test_what_a_block_cannot_hold_is_a_fault_that_names_its_line() {
+  head = "#version 330 core\n";
+  tail = "void main() {{}}\n";
+  // a source with no `#version` line: what is given goes first, and the first line is still 1
+  bare = rewrite_shader("uniform float uGain;\nvoid main() {{}}\n", tail);
+  assert(bare.vertex.starts_with("layout(std140) uniform Block {{ float uGain; }};\n#line 1\n\nvoid main()"), "no version line:\n{bare.vertex}");
+  a = fault_of("{head}uniform mat3 uNormal;\n{tail}", tail);
+  assert(a.contains("vertex shader, line 2") && a.contains("`mat3`"), "a matrix of three: {a}");
+  b = fault_of(tail, "{head}\nuniform float uGain = 2.0;\n{tail}");
+  assert(b.contains("fragment shader, line 3") && b.contains("value of its own"), "a value of its own: {b}");
+  c = fault_of("{head}uniform vec4\n  uColor;\n{tail}", tail);
+  assert(c.contains("vertex shader, line 2") && c.contains("one line"), "split over lines: {c}");
+  d = fault_of("{head}uniform vec3 uTone;\n{tail}", "{head}uniform vec4 uTone;\n{tail}");
+  assert(d.contains("fragment shader, line 2") && d.contains("another type"), "two types for one name: {d}");
+  e = fault_of(tail, "{head}uniform sampler2D uMaps[4];\n{tail}");
+  assert(e.contains("fragment shader, line 2") && e.contains("array of `sampler2D`"), "an array of samplers: {e}");
+  f = fault_of(tail, "{head}uniform float uWeights[N];\n{tail}");
+  assert(f.contains("fragment shader, line 2"), "a length that is a name: {f}");
+}
+
+// ── crawler: per-copy inputs at locations of its own ──
+
+const HEX_V: text = `
+#version 330 core
+layout (location = 0) in vec3 aBase;    // (dx_lattice, dy_world, 0)
+layout (location = 5) in vec2 aLat;     // (column, row_y) / instance
+layout(location=6) in vec2 aVisUV;      // FOV texel / instance
+layout (location = 7) in vec3 aColor;   // floor tone / instance
+uniform mat4 uMVP;
+out vec3 vColor;
+void main() {{ vColor = aColor; gl_Position = uMVP * vec4(aLat + aBase.xy + aVisUV, 0.0, 1.0); }}
+`;
+
+fn test_an_input_at_a_location_of_its_own_is_moved_to_gpus() {
+  got = with_locations(HEX_V, [5, 1, 6, 2, 7, 3]);
+  assert(got.contains("layout (location = 0) in vec3 aBase;    // (dx_lattice, dy_world, 0)"), "location 0 is not named and stays:\n{got}");
+  assert(got.contains("layout (location = 1) in vec2 aLat;     // (column, row_y) / instance"), "5 is now 1:\n{got}");
+  assert(got.contains("layout(location= 2) in vec2 aVisUV;      // FOV texel / instance"), "6 is now 2, written without blanks:\n{got}");
+  assert(got.contains("layout (location = 3) in vec3 aColor;   // floor tone / instance"), "7 is now 3:\n{got}");
+  assert(len(got.split('\n')) == len(HEX_V.split('\n')), "no line added or lost");
+  frag = "#version 330 core\nlayout(location = 5) out vec4 frag;\nvoid main() {{}}\n";
+  assert(with_locations(frag, [5, 1]) == frag, "an output at a location is not an input");
+}
