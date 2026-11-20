@@ -50,6 +50,11 @@ gpu_vulkan/spirv.py FILE.loft ...           # write every SPIR-V constant again
 gpu_vulkan/spirv.py --check FILE.loft ...   # exit 1 when one is not what its GLSL gives
 ```
 
+A shader written for `graphics`, with its uniforms declared one by one, is marked `// SPIR-V of
+VERT with FRAG (vertex|fragment), as graphics hands them on, written by gpu_vulkan/spirv.py: do
+not edit.`  The script then first makes it into the form `graphics` gives `gpu`, by running
+`graphics/tools/rewritten.loft`: the code the library itself runs.
+
 It needs `glslangValidator` and `spirv-val` (Debian and Ubuntu: `glslang-tools`,
 `spirv-tools`).  What the GLSL follows is `gpu_gl`'s rule, with three things more:
 
