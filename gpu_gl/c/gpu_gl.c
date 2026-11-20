@@ -409,6 +409,27 @@ static int gq_scratch(gq_dev *d) {
     return d->scratch != 0;
 }
 
+/* The backend hands its events out as 64-bit words in every build (gpu/gpu_backend.h); the
+ * window host below it writes the build's integer (`loft_int`: 32 bits in a 32-bit build,
+ * `--width 32`).  There the words are taken at the host's width and widened; a 64-bit build
+ * makes the same call. */
+static void gq_t_events(int64_t dev, int64_t *out, int64_t n) {
+#if defined(LOFT_WIDTH32)
+    loft_int *narrow;
+    int64_t i;
+    if (n <= 0) return;
+    narrow = (loft_int *) malloc((size_t) n * sizeof *narrow);
+    if (!narrow) return;
+    /* What the host leaves unwritten past the queued events stays as it was. */
+    for (i = 0; i < n; i++) narrow[i] = (loft_int) out[i];
+    gq_events(dev, narrow, n);
+    for (i = 0; i < n; i++) out[i] = (int64_t) narrow[i];
+    free(narrow);
+#else
+    gq_events(dev, out, n);
+#endif
+}
+
 static int64_t gq_t_index_buffer(int64_t dev, const int64_t *idx, int64_t n) {
     gq_dev *d = gq_dev_of(dev);
     gq_res *r;
@@ -936,7 +957,7 @@ static const gpu_backend gq_tab = {
 #else
     GPU_BACKEND_WRITES_DEPTH, "gpu_gl", "glsl-330",
 #endif
-    gq_t_open, gq_poll, gq_event_count, gq_events, gq_t_size, gq_t_close,
+    gq_t_open, gq_poll, gq_event_count, gq_t_events, gq_t_size, gq_t_close,
     gq_key_down, gq_mouse, gq_text_size, gq_text_copy,
     gq_t_buffer, gq_t_index_buffer, gq_buffer_update, gq_t_texture, gq_t_texture_put,
     gq_t_texture_put565,
@@ -1028,7 +1049,7 @@ static const gpu_backend gq_tab_checked = {
 #else
     GPU_BACKEND_WRITES_DEPTH, "gpu_gl", "glsl-330",
 #endif
-    gq_c_open, gq_poll, gq_event_count, gq_events, gq_t_size, gq_c_close,
+    gq_c_open, gq_poll, gq_event_count, gq_t_events, gq_t_size, gq_c_close,
     gq_key_down, gq_mouse, gq_text_size, gq_text_copy,
     gq_c_buffer, gq_c_index_buffer, gq_c_buffer_update, gq_c_texture, gq_c_texture_put,
     gq_c_texture_put565,

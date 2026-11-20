@@ -3,7 +3,9 @@
 /* gpu's C part: it holds the backend's table and passes each call on.  No graphics stack is
  * named here and no library is opened. */
 #include "gpu_backend.h"
+#include "loft_width.h"
 #include <stddef.h>
+#include <stdlib.h>
 
 /* A table a caller handed in, when it is one this library knows; NULL otherwise.  Every call
  * names the table of the device or object it is about: nothing here remembers a backend, so a
@@ -41,7 +43,33 @@ int64_t gp_poll(int64_t tab, int64_t dev) { return gp_tab ? gp_tab->poll(dev) : 
 int64_t gp_size(int64_t tab, int64_t dev, int64_t which) { return gp_tab ? gp_tab->size(dev, which) : 0; }
 void gp_close(int64_t tab, int64_t dev) { if (gp_tab) { gp_tab->close(dev); } }
 int64_t gp_event_count(int64_t tab, int64_t dev) { return gp_tab ? gp_tab->event_count(dev) : 0; }
-void gp_events(int64_t tab, int64_t dev, int64_t *out, int64_t n) { if (gp_tab) { gp_tab->events(dev, out, n); } }
+/* A vector of loft integers crosses here as the build's integer (`loft_int`, loft_width.h): 64
+ * bits, the words a backend's table takes, or 32 bits in a 32-bit build (`--width 32`), where
+ * the words are copied wide for the call.  The 64-bit build hands the vector's own bytes on. */
+#if defined(LOFT_WIDTH32)
+static int64_t *gp_wide(const loft_int *v, int64_t n) {
+    int64_t *w = (int64_t *) malloc((size_t) (n > 0 ? n : 1) * sizeof *w);
+    int64_t i;
+    if (!w) { return NULL; }
+    for (i = 0; i < n; i++) { w[i] = (int64_t) v[i]; }
+    return w;
+}
+#endif
+void gp_events(int64_t tab, int64_t dev, loft_int *out, int64_t n) {
+    if (!gp_tab) { return; }
+#if defined(LOFT_WIDTH32)
+    {
+        int64_t *w = gp_wide(out, n);
+        int64_t i;
+        if (!w) { return; }
+        gp_tab->events(dev, w, n);
+        for (i = 0; i < n; i++) { out[i] = (loft_int) w[i]; }
+        free(w);
+    }
+#else
+    gp_tab->events(dev, out, n);
+#endif
+}
 int64_t gp_key_down(int64_t tab, int64_t dev, int64_t key) { return gp_tab ? gp_tab->key_down(dev, key) : 0; }
 int64_t gp_pointer(int64_t tab, int64_t dev, int64_t which) { return gp_tab ? gp_tab->pointer(dev, which) : 0; }
 int64_t gp_text_size(int64_t tab, int64_t dev) { return gp_tab ? gp_tab->text_size(dev) : 0; }
@@ -50,8 +78,18 @@ void gp_text_copy(int64_t tab, int64_t dev, uint8_t *out, int64_t n) { if (gp_ta
 int64_t gp_buffer(int64_t tab, int64_t dev, const float *data, int64_t n) {
     return gp_tab ? gp_tab->buffer(dev, data, n) : 0;
 }
-int64_t gp_index_buffer(int64_t tab, int64_t dev, const int64_t *idx, int64_t n) {
-    return gp_tab ? gp_tab->index_buffer(dev, idx, n) : 0;
+int64_t gp_index_buffer(int64_t tab, int64_t dev, const loft_int *idx, int64_t n) {
+    if (!gp_tab) { return 0; }
+#if defined(LOFT_WIDTH32)
+    {
+        int64_t *w = gp_wide(idx, n);
+        int64_t made = w ? gp_tab->index_buffer(dev, w, n) : 0;
+        free(w);
+        return made;
+    }
+#else
+    return gp_tab->index_buffer(dev, idx, n);
+#endif
 }
 void gp_buffer_update(int64_t tab, int64_t buf, const float *data, int64_t n) {
     if (gp_tab) { gp_tab->buffer_update(buf, data, n); }
@@ -76,7 +114,7 @@ int64_t gp_target(int64_t tab, int64_t dev, int64_t colour, int64_t depth) {
 /* A pipeline from the program and state gpu.loft flattened into `d`:
  *   vertex_n, its floats…, instance_n, its floats…, block_n, (floats, count, offset)…,
  *   block_floats, textures, shape, depth, blend, cull, into. */
-int64_t gp_pipeline(int64_t tab, int64_t dev, const int64_t *d, int64_t n, const char *vertex,
+int64_t gp_pipeline(int64_t tab, int64_t dev, const loft_int *d, int64_t n, const char *vertex,
                     const char *fragment) {
     gpu_program p;
     gpu_state s;

@@ -439,7 +439,7 @@ struct Slot {
 /// camera.
 pub struct Scene {
   into: integer,
-  sky: integer,
+  sky: i64,
   land: gpu::Pipeline,
   values: gpu::Block,
   atlas: gpu::Texture,
@@ -599,12 +599,12 @@ pub fn screen_point(self: const Scene, wide: integer, high: integer, x: integer,
 }
 
 // An RGB565 value as 0xAARRGGBB: each channel's high bits repeated in its low ones; NONE clear.
-fn wide(v: integer) -> integer {
-  if v == NONE { return 0; }
+fn wide(v: integer) -> i64 {
+  if v == NONE { return 0l; }
   r = (v >> 11) & 31;
   g = (v >> 5) & 63;
   b = v & 31;
-  0xFF000000 | (((r << 3) | (r >> 2)) << 16) | (((g << 2) | (g >> 4)) << 8) | ((b << 3) | (b >> 2))
+  0xFF000000l | ((((r << 3) | (r >> 2)) << 16) as i64) | ((((g << 2) | (g >> 4)) << 8) as i64) | (((b << 3) | (b >> 2)) as i64)
 }
 
 /// A picture, 16 x 16 RGB565 texels row by row (NONE where it is clear): its number, for a

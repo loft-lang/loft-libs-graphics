@@ -109,13 +109,13 @@ pub fn canvas(cw: integer, ch: integer, fill_color: integer) -> Canvas {
 // test.  Bound with `width`/`height`.
 // Example: @GFX-003 — a neighbourhood scan that tests the returned colour
 // miscounts its own transparent pixels as off-canvas.
-pub fn get_pixel(self: const Canvas, gx: integer, gy: integer) -> integer {
+pub fn get_pixel(self: const Canvas, gx: integer, gy: integer) -> i64 {
   if gx < 0 or gx >= self.width or gy < 0 or gy >= self.height {
-    0
+    0l
   } else {
     gp_idx = gy * self.width + gx;
     gp_d = &self.data;
-    if gp_idx < len(gp_d) { gp_d[gp_idx] ?? 0 } else { 0 }
+    if gp_idx < len(gp_d) { (gp_d[gp_idx] ?? 0) as i64 } else { 0l }
   }
 }
 

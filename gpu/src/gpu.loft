@@ -24,44 +24,44 @@
 
 // --- The backend ---
 
-fn gp_use(table: integer) -> integer;
+fn gp_use(table: i64) -> i64;
 #c "gp_use" "int64_t(int64_t)"
-fn gp_last() -> integer;
+fn gp_last() -> i64;
 #c "gp_last" "int64_t()"
-fn gp_name(tab: integer) -> text;
+fn gp_name(tab: i64) -> text;
 #c "gp_name" "const char*(int64_t)"
-fn gp_shading(tab: integer) -> text;
+fn gp_shading(tab: i64) -> text;
 #c "gp_shading" "const char*(int64_t)"
-fn gp_open(tab: integer, width: integer, height: integer, title: text, fullscreen: integer) -> integer;
+fn gp_open(tab: i64, width: integer, height: integer, title: text, fullscreen: integer) -> i64;
 #c "gp_open" "int64_t(int64_t, int64_t, int64_t, const char*, int64_t)"
-fn gp_poll(tab: integer, dev: integer) -> integer;
+fn gp_poll(tab: i64, dev: i64) -> integer;
 #c "gp_poll" "int64_t(int64_t, int64_t)"
-fn gp_size(tab: integer, dev: integer, which: integer) -> integer;
+fn gp_size(tab: i64, dev: i64, which: integer) -> integer;
 #c "gp_size" "int64_t(int64_t, int64_t, int64_t)"
-fn gp_close(tab: integer, dev: integer);
+fn gp_close(tab: i64, dev: i64);
 #c "gp_close" "void(int64_t, int64_t)"
-fn gp_event_count(tab: integer, dev: integer) -> integer;
+fn gp_event_count(tab: i64, dev: i64) -> integer;
 #c "gp_event_count" "int64_t(int64_t, int64_t)"
-fn gp_events(tab: integer, dev: integer, out: vector<integer>);
-#c "gp_events" "void(int64_t, int64_t, int64_t*, int64_t)"
-fn gp_key_down(tab: integer, dev: integer, key: integer) -> integer;
+fn gp_events(tab: i64, dev: i64, out: vector<integer>);
+#c "gp_events" "void(int64_t, int64_t, loft_int*, int64_t)"
+fn gp_key_down(tab: i64, dev: i64, key: integer) -> integer;
 #c "gp_key_down" "int64_t(int64_t, int64_t, int64_t)"
-fn gp_pointer(tab: integer, dev: integer, which: integer) -> integer;
+fn gp_pointer(tab: i64, dev: i64, which: integer) -> integer;
 #c "gp_pointer" "int64_t(int64_t, int64_t, int64_t)"
-fn gp_text_size(tab: integer, dev: integer) -> integer;
+fn gp_text_size(tab: i64, dev: i64) -> integer;
 #c "gp_text_size" "int64_t(int64_t, int64_t)"
-fn gp_text_copy(tab: integer, dev: integer, out: vector<u8>);
+fn gp_text_copy(tab: i64, dev: i64, out: vector<u8>);
 #c "gp_text_copy" "void(int64_t, int64_t, uint8_t*, int64_t)"
-fn gp_buffer(tab: integer, dev: integer, data: const vector<single>) -> integer;
+fn gp_buffer(tab: i64, dev: i64, data: const vector<single>) -> i64;
 #c "gp_buffer" "int64_t(int64_t, int64_t, const float*, int64_t)"
-fn gp_index_buffer(tab: integer, dev: integer, list: const vector<integer>) -> integer;
-#c "gp_index_buffer" "int64_t(int64_t, int64_t, const int64_t*, int64_t)"
-fn gp_buffer_update(tab: integer, buf: integer, data: const vector<single>);
+fn gp_index_buffer(tab: i64, dev: i64, list: const vector<integer>) -> i64;
+#c "gp_index_buffer" "int64_t(int64_t, int64_t, const loft_int*, int64_t)"
+fn gp_buffer_update(tab: i64, buf: i64, data: const vector<single>);
 #c "gp_buffer_update" "void(int64_t, int64_t, const float*, int64_t)"
-fn gp_texture(tab: integer, dev: integer, width: integer, height: integer, depth: integer) -> integer;
+fn gp_texture(tab: i64, dev: i64, width: integer, height: integer, depth: integer) -> i64;
 #c "gp_texture" "int64_t(int64_t, int64_t, int64_t, int64_t, int64_t)"
-fn gp_texture_put(tab: integer, 
-  tex: integer,
+fn gp_texture_put(tab: i64, 
+  tex: i64,
   x: integer,
   y: integer,
   width: integer,
@@ -69,8 +69,8 @@ fn gp_texture_put(tab: integer,
   px: const vector<u32>
 );
 #c "gp_texture_put" "void(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, const uint32_t*, int64_t)"
-fn gp_texture_put565(tab: integer, 
-  tex: integer,
+fn gp_texture_put565(tab: i64, 
+  tex: i64,
   x: integer,
   y: integer,
   width: integer,
@@ -78,41 +78,41 @@ fn gp_texture_put565(tab: integer,
   px: const vector<i32>
 );
 #c "gp_texture_put565" "void(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, const int32_t*, int64_t)"
-fn gp_texture_nearest(tab: integer, tex: integer, on: integer);
+fn gp_texture_nearest(tab: i64, tex: i64, on: integer);
 #c "gp_texture_nearest" "void(int64_t, int64_t, int64_t)"
-fn gp_texture_mipmaps(tab: integer, tex: integer);
+fn gp_texture_mipmaps(tab: i64, tex: i64);
 #c "gp_texture_mipmaps" "void(int64_t, int64_t)"
-fn gp_target(tab: integer, dev: integer, colour: integer, depth: integer) -> integer;
+fn gp_target(tab: i64, dev: i64, colour: i64, depth: i64) -> i64;
 #c "gp_target" "int64_t(int64_t, int64_t, int64_t, int64_t)"
-fn gp_pipeline(tab: integer, dev: integer, desc: const vector<integer>, vertex: text, fragment: text) -> integer;
-#c "gp_pipeline" "int64_t(int64_t, int64_t, const int64_t*, int64_t, const char*, const char*)"
-fn gp_release(tab: integer, handle: integer);
+fn gp_pipeline(tab: i64, dev: i64, desc: const vector<integer>, vertex: text, fragment: text) -> i64;
+#c "gp_pipeline" "int64_t(int64_t, int64_t, const loft_int*, int64_t, const char*, const char*)"
+fn gp_release(tab: i64, handle: i64);
 #c "gp_release" "void(int64_t, int64_t)"
-fn gp_begin(tab: integer, dev: integer, target: integer, load: integer, colour: integer);
+fn gp_begin(tab: i64, dev: i64, target: i64, load: integer, colour: i64);
 #c "gp_begin" "void(int64_t, int64_t, int64_t, int64_t, int64_t)"
-fn gp_bind(tab: integer, dev: integer, pipeline: integer);
+fn gp_bind(tab: i64, dev: i64, pipeline: i64);
 #c "gp_bind" "void(int64_t, int64_t, int64_t)"
-fn gp_uniforms(tab: integer, dev: integer, block: const vector<single>);
+fn gp_uniforms(tab: i64, dev: i64, block: const vector<single>);
 #c "gp_uniforms" "void(int64_t, int64_t, const float*, int64_t)"
-fn gp_sample(tab: integer, dev: integer, slot: integer, tex: integer);
+fn gp_sample(tab: i64, dev: i64, slot: integer, tex: i64);
 #c "gp_sample" "void(int64_t, int64_t, int64_t, int64_t)"
-fn gp_vertices(tab: integer, dev: integer, buf: integer);
+fn gp_vertices(tab: i64, dev: i64, buf: i64);
 #c "gp_vertices" "void(int64_t, int64_t, int64_t)"
-fn gp_instances(tab: integer, dev: integer, buf: integer, first: integer);
+fn gp_instances(tab: i64, dev: i64, buf: i64, first: integer);
 #c "gp_instances" "void(int64_t, int64_t, int64_t, int64_t)"
-fn gp_indices(tab: integer, dev: integer, buf: integer);
+fn gp_indices(tab: i64, dev: i64, buf: i64);
 #c "gp_indices" "void(int64_t, int64_t, int64_t)"
-fn gp_viewport(tab: integer, dev: integer, x: integer, y: integer, width: integer, height: integer);
+fn gp_viewport(tab: i64, dev: i64, x: integer, y: integer, width: integer, height: integer);
 #c "gp_viewport" "void(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)"
-fn gp_scissor(tab: integer, dev: integer, x: integer, y: integer, width: integer, height: integer, on: integer);
+fn gp_scissor(tab: i64, dev: i64, x: integer, y: integer, width: integer, height: integer, on: integer);
 #c "gp_scissor" "void(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)"
-fn gp_draw(tab: integer, dev: integer, first: integer, count: integer, indexed: integer, copies: integer);
+fn gp_draw(tab: i64, dev: i64, first: integer, count: integer, indexed: integer, copies: integer);
 #c "gp_draw" "void(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)"
-fn gp_end(tab: integer, dev: integer);
+fn gp_end(tab: i64, dev: i64);
 #c "gp_end" "void(int64_t, int64_t)"
-fn gp_present(tab: integer, dev: integer);
+fn gp_present(tab: i64, dev: i64);
 #c "gp_present" "void(int64_t, int64_t)"
-fn gp_capture(tab: integer, dev: integer, target: integer, out: vector<u32>);
+fn gp_capture(tab: i64, dev: i64, target: i64, out: vector<u32>);
 #c "gp_capture" "void(int64_t, int64_t, int64_t, uint32_t*, int64_t)"
 
 // --- What a program and a pipeline are made of ---
@@ -248,13 +248,13 @@ pub fn layout(block: const vector<integer>) -> vector<integer> {
 
 // One window (a page's canvas) and its GPU.  Everything made from it is freed when it closes.
 pub struct Device {
-  handle: integer,
+  handle: i64,
   // The table of the backend that opened it: every call of this device goes through it.
-  table: integer,
+  table: i64,
   // What the pass in progress draws into (`INTO_*`), -1 between passes.
   pass: integer,
   // The pipeline bound in this pass, and what it still needs before a draw.
-  pipe: integer,
+  pipe: i64,
   need_block: integer,
   need_textures: integer,
   sampled: integer,
@@ -291,7 +291,7 @@ pub fn open_fullscreen(table: i64, title: text) -> Device? {
 }
 
 // The device of a window the backend opened; none when it did not.
-fn device_of(table: integer, h: integer) -> Device? {
+fn device_of(table: i64, h: i64) -> Device? {
   if h == 0 { return null; }
   Device {
     handle: h,
@@ -413,9 +413,9 @@ fn refuse(self: Device, why: text) {
 
 // Floats on the GPU: vertices, or the values of drawn copies.
 pub struct Buffer {
-  handle: integer,
+  handle: i64,
   // The backend that made it, which is the one it is released into.
-  table: integer,
+  table: i64,
   size: integer,
 }
 
@@ -441,9 +441,9 @@ pub fn floats(self: const Buffer) -> integer {
 
 // Vertex numbers on the GPU, for `draw_indexed`.
 pub struct IndexBuffer {
-  handle: integer,
+  handle: i64,
   // The backend that made it, which is the one it is released into.
-  table: integer,
+  table: i64,
   size: integer,
 }
 
@@ -465,9 +465,9 @@ pub fn count(self: const IndexBuffer) -> integer {
 
 // An image on the GPU: colour (red, green, blue, alpha at 8 bits each) or depth.
 pub struct Texture {
-  handle: integer,
+  handle: i64,
   // The backend that made it, which is the one it is released into.
-  table: integer,
+  table: i64,
   w: integer,
   h: integer,
   depth: boolean,
@@ -531,9 +531,9 @@ pub fn height(self: const Texture) -> integer {
 
 // What a pass draws into other than the window.  Its textures stay usable after it is gone.
 pub struct Target {
-  handle: integer,
+  handle: i64,
   // The backend that made it, which is the one it is released into.
-  table: integer,
+  table: i64,
   into: integer,
   w: integer,
   h: integer,
@@ -562,9 +562,9 @@ pub fn depth_target(self: const Device, depth: const Texture) -> Target {
 
 // A program, its inputs and its render state, built for one kind of target.
 pub struct Pipeline {
-  handle: integer,
+  handle: i64,
   // The backend that made it, which is the one it is released into.
-  table: integer,
+  table: i64,
   into: integer,
   textures: integer,
   instances: boolean,
@@ -709,7 +709,7 @@ pub fn begin(self: Device, target: const Target, load: integer, colour: i64) {
   self.start(target.handle, target.into, load, colour);
 }
 
-fn start(self: Device, target: integer, into: integer, load: integer, colour: integer) {
+fn start(self: Device, target: i64, into: integer, load: integer, colour: i64) {
   if self.pass >= 0 {
     self.refuse("begin: the pass before it has not ended");
     return;
