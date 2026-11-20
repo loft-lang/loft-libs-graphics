@@ -13,8 +13,8 @@ loft = ">=2026.11.20261113"
 # that reads or changes that state has the window in its hand.  A draw names its window and its
 # textures (`mesh.draw(w, shader, texture)`), a function that draws takes a `Window` and not a
 # `const Window`, and a framebuffer is made of its textures (README § Moving from 0.13).
-api_compatible_with  = "0.14.0"  # oldest own release this is a drop-in for
-data_compatible_with = "0.12.0"  # oldest own release whose stored data this reads
+api_compatible_with  = "0.14.1"  # oldest own release this is a drop-in for: 0.14.1 gave `Shader` its sources for other backends
+data_compatible_with = "0.14.1"  # oldest own release whose stored data this reads
 repository = "loft-libs-graphics"
 description = "A 2D canvas, windows, drawing on the GPU and text for loft (meshes and glTF are mesh3d and glb)"
 

@@ -10,8 +10,8 @@ version = "0.21.1"
 # literal list still fits; a `vector<integer>` variable does not), and a stored mask is narrower.
 # 0.21 is a declared break: the GL path draws on graphics 0.14, whose window holds its own
 # state — `gl_stage(w)` and `gl_render(g, w, …)` take a `Window`, not a `const Window`.
-api_compatible_with  = "0.21.0"   # oldest own release this is a drop-in for
-data_compatible_with = "0.20.0"   # oldest own release whose stored data this reads
+api_compatible_with  = "0.21.1"   # the API is unchanged; raised with the data floor, which the check on loft main cannot tell apart (loft#2598)
+data_compatible_with = "0.21.1"   # its records hold a graphics `Shader`, which graphics 0.14.1 reshaped
 loft = ">=2026.11.20261113"
 repository = "loft-libs-graphics"
 description = "A retained 2-D scene for loft: a node tree you mutate, with transforms, clipping, batching, pointer routing and widget states"
