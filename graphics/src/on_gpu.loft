@@ -142,3 +142,63 @@ fn put_int(block: gpu::Block, unis: const vector<Uniform>, units: vector<integer
   block.f1(u.at, v as float);
   true
 }
+
+// ── what a window was told, as a pipeline's state ──
+
+// The render state a window keeps between draws, as its calls leave it: what `enable` and
+// `disable` switched, the factors `blend` gave, the face `cull` named, whether `depth_write`
+// is on.  A window opens as OpenGL does with this library's one change: the depth test on, its
+// write on, no blending (its factors one and zero), no culling (its face the back).
+struct Kept {
+  depth_test: boolean = true,
+  depth_write: boolean = true,
+  blending: boolean = false,
+  blend_source: integer = 1,
+  blend_destination: integer = 0,
+  culling: boolean = false,
+  cull_front: boolean = false,
+  scissoring: boolean = false,
+}
+
+// Switch a capability, as `enable(cap)` and `disable(cap)` do: 1 the depth test, 2 blending,
+// 3 culling, 4 the scissor.  Another number changes nothing.
+fn switch(kept: Kept, cap: integer, on: boolean) {
+  if cap == 1 { kept.depth_test = on; }
+  if cap == 2 { kept.blending = on; }
+  if cap == 3 { kept.culling = on; }
+  if cap == 4 { kept.scissoring = on; }
+}
+
+// Whether a capability is on, as `enabled(cap)` answers.
+fn switched(kept: const Kept, cap: integer) -> boolean {
+  if cap == 1 { return kept.depth_test; }
+  if cap == 2 { return kept.blending; }
+  if cap == 3 { return kept.culling; }
+  if cap == 4 { return kept.scissoring; }
+  false
+}
+
+// The state of the pipeline a draw needs now: `shape` is the draw's (0 triangles, 1 lines,
+// 2 points), `into` what the pass draws into (`gpu::INTO_*`).  `over` is a painter's draw: over
+// whatever depth is there.  The scissor is no part of it: `gpu` takes that with each draw.
+//
+// OpenGL writes a depth only while it tests one, so a depth test off is no depth at all,
+// whatever `depth_write` says.
+fn state_of(kept: const Kept, shape: integer, into: integer, over: boolean) -> gpu::State {
+  depth = gpu::DEPTH_OFF;
+  if kept.depth_test && !over {
+    depth = if kept.depth_write { gpu::DEPTH_TEST_WRITE } else { gpu::DEPTH_TEST };
+  }
+  gpu::State {
+    shape: if shape == 1 { gpu::LINES } else if shape == 2 { gpu::POINTS } else { gpu::TRIANGLES },
+    depth: depth,
+    blend: if kept.blending { gpu::blend(kept.blend_source, kept.blend_destination) } else { gpu::BLEND_OFF },
+    cull: if !kept.culling { gpu::CULL_NONE } else if kept.cull_front { gpu::CULL_FRONT } else { gpu::CULL_BACK },
+    into: into,
+  }
+}
+
+// One number a state: two states are one pipeline exactly when their numbers are equal.
+fn key_of(state: const gpu::State) -> integer {
+  state.shape + 4 * state.depth + 16 * state.cull + 64 * state.into + 256 * state.blend
+}
