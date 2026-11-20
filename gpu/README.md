@@ -52,6 +52,13 @@ A call that breaks the rule is refused before the backend sees it, the same on e
 and `dev.refusals()` lists each one: a draw outside a pass, a pipeline built for another kind
 of target than the pass draws into, a draw whose block or texture slot was not given.
 
+## More than one backend
+
+A device keeps the backend it was opened through, and so does everything made from it.  A
+program may hold a device of each of two backends at once, and an object is released into the
+backend that made it, however late: after another device opened, after its own closed.
+`dev.backend()` is the name of a device's backend, for a message.
+
 ## What it is made of
 
 | Object | What it is |

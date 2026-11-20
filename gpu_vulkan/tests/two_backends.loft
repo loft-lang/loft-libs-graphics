@@ -1,0 +1,159 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// Two backends in one program.  A device keeps the backend it was opened through and so does
+// everything made from it: an OpenGL device and a Vulkan device draw side by side, each reading
+// its own frame, and an object of one is released into the backend that made it, also after
+// the other opened and after its own device closed.
+// Without a display every test returns at once.
+use gpu;
+use gpu_gl;
+use gpu_vulkan;
+
+fn display() -> boolean {
+  gpu_vulkan::table() != 0 && must_draw((env_variable("DISPLAY") ?? "") != "")
+}
+
+// A run that says its tests must draw (`GRAPHICS_TEST_MUST_DRAW=1`: the library CI, on a runner
+// it gave a display) fails here, where a test would otherwise return having drawn nothing.
+fn must_draw(can: boolean) -> boolean {
+  assert(can || (env_variable("GRAPHICS_TEST_MUST_DRAW") ?? "") != "1", "this run's tests must draw (GRAPHICS_TEST_MUST_DRAW=1) and found no display to draw on");
+  can
+}
+
+const FLAT_V: text = `
+#version 330 core
+layout(location = 0) in vec3 pos;
+layout(std140) uniform Block {{ vec4 color; vec4 at; }};
+void main() {{ gl_Position = vec4(pos.xy * at.zw + at.xy, 0.0, 1.0); }}
+`;
+// SPIR-V of FLAT_V (vertex), written by gpu_vulkan/spirv.py: do not edit.
+const FLAT_V_SPV: text = `AwIjBwADAQALAAgAKgAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABwAAAAAABAAAAG1haW4AAAAADQAAABIAAABHAAMACwAAAAIAAABIAAUACwAAAAAA
+AAALAAAAAAAAAEgABQALAAAAAQAAAAsAAAABAAAASAAFAAsAAAACAAAACwAAAAMAAABIAAUACwAA
+AAMAAAALAAAABAAAAEcABAASAAAAHgAAAAAAAABHAAMAFgAAAAIAAABIAAUAFgAAAAAAAAAjAAAA
+AAAAAEgABQAWAAAAAQAAACMAAAAQAAAARwAEABgAAAAhAAAAAAAAAEcABAAYAAAAIgAAAAAAAAAT
+AAIAAgAAACEAAwADAAAAAgAAABYAAwAGAAAAIAAAABcABAAHAAAABgAAAAQAAAAVAAQACAAAACAA
+AAAAAAAAKwAEAAgAAAAJAAAAAQAAABwABAAKAAAABgAAAAkAAAAeAAYACwAAAAcAAAAGAAAACgAA
+AAoAAAAgAAQADAAAAAMAAAALAAAAOwAEAAwAAAANAAAAAwAAABUABAAOAAAAIAAAAAEAAAArAAQA
+DgAAAA8AAAAAAAAAFwAEABAAAAAGAAAAAwAAACAABAARAAAAAQAAABAAAAA7AAQAEQAAABIAAAAB
+AAAAFwAEABMAAAAGAAAAAgAAAB4ABAAWAAAABwAAAAcAAAAgAAQAFwAAAAIAAAAWAAAAOwAEABcA
+AAAYAAAAAgAAACsABAAOAAAAGQAAAAEAAAAgAAQAGgAAAAIAAAAHAAAAKwAEAAYAAAAjAAAAAAAA
+ACsABAAGAAAAJAAAAAAAgD8gAAQAKAAAAAMAAAAHAAAANgAFAAIAAAAEAAAAAAAAAAMAAAD4AAIA
+BQAAAD0ABAAQAAAAFAAAABIAAABPAAcAEwAAABUAAAAUAAAAFAAAAAAAAAABAAAAQQAFABoAAAAb
+AAAAGAAAABkAAAA9AAQABwAAABwAAAAbAAAATwAHABMAAAAdAAAAHAAAABwAAAACAAAAAwAAAIUA
+BQATAAAAHgAAABUAAAAdAAAAQQAFABoAAAAfAAAAGAAAABkAAAA9AAQABwAAACAAAAAfAAAATwAH
+ABMAAAAhAAAAIAAAACAAAAAAAAAAAQAAAIEABQATAAAAIgAAAB4AAAAhAAAAUQAFAAYAAAAlAAAA
+IgAAAAAAAABRAAUABgAAACYAAAAiAAAAAQAAAFAABwAHAAAAJwAAACUAAAAmAAAAIwAAACQAAABB
+AAUAKAAAACkAAAANAAAADwAAAD4AAwApAAAAJwAAAP0AAQA4AAEA`;
+
+const FLAT_F: text = `
+#version 330 core
+layout(std140) uniform Block {{ vec4 color; vec4 at; }};
+out vec4 frag;
+void main() {{ frag = color; }}
+`;
+// SPIR-V of FLAT_F (fragment), written by gpu_vulkan/spirv.py: do not edit.
+const FLAT_F_SPV: text = `AwIjBwADAQALAAgAEgAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAA
+AAAAAQAAAA8ABgAEAAAABAAAAG1haW4AAAAACQAAABAAAwAEAAAABwAAAEcABAAJAAAAHgAAAAAA
+AABHAAMACgAAAAIAAABIAAUACgAAAAAAAAAjAAAAAAAAAEgABQAKAAAAAQAAACMAAAAQAAAARwAE
+AAwAAAAhAAAAAAAAAEcABAAMAAAAIgAAAAAAAAATAAIAAgAAACEAAwADAAAAAgAAABYAAwAGAAAA
+IAAAABcABAAHAAAABgAAAAQAAAAgAAQACAAAAAMAAAAHAAAAOwAEAAgAAAAJAAAAAwAAAB4ABAAK
+AAAABwAAAAcAAAAgAAQACwAAAAIAAAAKAAAAOwAEAAsAAAAMAAAAAgAAABUABAANAAAAIAAAAAEA
+AAArAAQADQAAAA4AAAAAAAAAIAAEAA8AAAACAAAABwAAADYABQACAAAABAAAAAAAAAADAAAA+AAC
+AAUAAABBAAUADwAAABAAAAAMAAAADgAAAD0ABAAHAAAAEQAAABAAAAA+AAMACQAAABEAAAD9AAEA
+OAABAA==`;
+
+fn flat() -> gpu::Program {
+  gpu::Program {
+    vertex: [gpu::F3],
+    instance: [],
+    block: [gpu::F4, gpu::F4],
+    textures: 0,
+    sources: [gpu::source("glsl-330", FLAT_V, FLAT_F), gpu::source("spirv", FLAT_V_SPV, FLAT_F_SPV)],
+  }
+}
+
+fn whole() -> vector<single> {
+  [-1.0f, -1.0f, 0.0f, 1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f, -1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f, -1.0f, 1.0f, 0.0f]
+}
+
+// The rectangle scaled by (sx, sy) about (cx, cy), in one colour.
+fn fill(dev: gpu::Device, pipe: const gpu::Pipeline, mesh: const gpu::Buffer, r: float, g: float, b: float, cx: float, sx: float) {
+  u = pipe.block();
+  u.f4(0, r, g, b, 1.0);
+  u.f4(1, cx, 0.0, sx, 1.0);
+  dev.bind(pipe);
+  dev.uniforms(u);
+  dev.vertices(mesh);
+  dev.draw(0, 6);
+}
+
+// An OpenGL and a Vulkan device, their passes interleaved call for call: one green on blue
+// with a red left half, the other yellow on black with a white right half.
+fn test_a_device_of_each_backend_draws_and_reads_back_its_own_frame() {
+  ao = gpu::open(gpu_gl::table(), 64, 48, "on-opengl");
+  if !display() { return; }
+  a = ao ?? return assert(false, "no OpenGL device");
+  b = gpu::open(gpu_vulkan::table(), 32, 24, "on-vulkan") ?? return assert(false, "no Vulkan device beside it");
+  assert(a.backend() == "gpu_gl" && b.backend() == "gpu_vulkan", "each says its own backend: {a.backend()} {b.backend()}");
+  pa = a.pipeline(flat(), gpu::State { depth: gpu::DEPTH_OFF }) ?? return assert(false, "no pipeline on OpenGL");
+  pb = b.pipeline(flat(), gpu::State { depth: gpu::DEPTH_OFF }) ?? return assert(false, "no pipeline on Vulkan");
+  ma = a.buffer(whole());
+  mb = b.buffer(whole());
+  a.begin_window(gpu::CLEAR, 0xFF0000FF);
+  b.begin_window(gpu::CLEAR, 0xFF000000);
+  fill(a, pa, ma, 0.0, 1.0, 0.0, 0.0, 1.0);
+  fill(b, pb, mb, 1.0, 1.0, 0.0, 0.0, 1.0);
+  fill(a, pa, ma, 1.0, 0.0, 0.0, -0.5, 0.5);
+  fill(b, pb, mb, 1.0, 1.0, 1.0, 0.5, 0.5);
+  a.end();
+  b.end();
+  sa = a.capture();
+  sb = b.capture();
+  assert(len(a.refusals()) == 0 && len(b.refusals()) == 0, "nothing refused: {a.refusals()} {b.refusals()}");
+  assert(sa[24 * 64 + 16] == 0xFFFF0000 && sa[24 * 64 + 48] == 0xFF00FF00, "OpenGL shows red and green: {sa[24 * 64 + 16]:x} {sa[24 * 64 + 48]:x}");
+  assert(sb[12 * 32 + 8] == 0xFFFFFF00 && sb[12 * 32 + 24] == 0xFFFFFFFF, "Vulkan shows yellow and white: {sb[12 * 32 + 8]:x} {sb[12 * 32 + 24]:x}");
+}
+
+struct Kit {
+  mesh: gpu::Buffer,
+  image: gpu::Texture,
+  pipe: gpu::Pipeline,
+}
+
+struct Held { kit: Kit? }
+
+fn kit_of(dev: const gpu::Device) -> Kit? {
+  Kit {
+    mesh: dev.buffer(whole()),
+    image: dev.texture(8, 8),
+    pipe: dev.pipeline(flat(), gpu::State { depth: gpu::DEPTH_OFF }) ?? return null,
+  }
+}
+
+// What an OpenGL device made is let go after a Vulkan device opened, and after its own device
+// closed: each release goes to OpenGL.  The Vulkan device draws before and after.
+fn test_an_object_is_released_into_the_backend_that_made_it() {
+  firsto = gpu::open(gpu_gl::table(), 64, 48, "first-opengl");
+  if !display() { return; }
+  first = firsto ?? return assert(false, "no OpenGL device");
+  held = Held { kit: kit_of(first) };
+  later = Held { kit: kit_of(first) };
+  assert(held.kit != null && later.kit != null, "two kits on OpenGL");
+  second = gpu::open(gpu_vulkan::table(), 64, 48, "then-vulkan") ?? return assert(false, "no Vulkan device");
+  mine = kit_of(second) ?? return assert(false, "no kit on Vulkan");
+  second.begin_window(gpu::CLEAR, 0xFF0000FF);
+  fill(second, mine.pipe, mine.mesh, 0.0, 1.0, 0.0, 0.0, 1.0);
+  second.end();
+  // one kit while its device is open, the other after it closed: both beside the Vulkan device
+  held.kit = null;
+  first.close();
+  later.kit = null;
+  second.begin_window(gpu::KEEP, 0);
+  fill(second, mine.pipe, mine.mesh, 1.0, 0.0, 0.0, -0.5, 0.5);
+  second.end();
+  shot = second.capture();
+  assert(len(second.refusals()) == 0, "nothing refused: {second.refusals()}");
+  assert(shot[24 * 64 + 16] == 0xFFFF0000 && shot[24 * 64 + 48] == 0xFF00FF00, "the Vulkan device drew on, and kept what it had drawn: {shot[24 * 64 + 16]:x} {shot[24 * 64 + 48]:x}");
+}
