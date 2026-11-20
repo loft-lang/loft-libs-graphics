@@ -73,8 +73,8 @@ fn test_depth_from_minus_y_puts_the_lower_sprite_in_front() {
   assert(st.order()[1] == worker, "the lower sprite draws last");
   cv = graphics::canvas(32, 48, 0xff000000);
   st.render_stage(cv);
-  assert(cv.get_pixel(6, 30) == 0xff00ff00, "and it covers the wall where they overlap");
-  assert(cv.get_pixel(6, 22) == 0xff808080, "the wall still shows above it");
+  assert(cv.get_pixel(6, 30) == 0xff00ff00l, "and it covers the wall where they overlap");
+  assert(cv.get_pixel(6, 22) == 0xff808080l, "the wall still shows above it");
   assert(wall == 0, "insertion order is unchanged by sorting");
 }
 
@@ -119,7 +119,7 @@ fn test_the_cue_is_off_by_default() {
   cv = graphics::canvas(32, 32, 0xff000000);
   st.render_stage(cv);
   n = 0;
-  for v in cv.data { if v == 0xff00ff00 { n = n + 1; } }
+  for v in cv.data { if v == 0xff00ff00l { n = n + 1; } }
   assert(n == 64, "8x8 undisturbed, got {n}");
   assert(st.haze_of(0) == 0.0, "and no haze");
 }
@@ -179,6 +179,6 @@ fn test_haze_fades_the_paint() {
   st.compose();
   cv = graphics::canvas(8, 8, 0xff000000);
   st.render_stage(cv);
-  assert(cv.get_pixel(1, 1) == 0xffffffff,
+  assert(cv.get_pixel(1, 1) == 0xffffffffl,
          "fully hazed toward white, got {cv.get_pixel(1, 1)}");
 }

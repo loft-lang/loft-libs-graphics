@@ -25,6 +25,7 @@ categories = ["graphics", "asset-format"]
 # pixels as `vector<u32>`, on graphics 0.12's `u32` canvas.
 api_compatible_with  = "0.5.2"   # the API is unchanged; raised with the data floor, which the check on loft main cannot tell apart (loft#2598)
 data_compatible_with = "0.5.2"   # its surface names graphics' records, which graphics 0.14 reshaped
+width32 = true   # its tests pass in a 32-bit program (loft --width 32); the library CI runs them there
 
 [dependencies]
 graphics = ">=0.14.3"

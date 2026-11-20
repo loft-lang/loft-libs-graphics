@@ -12,6 +12,7 @@ version = "0.21.2"
 # state — `gl_stage(w)` and `gl_render(g, w, …)` take a `Window`, not a `const Window`.
 api_compatible_with  = "0.21.1"   # the API is unchanged; raised with the data floor, which the check on loft main cannot tell apart (loft#2598)
 data_compatible_with = "0.21.1"   # its records hold a graphics `Shader`, which graphics 0.14.1 reshaped
+width32 = true   # its tests pass in a 32-bit program (loft --width 32); the library CI runs them there
 loft = ">=2026.11.20261113"
 repository = "loft-libs-graphics"
 description = "A retained 2-D scene for loft: a node tree you mutate, with transforms, clipping, batching, pointer routing and widget states"

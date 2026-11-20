@@ -150,7 +150,7 @@ fn test_a_clip_inherits_and_intersects() {
   cv = graphics::canvas(48, 48, 0xff000000);
   st.render_stage(cv);
   n = 0;
-  for v in cv.data { if v == 0xff00ff00 { n = n + 1; } }
+  for v in cv.data { if v == 0xff00ff00l { n = n + 1; } }
   assert(n == 100, "the overlap of (0,0)-(20,20) and (10,10)-(40,40) is 10x10");
 }
 

@@ -50,9 +50,9 @@ backend (`graphics/README.md` § Other backends).
 | [`text2d`](text2d/) | 0.4.9 | Text that always draws — a built-in face, a glyph atlas, measured metrics, wrapping and alignment, with no font file and no GL context |
 | [`tiles`](tiles/) | 0.7.2 | Tile sheets, map layers and sprites drawn at a surface's own resolution through a camera |
 | **Geometry and motion** | | |
-| [`shapes`](shapes/) | 0.5.4 | 2D collision detection |
+| [`shapes`](shapes/) | 0.5.5 | 2D collision detection |
 | [`gridmesh`](gridmesh/) | 0.2.8 | Chunk-local mesh generation primitives |
-| [`tween`](tween/) | 0.1.2 | Property tweens in exact integer time — eleven easing curves, chains and groups |
+| [`tween`](tween/) | 0.1.3 | Property tweens in exact integer time — eleven easing curves, chains and groups |
 <!-- packages:end -->
 
 The table is written from each package's `loft.toml` by `./packages.py`; `./packages.py

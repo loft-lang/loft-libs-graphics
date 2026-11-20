@@ -189,7 +189,7 @@ fn test_the_hud_is_bit_identical_with_the_light_on_and_off() {
     }
   }
   assert(moved == 0, "{moved} HUD pixels moved when the light changed");
-  assert(ca.get_pixel(105, 8) == 0xff40e080, "and the HUD is its own colour, undimmed");
+  assert(ca.get_pixel(105, 8) == 0xff40e080l, "and the HUD is its own colour, undimmed");
 }
 
 // ── the two models do not stack ──────────────────────────────────────────────

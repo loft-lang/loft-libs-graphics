@@ -63,7 +63,7 @@ fn test_a_tweened_property_draws_what_a_hand_moved_one_draws() {
     ch = shot(hand);
     assert(canvas_equal(ca, ch),
            "frame {k} differs in {differing(ca, ch)} pixels — tween x is {auto.prop_of(a, Prop.X)}, hand is {hand.prop_of(h, Prop.X)}");
-    for v in ca.data { if v == 0xffc03030 { ink = ink + 1; } }
+    for v in ca.data { if v == 0xffc03030l { ink = ink + 1; } }
   }
   assert(auto.prop_of(a, Prop.X) == FAR, "and it lands exactly on 64");
   assert(ink == 8 * 64, "each of the 8 frames drew an 8x8 sprite, got {ink}");

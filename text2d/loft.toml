@@ -7,6 +7,7 @@ version = "0.4.9"
 # during development and never left this repo.
 api_compatible_with  = "0.4.8"   # the API is unchanged; raised with the data floor, which the check on loft main cannot tell apart (loft#2598)
 data_compatible_with = "0.4.8"   # its surface names graphics' records, which graphics 0.14 reshaped
+width32 = true   # its tests pass in a 32-bit program (loft --width 32); the library CI runs them there
 loft    = ">=2026.10.0"
 repository = "loft-libs-graphics"
 description = "Text that always draws — a built-in face, a glyph atlas, measured metrics, wrapping and alignment, with no font file and no GL context"

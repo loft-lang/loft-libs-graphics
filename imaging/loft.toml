@@ -11,6 +11,7 @@ api_compatible_with  = "0.4.0"   # DECLARED BREAK: `png()` answers `Image?`.  It
                                  # discharges (`?? Image { }`).  0.3.x: `Pixel` gained
                                  # `a` — its note is in the 0.3.0 history.
 data_compatible_with = "0.3.0"   # Pixel went 3 bytes -> 4; a persisted Image from
+width32 = true   # its tests pass in a 32-bit program (loft --width 32); the library CI runs them there
                                  # an older release reads as shifted colour
 repository = "loft-libs-graphics"
 

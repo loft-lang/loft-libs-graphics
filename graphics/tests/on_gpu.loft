@@ -63,12 +63,21 @@ fn block_for(unis: const vector<Uniform>) -> gpu::Block {
   pipe.block()
 }
 
+// `x` to one decimal, worked out in whole tenths (a format's width is not taken in a 32-bit
+// program).
+fn one_decimal(x: float) -> text {
+  tenths = floor(x * 10.0 + 0.5) as integer;
+  sign = if tenths < 0 { "-" } else { "" };
+  size = if tenths < 0 { -tenths } else { tenths };
+  "{sign}{size / 10 ?? 0}.{size % 10 ?? 0}"
+}
+
 // The floats of field `field` of the shader above, as the backend would be handed them.
 fn at(block: const gpu::Block, starts: const vector<integer>, field: integer, n: integer) -> text {
   out = "";
   data = block.floats();
   first = starts[field] ?? 0;
-  for i in 0..n { out += "{(data[first + i] ?? 0.0f) as float:3.1} "; }
+  for i in 0..n { out += "{one_decimal((data[first + i] ?? 0.0f) as float)} "; }
   out.trim()
 }
 
