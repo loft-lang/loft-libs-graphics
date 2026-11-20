@@ -91,6 +91,19 @@ canvas), the OpenGL function table and the texture and framebuffer code.  It was
 library's own C; since graphics 0.14 draws through `gpu` this is the only copy, and it is edited
 here.
 
+### A window that does not open
+
+`open` answers null when there is no display, no OpenGL 3.3, or the server refused the window.
+`GPU_GL_WHY=1` writes where it gave up to stderr (the line of `c/gl_base.h` and the error the
+system reported), in any build.
+
+An X server starts over when its last client leaves, and drops a connection that arrives
+while it does; a program that closes its only window and opens another meets that, most
+often on a busy machine.  The library asks the server again for up to half a second.
+`tests/many_devices.loft` opens 300 windows one after another, and
+`gpu_host/parity/under_load.sh gpu_gl tests/many_devices.loft` runs it eight times at once
+with every core busy, where one open in three is dropped.
+
 ## Verified
 
 `tests/in_order.loft`, `host.loft`, `after_close.loft` and `two_devices.loft` hold this backend
