@@ -1312,14 +1312,22 @@ static int64_t gq_mods(unsigned state) {
  * KeyUp.  The modifiers are the state before the event, as X and 0.9 report them: pressing Shift
  * reports no Shift, releasing it reports Shift. */
 static void gq_key(gq_window *w, gx_input_event *e, int press) {
-    char buf[64];
+    char buf[64], *text = buf;
     gx_xid sym = 0;
     int n, status = 0;
     int64_t code;
     unsigned state = e->state;
-    if (press && w->ic)
+    if (press && w->ic) {
         n = w->xa.Xutf8LookupString(w->ic, e, buf, (int) sizeof buf - 1, &sym, &status);
-    else
+        /* XBufferOverflow: an input method committed more text than `buf` holds; nothing was
+         * written and `n` is the length it needs, so it is looked up again into a buffer that
+         * size.  Text that still does not fit is dropped. */
+        if (status == -1) {
+            text = n > 0 ? (char *) malloc((size_t) n + 1) : NULL;
+            n = text ? w->xa.Xutf8LookupString(w->ic, e, text, n, &sym, &status) : 0;
+            if (status == -1) n = 0;
+        }
+    } else
         n = w->xa.XLookupString(e, buf, (int) sizeof buf - 1, &sym, NULL);
     if (n < 0) n = 0;
     code = gq_key_code(sym);
@@ -1327,11 +1335,12 @@ static void gq_key(gq_window *w, gx_input_event *e, int press) {
         int repeat = code >= 0 && code < 256 && w->keys[code];
         if (code >= 0 && code < 256) w->keys[code] = 1;
         gq_push(w, GQ_EV_KEY_DOWN, code, gq_mods(state), repeat, 0);
-        if (n > 0) gq_text_push(w, buf, n);
+        if (n > 0) gq_text_push(w, text, n);
     } else {
         if (code >= 0 && code < 256) w->keys[code] = 0;
         gq_push(w, GQ_EV_KEY_UP, code, gq_mods(state), 0, 0);
     }
+    if (text != buf) free(text);
 }
 
 /* X buttons 1-3 are left, middle, right — 1, 4 and 2 here, as 0.9 numbered them; 4 and 5 are

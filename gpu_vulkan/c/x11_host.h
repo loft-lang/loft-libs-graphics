@@ -266,14 +266,22 @@ static int64_t gv_x_mods(unsigned state) {
 /* A press: KeyDown (a repeat when the key is already down) and, when it types anything, a Text;
  * a release: KeyUp.  The modifiers are the state before the event, as X reports them. */
 static void gv_x_key(gv_x_window *x, gx_input_event *e, int press) {
-    char buf[64];
+    char buf[64], *text = buf;
     gx_xid sym = 0;
     int n, status = 0;
     int64_t code;
     unsigned state = e->state;
-    if (press && x->ic)
+    if (press && x->ic) {
         n = x->xa.Xutf8LookupString(x->ic, e, buf, (int) sizeof buf - 1, &sym, &status);
-    else
+        /* XBufferOverflow: an input method committed more text than `buf` holds; nothing was
+         * written and `n` is the length it needs, so it is looked up again into a buffer that
+         * size.  Text that still does not fit is dropped. */
+        if (status == -1) {
+            text = n > 0 ? (char *) malloc((size_t) n + 1) : NULL;
+            n = text ? x->xa.Xutf8LookupString(x->ic, e, text, n, &sym, &status) : 0;
+            if (status == -1) n = 0;
+        }
+    } else
         n = x->xa.XLookupString(e, buf, (int) sizeof buf - 1, &sym, NULL);
     if (n < 0) n = 0;
     code = gv_x_key_code(sym);
@@ -281,11 +289,12 @@ static void gv_x_key(gv_x_window *x, gx_input_event *e, int press) {
         int repeat = code >= 0 && code < 256 && x->keys[code];
         if (code >= 0 && code < 256) x->keys[code] = 1;
         gv_x_push(x, GV_EV_KEY_DOWN, code, gv_x_mods(state), repeat, 0);
-        if (n > 0) gv_x_text_push(x, buf, n);
+        if (n > 0) gv_x_text_push(x, text, n);
     } else {
         if (code >= 0 && code < 256) x->keys[code] = 0;
         gv_x_push(x, GV_EV_KEY_UP, code, gv_x_mods(state), 0, 0);
     }
+    if (text != buf) free(text);
 }
 
 /* X buttons 1-3 are left, middle, right — 1, 4 and 2 here; 4 and 5 are a wheel step up and down. */
