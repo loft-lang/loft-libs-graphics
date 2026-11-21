@@ -1,0 +1,19 @@
+// Copyright (c) 2026 Jurjen Stellingwerff
+// SPDX-License-Identifier: LGPL-3.0-or-later
+//
+// A composite glyph names its components, and a component may itself be a composite: the
+// nesting is capped, but a glyph of two components, each of two, ... thirty deep names 2^30
+// outlines.  The walk has a budget of components per glyph, so such a font draws a bounded
+// part of the glyph and answers, instead of walking for hours.
+// `fonts/composite-fanout.ttf` is that font: 'A' is glyph 1, each glyph 1..31 is two copies of
+// the next, and glyph 32 is one triangle.
+
+use graphics;
+
+fn test_a_composite_that_fans_out_is_walked_within_a_budget() {
+  loaded = graphics::load_font("fonts/composite-fanout.ttf");
+  assert(loaded != null, "the fixture loads");
+  font = loaded ?? return;
+  g = font.rasterize('A', 16.0);
+  assert(g.width > 0 && g.height > 0, "a bounded part of the glyph is drawn: {g.width} x {g.height}");
+}

@@ -2275,6 +2275,7 @@ struct Outliner {
   py: single,
   area: single,
   max_area: single,
+  walked: integer, // glyph outlines entered, components included
 }
 
 // The pen ttf-parser drives over a glyph's points: implied on-curve midpoints, a transform for a
@@ -2344,6 +2345,7 @@ fn ol_new(upem: integer) -> Outliner {
     py: 0.0f,
     area: 0.0f,
     max_area: 3.0f * 2.0f * ((upem as single / 40.0f) ?? 0.0f),
+    walked: 0,
   }
 }
 
@@ -2517,10 +2519,17 @@ fn tt_f2dot14(b: const vector<u8>, at: integer) -> single {
   (tt_i16(b, at) as single / 16384.0f) ?? 0.0f
 }
 
+// How many outlines one glyph may enter, its components and theirs included.  The nesting cap
+// alone does not bound the walk: a component may be named twice at every level, and thirty
+// levels of that name a billion outlines.  Real composites (an accented letter, a ligature)
+// enter a handful.
+const TT_OUTLINE_BUDGET = 256;
+
 // Walk glyph `g`'s outline into `o` through a pen transformed by `pen` (ttf-parser's
-// `outline_impl`: composites recurse up to 32 deep).
+// `outline_impl`: composites recurse up to 32 deep), within `TT_OUTLINE_BUDGET`.
 fn tt_outline(self: const Font, g: integer, pen: TtPen, o: Outliner, depth: integer) {
-  if depth >= 32 { return; }
+  if depth >= 32 || o.walked >= TT_OUTLINE_BUDGET { return; }
+  o.walked += 1;
   range = self.tt_glyph_range(g);
   start = range[0];
   if range[1] <= start { return; }
