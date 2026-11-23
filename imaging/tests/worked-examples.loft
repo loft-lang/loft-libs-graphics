@@ -202,7 +202,7 @@ fn test_a_decode_has_a_pixel_budget() {
   assert(huge == null, "one pixel column past the default budget is null");
   icon = file("fixture-rgba.png").png();
   assert(icon != null, "an ordinary image is inside it");
-  pixels = icon.width * icon.height;
+  pixels = icon!.width * icon!.height;
   assert(file("fixture-rgba.png").png(pixels) != null, "a budget of exactly its size admits it");
   assert(file("fixture-rgba.png").png(pixels - 1) == null, "one pixel less refuses it");
   assert(file("fixture-rgba.png").png(0) == null, "and a budget of nothing admits nothing");
