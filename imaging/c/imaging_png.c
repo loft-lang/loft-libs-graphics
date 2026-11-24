@@ -21,7 +21,7 @@ typedef struct {
     unsigned width, height;
 } ip_result;
 
-int64_t ip_decode(const uint8_t *png, int64_t n);
+int64_t ip_decode(const uint8_t *png, int64_t n, int64_t max_pixels);
 int64_t ip_encode(const uint8_t *rgba, int64_t n, int32_t width, int32_t height, int32_t alpha);
 int64_t ip_width(int64_t h);
 int64_t ip_height(int64_t h);
@@ -46,12 +46,26 @@ static int64_t ip_handle(unsigned char *bytes, size_t size, unsigned w, unsigned
     return (int64_t) (intptr_t) r;
 }
 
+/* The header of a PNG states the image's size, and a few kilobytes of file can state billions
+ * of pixels. The size is read from the header first and held against `max_pixels` before
+ * anything is allocated for the pixels. */
+static int ip_within(const uint8_t *png, size_t n, int64_t max_pixels) {
+    LodePNGState state;
+    unsigned w = 0, h = 0, err;
+    lodepng_state_init(&state);
+    err = lodepng_inspect(&w, &h, &state, png, n);
+    lodepng_state_cleanup(&state);
+    if (err != 0 || w == 0 || h == 0 || max_pixels <= 0) return 0;
+    return (uint64_t) w * (uint64_t) h <= (uint64_t) max_pixels;
+}
+
 /* Any PNG colour type and depth, as 8-bit RGBA: palette and greyscale expanded, a tRNS colour
  * key made transparent, 16 bits taken to their high byte, a missing alpha opaque. */
-int64_t ip_decode(const uint8_t *png, int64_t n) {
+int64_t ip_decode(const uint8_t *png, int64_t n, int64_t max_pixels) {
     unsigned char *px = NULL;
     unsigned w = 0, h = 0;
     if (n <= 0) return 0;
+    if (!ip_within(png, (size_t) n, max_pixels)) return 0;
     if (lodepng_decode32(&px, &w, &h, png, (size_t) n) != 0 || px == NULL) {
         free(px);
         return 0;

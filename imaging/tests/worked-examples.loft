@@ -190,3 +190,20 @@ fn test_channels_do_not_clamp() {
   assert(under.r == 0, "a channel below the range takes the same default");
   assert(under.g == 128, "and only the offending channel is affected");
 }
+
+// @IMG-006 — a PNG states its own width and height, and a file of a few kilobytes can state
+// billions of pixels: `fixture-declares-8193x8192.png` is 8 KB and would decode to 256 MiB.
+// `png()` therefore reads the stated size first and answers null above a budget of pixels,
+// before any memory is taken for them.  The default is 67,108,864 — an 8192 x 8192 image —
+// and `png(max_pixels)` sets another: lower for a program that only expects icons, higher
+// for one that really loads larger images.
+fn test_a_decode_has_a_pixel_budget() {
+  huge = file("fixture-declares-8193x8192.png").png();
+  assert(huge == null, "one pixel column past the default budget is null");
+  icon = file("fixture-rgba.png").png();
+  assert(icon != null, "an ordinary image is inside it");
+  pixels = icon!.width * icon!.height;
+  assert(file("fixture-rgba.png").png(pixels) != null, "a budget of exactly its size admits it");
+  assert(file("fixture-rgba.png").png(pixels - 1) == null, "one pixel less refuses it");
+  assert(file("fixture-rgba.png").png(0) == null, "and a budget of nothing admits nothing");
+}

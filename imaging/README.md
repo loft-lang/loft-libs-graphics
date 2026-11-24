@@ -20,6 +20,9 @@ loft install imaging
   (`?? Image { }`, or an `if img == null` check).  Every PNG colour type loads
   (RGBA, greyscale, grey+alpha, palette, 16-bit) as 8-bit RGBA; **alpha is
   carried**, and a source without an alpha channel arrives opaque (`a == 255`).
+  A PNG states its own size, so the decode has a budget: a file that states more
+  than 67,108,864 pixels (8192 x 8192) answers `null` before any memory is taken
+  for it; `png(max_pixels)` sets another budget.
 - `img.save_png(path) -> boolean` — encode.  Writes RGB when every texel is
   opaque and RGBA otherwise.  `Image.name` is not used; the path argument
   decides where it lands.

@@ -2517,10 +2517,18 @@ fn tt_f2dot14(b: const vector<u8>, at: integer) -> single {
   (tt_i16(b, at) as single / 16384.0f) ?? 0.0f
 }
 
+// How many outlines one glyph may enter, its components and theirs included.  The nesting cap
+// alone does not bound the walk: a component may be named twice at every level, and thirty
+// levels of that name a billion outlines.  Real composites (an accented letter, a ligature)
+// enter a handful.
+const TT_OUTLINE_BUDGET = 256;
+
 // Walk glyph `g`'s outline into `o` through a pen transformed by `pen` (ttf-parser's
-// `outline_impl`: composites recurse up to 32 deep).
-fn tt_outline(self: const Font, g: integer, pen: TtPen, o: Outliner, depth: integer) {
-  if depth >= 32 { return; }
+// `outline_impl`: composites recurse up to 32 deep), within `TT_OUTLINE_BUDGET`: `walked` counts
+// the outlines this glyph has entered so far, its components included.
+fn tt_outline(self: const Font, g: integer, pen: TtPen, o: Outliner, depth: integer, walked: &integer) {
+  if depth >= 32 || walked >= TT_OUTLINE_BUDGET { return; }
+  walked += 1;
   range = self.tt_glyph_range(g);
   start = range[0];
   if range[1] <= start { return; }
@@ -2644,7 +2652,7 @@ fn tt_outline(self: const Font, g: integer, pen: TtPen, o: Outliner, depth: inte
         ly: 0.0f,
       };
       sub.plain = sub.ta == 1.0f && sub.tb == 0.0f && sub.tc == 0.0f && sub.td == 1.0f && sub.te == 0.0f && sub.tf == 0.0f;
-      self.tt_outline(comp, sub, o, depth + 1);
+      self.tt_outline(comp, sub, o, depth + 1, walked);
       more = (fl & 32) != 0;
     }
   }
@@ -2707,7 +2715,8 @@ fn raster_glyph(self: const Font, g: integer, size: float) -> Glyph {
     lx: 0.0f,
     ly: 0.0f,
   };
-  self.tt_outline(g, pen, o, 0);
+  walked = 0;
+  self.tt_outline(g, pen, o, 0, walked);
   scale = (size as single / self.units_per_em as single) ?? 0.0f;
   advance = scale * self.advance_of(g) as single;
   if len(o.v) == 0 && len(o.m) == 0 {

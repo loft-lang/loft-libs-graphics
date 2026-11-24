@@ -67,8 +67,8 @@ pub struct Image {
 // The C part (c/imaging_png.c over the vendored lodepng): PNG bytes to RGBA and back, memory to
 // memory.  A decode or an encode answers a handle (0 on failure); its size is asked, its bytes
 // copied into a vector sized for them, and the handle freed.
-fn ip_decode(png: const vector<u8>) -> i64;
-#c "ip_decode" "int64_t(const uint8_t*, int64_t)"
+fn ip_decode(png: const vector<u8>, max_pixels: integer) -> i64;
+#c "ip_decode" "int64_t(const uint8_t*, int64_t, int64_t)"
 fn ip_encode(rgba: const vector<u8>, width: integer, height: integer, alpha: integer) -> i64;
 #c "ip_encode" "int64_t(const uint8_t*, int64_t, int32_t, int32_t, int32_t)"
 fn ip_width(h: i64) -> integer;
@@ -90,11 +90,12 @@ fn ip_take(h: i64) -> vector<u8> {
   out
 }
 
-// Decode the PNG file `path` into `image`: false when it cannot be read or decoded.
-fn load_png(path: text, image: Image) -> boolean {
+// Decode the PNG file `path` into `image`: false when it cannot be read or decoded, or
+// states more than `max_pixels` pixels.
+fn load_png(path: text, image: Image, max_pixels: integer) -> boolean {
   bytes = read_bytes(path) ?? [];
   if len(bytes) == 0 { return false; }
-  h = ip_decode(bytes);
+  h = ip_decode(bytes, max_pixels);
   if h == 0 { return false; }
   w = ip_width(h);
   ht = ip_height(h);
@@ -143,7 +144,8 @@ pub fn save_png(self: const Image, path: text) -> boolean {
 // check buys past it.
 // Example: @IMG-002 — every colour type arrives as RGBA, and a source without an
 // alpha channel is opaque rather than invisible.
-pub fn png(self: File) -> Image? {
+// Example: @IMG-006 — a file states its own size, so the decode has a budget.
+pub fn png(self: File, max_pixels: integer = 67108864) -> Image? {
   // Early returns, not a nested `if … { result } else { null }`: on a `-> Image?`
   // function that nesting hands back the half-built `result` instead of null in
   // loft releases before the fix, so an undecodable file read as an empty image.
@@ -151,7 +153,7 @@ pub fn png(self: File) -> Image? {
     return null;
   }
   result = Image { };
-  if !load_png(self.path, result) {
+  if !load_png(self.path, result, max_pixels) {
     return null;
   }
   result
