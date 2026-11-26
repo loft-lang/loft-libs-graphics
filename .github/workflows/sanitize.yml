@@ -83,6 +83,19 @@ jobs:
           gpu_vulkan/c/checked.sh on
           asan/run.sh gpu gpu_gl gpu_vulkan
 
+      # The X11 key handlers against an input method that commits text longer than any buffer
+      # (Xlib's documented XBufferOverflow answer): no X server can produce that text here, so
+      # each handler runs against its stub.  Each prints "ok"; a read past the buffer is an
+      # ASan report.
+      - name: The X11 key text checks under AddressSanitizer
+        run: |
+          cc -std=gnu99 -g -fsanitize=address,undefined -I"$PWD/loft-src/src/c" \
+            gpu_gl/tests/x11_key_text.c -o "$RUNNER_TEMP/gl_x11_key_text"
+          (cd gpu_gl && "$RUNNER_TEMP/gl_x11_key_text")
+          cc -std=gnu99 -g -fsanitize=address,undefined gpu_vulkan/tests/x11_key_text.c \
+            -o "$RUNNER_TEMP/vk_x11_key_text"
+          (cd gpu_vulkan && "$RUNNER_TEMP/vk_x11_key_text")
+
       - name: The X server's log, when the run failed
         if: failure()
         run: cat "$RUNNER_TEMP/xvfb.log" || true
